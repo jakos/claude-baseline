@@ -1,0 +1,29 @@
+{
+  "name": "claude-baseline",
+  "description": "Personal baseline of Claude Code skills, agents and guardrails — Python backend work, testing, review and release discipline",
+  "owner": {
+    "name": "Jakub Kostrzewa",
+    "email": "jakos@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "dev-baseline",
+      "source": "./plugins/dev-baseline",
+      "description": "Everyday engineering skills: Python service structure, pytest suites, systematic debugging, commits and PRs, plus a read-only code reviewer and an auto-formatter hook",
+      "version": "0.1.0",
+      "author": {
+        "name": "Jakub Kostrzewa"
+      },
+      "license": "MIT",
+      "keywords": [
+        "python",
+        "fastapi",
+        "pytest",
+        "testcontainers",
+        "code-review",
+        "ddd"
+      ],
+      "category": "development"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "dev-baseline",
+  "description": "Everyday engineering skills: Python service structure, pytest suites, systematic debugging, commits and PRs, plus a read-only code reviewer and an auto-formatter hook",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jakub Kostrzewa",
+    "email": "jakos@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json"
+}
