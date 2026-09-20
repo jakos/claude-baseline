@@ -68,8 +68,12 @@ log and is never read, and exit 2 is not honoured for this event because the too
 already run. A hook that prints its findings has no effect at all; this is easy to get
 wrong and invisible when you do.
 
-Requires `ruff` on `PATH` to do anything (`uv tool install ruff`), and `jq` is used when
-present. Without them the hook exits silently rather than complaining on every edit.
+Requires `ruff` to do anything (`uv tool install ruff`), and `jq` is used when present.
+Without them the hook exits silently rather than complaining on every edit.
+
+When the project has a `uv.lock` that pins ruff, the hook uses *that* ruff via `uv run`
+rather than the one on `PATH`. Formatting rules change between ruff releases, so a global
+0.13 reformatting a project pinned to 0.6 produces diff churn in files you never touched.
 
 ### Template
 
@@ -125,6 +129,17 @@ These sit at different layers and compose rather than compete:
   autonomous verify-loops. Read it; skip the shell scripts, since Claude Code's `/loop`
   and `/goal` already implement the harness. Its real lesson is the precondition: a loop
   is only safe where a machine, not a model, decides whether the work passed.
+
+## Working on this repo
+
+`.claude/settings.json` registers this checkout as a local marketplace, so the plugin
+loads **in place from the working tree** rather than from a cached clone of GitHub. Edits
+to a `SKILL.md` take effect at the next session start or `/reload-plugins`, with no
+version bump and no push. It also disables `dev-baseline@claude-baseline` here, so you
+are never running the pushed copy and the local one at once.
+
+That is the whole reason not to use `--plugin-dir` for this: it needs no flags, so it
+works identically in the terminal, in VS Code and in the desktop app.
 
 ## Layout
 

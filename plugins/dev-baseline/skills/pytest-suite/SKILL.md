@@ -118,6 +118,11 @@ addopts = "-m 'not integration'"
 Default to the fast suite; run the full one in CI and before pushing. A suite developers
 avoid running is a suite that stops catching things.
 
+Run it through `uv run pytest`, not a bare `pytest`. A bare `pytest` is whichever one is
+on `PATH` — possibly from another project's environment, possibly a different version
+from the one the lockfile pins. That is a real source of "passes for me, fails for you",
+and it costs nothing to rule out.
+
 ## What makes a test worth having
 
 Test behaviour, not implementation. A test that breaks when you rename a private method,

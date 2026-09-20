@@ -46,11 +46,24 @@ emit() {
   exit 0
 }
 
-# Always format first, so the linters see the final shape.
-if command -v ruff >/dev/null 2>&1; then
-  ruff format "$FILE" >/dev/null 2>&1
-  ruff check --fix "$FILE" >/dev/null 2>&1
+# Resolve ruff. A project that pins a ruff version in its lockfile must be formatted by
+# THAT ruff: formatting rules change between releases, so a globally installed 0.13
+# reformatting a project pinned to 0.6 produces diff churn nobody asked for, in files the
+# author did not touch. Prefer the project's own, fall back to whatever is on PATH.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+RUFF=""
+if [ -f "$PROJECT_DIR/uv.lock" ] && command -v uv >/dev/null 2>&1 \
+   && grep -q '^name = "ruff"' "$PROJECT_DIR/uv.lock" 2>/dev/null; then
+  RUFF="uv run --quiet --project $PROJECT_DIR ruff"
+elif command -v ruff >/dev/null 2>&1; then
+  RUFF="ruff"
 fi
+
+[ -n "$RUFF" ] || exit 0
+
+# Always format first, so the linters see the final shape.
+$RUFF format "$FILE" >/dev/null 2>&1
+$RUFF check --fix "$FILE" >/dev/null 2>&1
 
 # Preferred: habit-hooks, when the project has opted in with a .habit-hooks/config.toml.
 if command -v habit-sensors >/dev/null 2>&1 && command -v habit-mapper >/dev/null 2>&1 \
@@ -62,8 +75,7 @@ if command -v habit-sensors >/dev/null 2>&1 && command -v habit-mapper >/dev/nul
 fi
 
 # Fallback: whatever ruff could not fix on its own.
-command -v ruff >/dev/null 2>&1 || exit 0
-REMAINING=$(ruff check "$FILE" 2>&1)
+REMAINING=$($RUFF check "$FILE" 2>&1)
 if [ -n "$REMAINING" ] && ! printf '%s' "$REMAINING" | grep -q "All checks passed"; then
   emit "$(printf 'ruff findings in %s:\n%s' "$FILE" "$REMAINING")"
 fi

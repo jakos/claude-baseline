@@ -75,6 +75,21 @@ Anything crossing a service boundary needs, explicitly:
 - **A failure mode you chose.** Degrade, queue, or fail fast — but say which, in a
   comment, not by accident.
 
+## Environment and dependencies
+
+`uv` for everything: `uv sync` to install, `uv add` to declare a dependency, `uv run` to
+execute anything that must be reproducible. **Commit `uv.lock`.** A service whose
+dependency versions are decided at install time has no reproducible build, and the
+failure shows up as "works on my machine" months later.
+
+`uv run` rather than activating a virtualenv: it resolves the project's environment every
+time, so a command cannot silently run against the wrong interpreter. There is no
+`pip install` in a project that has a lockfile.
+
+Pin the Python version in `pyproject.toml` (`requires-python`) and in `.python-version`.
+Two files because they answer different questions — what the package supports, and what
+this checkout uses.
+
 ## Configuration
 
 Settings come from the environment through one typed settings object, read once at

@@ -13,8 +13,24 @@ must never be done to it, and how to check whether a change is correct.
 Before writing any instructions, answer: **what command proves a change is good?**
 
 ```bash
-pytest -q && ruff check . && mypy src/
+just check
 ```
+
+Behind one recipe, so the name never changes even when the commands do:
+
+```just
+check:
+    uv run ruff format --check .
+    uv run ruff check .
+    uv run mypy src/
+    uv run pytest -q
+```
+
+Two properties matter more than the specific tools. **`uv run` means the gate uses the
+locked versions**, so it produces the same verdict on your laptop, on a colleague's, and
+in CI — a gate that passes locally and fails in CI is not a gate. **One memorable name**
+means the agent, the README, the pre-push hook and the CI job all invoke the same thing,
+and adding a step later does not invalidate every place it is written down.
 
 This matters more than any prose. A gate is a machine deciding whether work passed, and
 it is what makes unattended `/goal` and `/loop` runs safe rather than a way to accumulate
@@ -76,7 +92,11 @@ history" is followed. "Be careful with identifiers" is not.
   },
   "enabledPlugins": { "dev-baseline@claude-baseline": true },
   "permissions": {
-    "allow": ["Bash(pytest:*)", "Bash(ruff:*)", "Bash(git diff:*)", "Bash(git status)"],
+    "allow": [
+      "Bash(just:*)", "Bash(uv run:*)", "Bash(uv sync)",
+      "Bash(pytest:*)", "Bash(ruff:*)",
+      "Bash(git diff:*)", "Bash(git status)"
+    ],
     "ask": ["Bash(git push:*)"],
     "deny": ["Read(./.env)", "Read(./secrets.yaml)"]
   }
@@ -84,7 +104,12 @@ history" is followed. "Be careful with identifiers" is not.
 ```
 
 Pre-approving the gate commands matters: an agent that must ask permission to run the
-tests will run them less often.
+tests will run them less often. `Bash(uv run:*)` is the one that pays for itself, since
+every gate command goes through it.
+
+Note that `uv sync` is listed exactly, not as `uv:*`. A blanket `uv:*` would also
+pre-approve `uv tool install`, `uv add` and `uv pip install`, which mutate the
+environment or the lockfile — those deserve a prompt.
 
 Personal overrides belong in `.claude/settings.local.json`, which is gitignored.
 
