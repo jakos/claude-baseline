@@ -25,6 +25,9 @@ every session on this machine, including repos that have no `.claude/` directory
 Project-scoped install (committed to a repo so teammates get it) instead uses
 `--scope project`, which writes to that repo's `.claude/settings.json`.
 
+New to this? **[GETTING-STARTED.md](GETTING-STARTED.md)** walks through setting up a fresh
+repo with it, end to end.
+
 ## What's in it
 
 ### Skills
@@ -159,6 +162,17 @@ claude plugin marketplace add jakos/claude-baseline
 Do not try to express this in a project's `.claude/settings.json`. An
 `extraKnownMarketplaces` entry there looks project-scoped and is not; it rewrites the same
 global file, under the name the marketplace declares rather than the key you gave it.
+
+## Reviewing this repo itself
+
+`@baseline-reviewer` — a project-scoped agent in `.claude/agents/`, so it exists only here
+and is not part of the published plugin. The shipped `code-reviewer` reads Python diffs
+and so can never review its own repo, which is prose, JSON and one shell script.
+
+It reviews for the failure mode this repository actually has: things that load but do
+nothing. A hook whose output goes to a debug log, a `hooks.json` the loader rejects whole,
+a description that will not trigger, a rubric that tests what every model already does.
+Its question is not "is this correct" but "if this were broken, what would tell me".
 
 ## Layout
 
