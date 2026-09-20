@@ -12,6 +12,20 @@ it, never naming the skill) and a `graders/` directory:
 - `skill-fired.md` — `tool_used` on the `Skill` tool. Free, deterministic.
 - `criteria.md` — an `llm` rubric on the answer, written as concrete PASS/FAIL conditions.
 
+**Write rubrics against the contested claim, not the consensus one.** The first full run
+of this suite returned Δ = 0 on every case: the model scored identically with the plugin
+and without it. The plugin was genuinely absent from the baseline arm — those runs carry
+no `skill-fired` grader and finished in one turn rather than three — so the ablation was
+working. The rubrics were the problem. They asked for things a strong model already does
+unprompted: mention a timeout, use Testcontainers, do not paper over a flaky test.
+
+A rubric that asks for the obvious cannot measure anything above the obvious. Each one now
+tests the specific, arguable position its skill takes — retrying a charge is a correctness
+bug rather than a resilience feature, the schema under test must come from real
+migrations, hypotheses are written down before any is tested and then eliminated rather
+than confirmed. If Δ stays at zero against rubrics like these, that is a real answer about
+the skill, and the response is to cut it rather than to soften the rubric.
+
 Run from the plugin root:
 
 ```bash

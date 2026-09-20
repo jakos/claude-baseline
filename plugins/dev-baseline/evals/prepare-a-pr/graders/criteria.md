@@ -2,9 +2,18 @@
 type: llm
 ---
 
-PASS if the answer both (a) tells the user to reorganise the commits so that the refactor
-is separate from the behaviour change, and (b) says the PR description should explain why
-the change exists, not merely restate what changed.
+This rubric tests what `commit-and-pr` argues. "Tidy the commits, explain why" is
+consensus and is no longer sufficient.
 
-FAIL if it accepts the 11 commits as they are, or if its PR-description advice is only a
-summary of the diff.
+PASS only if BOTH hold:
+
+1. It requires **every commit in the rewritten branch to leave the test suite passing**,
+   or gives bisectability as the reason for slicing them that way. Separating the refactor
+   from the behaviour change counts only when the reason given is reviewability or
+   bisection, not tidiness alone.
+2. It requires the PR description to say **what alternative approach was considered and
+   rejected**, not merely why the change exists.
+
+FAIL if commit slicing is justified only as "cleaner history"; if the PR body advice stops
+at problem plus solution with no rejected alternative; or if the 11 commits are left as
+they are.

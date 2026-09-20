@@ -2,10 +2,16 @@
 type: llm
 ---
 
-PASS if the answer separates fast tests that avoid I/O from tests that run against a real
-database, AND recommends a real Postgres (Testcontainers, Docker, or equivalent) rather
-than mocking the database driver.
+This rubric tests what `pytest-suite` argues. "Use Testcontainers, separate unit from
+integration" is consensus and is no longer sufficient.
 
-FAIL if it recommends mocking the database or the ORM for the database-level tests, if it
-treats one undifferentiated `tests/` directory as the answer, or if it never distinguishes
-the two kinds of test at all.
+PASS only if BOTH hold:
+
+1. The container is started **once for the suite or module**, with state reset between
+   tests by transaction rollback or truncation — not a fresh container per test.
+2. The schema under test comes from **the project's real migrations**, not
+   `metadata.create_all` or an equivalent auto-generated schema, or the answer explicitly
+   argues why migrations must be exercised.
+
+FAIL if it starts a container per test, if it builds the schema with `create_all`, or if
+it never says where the schema comes from at all.
