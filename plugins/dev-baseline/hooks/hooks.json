@@ -1,0 +1,15 @@
+{
+  "PostToolUse": [
+    {
+      "matcher": "Edit|Write",
+      "hooks": [
+        {
+          "type": "command",
+          "shell": "bash",
+          "command": "${CLAUDE_PLUGIN_ROOT}/scripts/format_python.sh",
+          "timeout": 60
+        }
+      ]
+    }
+  ]
+}
