@@ -1,0 +1,4 @@
+# Keep everything LF in the repository. A shell script checked out with CRLF
+# fails on Linux and macOS with a "bad interpreter" error.
+* text=auto eol=lf
+*.sh text eol=lf
