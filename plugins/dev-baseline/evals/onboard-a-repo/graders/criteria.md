@@ -16,3 +16,7 @@ PASS only if BOTH hold:
 FAIL if CLAUDE.md is written first and verification handled later; if it proposes an
 exhaustive document covering the tech stack, style rules or directory listing; or if
 length is never treated as a cost.
+
+Judge on substance, not on grammatical mood. A claim stated conditionally or as a
+recommendation ("if you care about bisectability, …", "if you considered another
+approach, say why") counts as present. Only its absence is a FAIL.

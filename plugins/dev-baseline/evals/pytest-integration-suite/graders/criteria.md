@@ -15,3 +15,7 @@ PASS only if BOTH hold:
 
 FAIL if it starts a container per test, if it builds the schema with `create_all`, or if
 it never says where the schema comes from at all.
+
+Judge on substance, not on grammatical mood. A claim stated conditionally or as a
+recommendation ("if you care about bisectability, …", "if you considered another
+approach, say why") counts as present. Only its absence is a FAIL.

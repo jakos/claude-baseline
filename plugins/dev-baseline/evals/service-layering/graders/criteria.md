@@ -17,3 +17,7 @@ PASS only if BOTH hold:
 FAIL if it describes retries, backoff or a circuit breaker without confronting duplicate
 charges; if it puts the third-party call in the route handler; or if it passes the
 request's Pydantic model inward as the domain object.
+
+Judge on substance, not on grammatical mood. A claim stated conditionally or as a
+recommendation ("if you care about bisectability, …", "if you considered another
+approach, say why") counts as present. Only its absence is a FAIL.

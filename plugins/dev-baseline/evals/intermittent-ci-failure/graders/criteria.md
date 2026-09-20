@@ -16,3 +16,7 @@ PASS only if BOTH hold:
 FAIL if it proposes one likely cause and goes to verify it; if the investigation is a
 checklist of things to inspect with no elimination logic; or if it recommends a retry,
 rerun plugin, longer sleep, or skip mark as the fix.
+
+Judge on substance, not on grammatical mood. A claim stated conditionally or as a
+recommendation ("if you care about bisectability, …", "if you considered another
+approach, say why") counts as present. Only its absence is a FAIL.

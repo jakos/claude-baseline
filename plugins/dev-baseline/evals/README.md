@@ -29,11 +29,18 @@ the skill, and the response is to cut it rather than to soften the rubric.
 Run from the plugin root:
 
 ```bash
-claude plugin eval .                    # both arms: with the plugin, and without
-claude plugin eval . --ablation none    # with-arm only; half the cost, for iterating
+claude plugin eval . --judge-model sonnet              # both arms, with a delta
+claude plugin eval . --ablation none --judge-model sonnet   # with-arm only, for iterating
 claude plugin eval . --case service-layering
 claude plugin eval . --tag negative
 ```
+
+**Always pass `--judge-model sonnet`.** These rubrics test whether a specific claim is
+present, and the default judge is a small fast model that reads grammatical mood as
+substance: it failed an answer saying *"confirm each commit still passes tests if you care
+about bisectability"* against a rubric asking that the answer *require* it. The claim was
+there, phrased conditionally. Sonnet passes the same answer. `--case` is not repeatable —
+only the last one applies — so filter several cases with a glob such as `'*-a-*'`.
 
 Every case runs in an empty working directory with read-only tools, so the prompts are
 self-contained and nothing here touches a real repo.

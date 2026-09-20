@@ -5,4 +5,4 @@ max_turns: 8
 allowed_tools: [Skill]
 ---
 
-I've finished a feature branch. It's 11 commits, some of them are just me moving files around, one of them is the actual bug fix, and a couple are "wip". I want to get this into a state where someone will actually review it. What should I do, and what goes in the PR description?
+My feature branch has 11 commits: several are just me moving files around, one is the actual bug fix, and a couple say "wip". How should I reorganise that before asking anyone to review it, and what should the PR description contain? Walk me through the approach — I'll run the git commands myself.

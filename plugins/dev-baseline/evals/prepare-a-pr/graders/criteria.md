@@ -17,3 +17,7 @@ PASS only if BOTH hold:
 FAIL if commit slicing is justified only as "cleaner history"; if the PR body advice stops
 at problem plus solution with no rejected alternative; or if the 11 commits are left as
 they are.
+
+Judge on substance, not on grammatical mood. A claim stated conditionally or as a
+recommendation ("if you care about bisectability, …", "if you considered another
+approach, say why") counts as present. Only its absence is a FAIL.
