@@ -2,7 +2,7 @@
 name: code-reviewer
 description: Read-only reviewer for a Python diff — correctness, error handling, concurrency, resource leaks, test coverage of the change. Use before committing or opening a PR. Reports findings; never edits.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: green
 skills:
   - python-service

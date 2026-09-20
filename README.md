@@ -46,6 +46,14 @@ the change. Reports findings; never edits.
 It is a separate agent on purpose: the model that wrote the code is the worst reviewer of
 it, because it will confirm the assumptions it just made.
 
+It runs on Sonnet rather than inheriting the session's model. Review is the most
+token-expensive operation here — it reads every touched file in full — and inheriting
+meant an Opus session reviewed at Opus prices. Change `model:` in the agent file if you
+want it deeper or cheaper.
+
+Note for anyone installing this: updates only reach you when `version` in `plugin.json`
+is bumped, so a push alone changes nothing on your machine.
+
 ### Hook
 
 `PostToolUse` on every Python file written: `ruff format`, `ruff check --fix`, then
