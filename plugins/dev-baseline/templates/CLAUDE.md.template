@@ -1,0 +1,45 @@
+# <project name>
+
+<One paragraph: what this is, who uses it, what it talks to.>
+
+## Constraints that are not obvious from the code
+
+<The highest-value section. Facts a newcomer gets wrong: a limit you cannot design
+around, a third-party API's quirks, why the strange thing is strange, what a previous
+attempt broke on. This is what cannot be inferred by reading the source. Delete this
+heading only if there genuinely is nothing.>
+
+## Non-negotiables
+
+1. <Short, absolute, with the reason. "Never rename X — it is the stable identifier
+   every consumer joins on, and renaming it corrupts their history.">
+2. <Things that cause real damage: data loss, production writes, irreversible
+   migrations, breaking a published contract.>
+
+## Commands
+
+```bash
+<the gate — the command that proves a change is correct>
+<lint / format>
+<anything else run routinely>
+```
+
+<State that the gates must pass before any commit.>
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `<dir>/` | <one line> |
+
+<Only if the structure is non-obvious. Delete otherwise.>
+
+## Conventions
+
+- <Only where this project differs from the obvious default.>
+- <Do not restate what a linter enforces.>
+
+## Tooling
+
+<Which plugins this project expects, and which agents to run when. For example:
+run @code-reviewer before committing.>
