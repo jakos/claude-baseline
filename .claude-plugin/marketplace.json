@@ -10,7 +10,7 @@
       "name": "dev-baseline",
       "source": "./plugins/dev-baseline",
       "description": "Everyday engineering skills: Python service structure, pytest suites, systematic debugging, commits and PRs, plus a read-only code reviewer and an auto-formatter hook",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Jakub Kostrzewa"
       },
