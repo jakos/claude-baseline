@@ -4,5 +4,9 @@
   "files.trimTrailingWhitespace": true,
   "[shellscript]": {
     "files.eol": "\n"
-  }
+  },
+  "terminal.integrated.env.windows": {
+    "TERM_PROGRAM": "vscode"
+  },
+  "terminal.integrated.gpuAcceleration": "off"
 }

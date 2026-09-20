@@ -132,14 +132,33 @@ These sit at different layers and compose rather than compete:
 
 ## Working on this repo
 
-`.claude/settings.json` registers this checkout as a local marketplace, so the plugin
-loads **in place from the working tree** rather than from a cached clone of GitHub. Edits
-to a `SKILL.md` take effect at the next session start or `/reload-plugins`, with no
-version bump and no push. It also disables `dev-baseline@claude-baseline` here, so you
-are never running the pushed copy and the local one at once.
+Register this checkout as the marketplace, once, and the plugin loads **in place from
+the working tree** instead of a cached clone of GitHub:
 
-That is the whole reason not to use `--plugin-dir` for this: it needs no flags, so it
-works identically in the terminal, in VS Code and in the desktop app.
+```bash
+claude plugin marketplace add .
+```
+
+Edits to a `SKILL.md` then take effect at the next session start or `/reload-plugins`,
+with no version bump and no push. It needs no launch flags, so it behaves the same in the
+terminal, in VS Code and in the desktop app.
+
+**This is global, not per-project.** Marketplaces live in one user-wide file,
+`~/.claude/plugins/known_marketplaces.json`, and a marketplace is keyed by the `name` in
+`marketplace.json` — so the directory source *replaces* the GitHub one everywhere, rather
+than sitting beside it under another name. Every project then runs your working tree,
+uncommitted edits included. That is usually what you want from a personal baseline, and it
+is a bad surprise if you expected the pushed version.
+
+To go back to the published copy:
+
+```bash
+claude plugin marketplace add jakos/claude-baseline
+```
+
+Do not try to express this in a project's `.claude/settings.json`. An
+`extraKnownMarketplaces` entry there looks project-scoped and is not; it rewrites the same
+global file, under the name the marketplace declares rather than the key you gave it.
 
 ## Layout
 
