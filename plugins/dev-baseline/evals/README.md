@@ -24,6 +24,14 @@ claude plugin eval . --tag negative
 Every case runs in an empty working directory with read-only tools, so the prompts are
 self-contained and nothing here touches a real repo.
 
+**Write prompts that do not invite the model to look around.** A prompt implying there is
+code to inspect ("I've inherited an existing repo…") sends it hunting through an empty
+directory; it then opens its answer by asking where the code is, and the judge reads that
+as a refusal and fails a case whose advice was actually correct. Either state the
+situation without implying an inspectable checkout, or give the case a
+`context.scaffold_script` that builds one. The first failing run of this suite was exactly
+this mistake, not a skill defect.
+
 Reading the result: `Δ` is the with-plugin score minus the no-plugin score, and it is the
 number that matters — it is what the plugin *adds*. A case where the model already answers
 well without the skill has a near-zero `Δ` and is telling you that skill is not earning its

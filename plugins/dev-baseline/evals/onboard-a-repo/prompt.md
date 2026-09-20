@@ -5,4 +5,4 @@ max_turns: 8
 allowed_tools: [Skill]
 ---
 
-I've inherited an existing Python repo. There's no CLAUDE.md and no agent configuration of any kind. I want to set it up so that working on it with Claude is actually reliable. Where do I start?
+I'm taking over an existing Python service next week — FastAPI, a decent test suite, no CLAUDE.md and no agent configuration of any kind. I don't have the code in front of me yet. What's the order of work to make it reliable to work on with Claude, and what matters most?
