@@ -1,12 +1,79 @@
 ---
 name: project-bootstrap
-description: Set up a new repository for effective agent-assisted work — write its CLAUDE.md, wire the baseline plugins, choose the verification gates. Use when starting a new project, onboarding an existing repo to Claude Code, or when an existing CLAUDE.md has stopped being useful.
+description: Set up a new repository for effective agent-assisted work — write its CLAUDE.md, wire the baseline plugins, choose the verification gates. Use when starting a new project from an empty directory, onboarding an existing repo to Claude Code, or when an existing CLAUDE.md has stopped being useful.
 ---
 
 # Bootstrapping a repo for agent work
 
 The goal is that a fresh session knows, without being told: what this project is, what
 must never be done to it, and how to check whether a change is correct.
+
+## 0. Which situation is this?
+
+- **There is code** — onboarding an existing repo, or a CLAUDE.md that stopped helping.
+  Start at step 1: the answers are in the repository, so read it.
+- **There is nothing yet** — an empty directory, or only a README. Start at *Fresh
+  project* below. There is no code to read the constraints out of, so they have to come
+  from the person, and the gate has to be built rather than found. Then continue at step 3.
+
+## Fresh project
+
+### Ask before building anything
+
+Scaffolding first and asking later produces a generic repo and a CLAUDE.md made of
+guesses that every later session will treat as fact. Ask these in **one message**, then
+stop and wait. Only questions whose answers change what gets built:
+
+| # | Question | What it decides |
+| --- | --- | --- |
+| 1 | What is it, and who uses it? | CLAUDE.md's first paragraph |
+| 2 | What does it talk to — APIs, databases, files, devices, other services? | Dependencies, test setup, the constraints section |
+| 3 | What must never happen? Data lost, a production write, a secret leaked, money moved? | Non-negotiables |
+| 4 | Is it a service, a CLI or library, or a set of scripts? | Package or `package = false`; whether the `python-service` kit applies |
+| 5 | Is anything already decided — language version, libraries, where it runs? | What not to choose for them |
+
+**Every question accepts "I don't know — research it."** Say so in the message, and when
+an `AskUserQuestion` tool is available, make it an explicit option on each question. People
+starting something new often do not know the rate limit of the API they are about to use,
+or which of three libraries fits; making them guess is worse than looking it up.
+
+What "research it" means depends on whose question it is:
+
+- **Facts about the world** (2, 5, and the technical half of 4): look them up — the
+  external system's docs for limits, auth, quotas and known quirks; candidate libraries'
+  maintenance and fit. Come back with a **recommendation, its reason and its sources**,
+  and get a yes before it is built or written down. Defaults that `python-tooling` already
+  settles — uv, ruff, prek, the newest stable Python — need no research, only a mention.
+- **Things only the person knows** (1, 3): no search answers these. Propose a reading from
+  what they have said so far, and if they still do not know, write it down marked
+  **Assumed:** so a later session knows it was never confirmed.
+
+A researched answer goes into CLAUDE.md as a decision with its reason — "httpx over
+requests: async needed for the NAS API, 2026-10" — because the reason is what stops a
+later session re-opening it.
+
+### Build the gate before the code
+
+The gate comes first here too; it just has to be built instead of found:
+
+1. `git init`, `.gitignore`, `.gitattributes`.
+2. The Python setup from `python-tooling` — project or scripts, pyproject, lockfile, ruff,
+   pytest and prek as dev dependencies, the `just check` recipe. Follow that skill rather
+   than re-deriving it here.
+3. **One trivial test** that imports the package, or runs the script with `--help`. It is
+   there so the gate is proven to run end to end, not to test anything; the first real
+   test replaces it.
+4. `just check` passes, and `prek run --all-files` passes, **before** the first line of
+   real code. A gate that has never once passed is not a gate yet.
+
+### Then CLAUDE.md, from the answers
+
+Use the sections in step 2. Fill them from the interview and the research, not from
+imagination: a constraints section with one real line beats five plausible ones. It grows
+the first time the same correction has to be made twice.
+
+Continue at step 3 for settings, then commit once the gate passes — the bootstrap is the
+first commit, so every later commit starts from a green gate.
 
 ## 1. Find the gates first
 
@@ -86,11 +153,6 @@ history" is followed. "Be careful with identifiers" is not.
 ```json
 {
   "attribution": { "commit": "", "pr": "", "sessionUrl": false },
-  "extraKnownMarketplaces": {
-    "claude-baseline": {
-      "source": { "source": "github", "repo": "jakos/claude-baseline" }
-    }
-  },
   "enabledPlugins": { "dev-baseline@claude-baseline": true },
   "permissions": {
     "allow": [
@@ -115,6 +177,13 @@ environment or the lockfile — those deserve a prompt.
 Domain kits go in the same `enabledPlugins` map — a Python service also enables
 `python-service@claude-python-service`. Only enable a kit where its domain applies; every
 enabled skill's description costs context in every session.
+
+Leave `extraKnownMarketplaces` out of project settings. It looks project-scoped and is
+not: it rewrites the user-wide marketplace list, under the name the marketplace declares.
+Each machine adds the marketplace once, at user scope.
+
+`attribution` takes empty strings, not `false`: Claude Code 2.1.291 rejects `false` and
+then ignores the whole settings file.
 
 Personal overrides belong in `.claude/settings.local.json`, which is gitignored.
 
