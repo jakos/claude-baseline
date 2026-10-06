@@ -1,7 +1,7 @@
 # Eval suite
 
 Every case here checks the same two things: **did the right skill fire**, and **was the
-answer the one that skill is supposed to produce**. Four positive cases, one per skill, and
+answer the one that skill is supposed to produce**. Five positive cases — one per skill, plus a second for project-bootstrap's fresh-project path, and
 two negative cases that must not fire anything — because a description that triggers too
 eagerly costs context in every session, which is the criticism this repo's README makes of
 large skill collections.
