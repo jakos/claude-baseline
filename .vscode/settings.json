@@ -6,7 +6,14 @@
     "files.eol": "\n"
   },
   "terminal.integrated.env.windows": {
-    "TERM_PROGRAM": "vscode"
+    "TERM_PROGRAM": "vscode",
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
   },
-  "terminal.integrated.gpuAcceleration": "off"
+  "terminal.integrated.gpuAcceleration": "off",
+  "terminal.integrated.env.osx": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
+  },
+  "terminal.integrated.env.linux": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
+  }
 }

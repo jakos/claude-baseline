@@ -56,8 +56,8 @@ the rubric test the skill's contested claim, or something any model does anyway 
 latter can only ever produce Δ = 0.
 
 **Manifests.** Is `version` bumped when behaviour changed? Nothing on this machine needs
-it, because the marketplace is a directory source, so a forgotten bump is invisible here
-and stale everywhere else.
+it, because sessions here load the working tree through `CLAUDE_CODE_PLUGIN_DIRS`, so a
+forgotten bump is invisible here and stale everywhere else.
 
 **Cross-platform.** LF endings, the executable bit, and no assumption that Git Bash,
 `jq` or `ruff` is present.
