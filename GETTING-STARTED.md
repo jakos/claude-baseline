@@ -24,11 +24,11 @@ Two prompts, not one. Check it landed:
 claude plugin details dev-baseline
 ```
 
-You want `Skills (5)`, `Agents (1)`, `Hooks (1)`. If `claude plugin list` says **failed to
+You want `Skills (4)`, `Agents (1)`, `Hooks (2)`. If `claude plugin list` says **failed to
 load**, read the error — that is the only place a broken plugin announces itself.
 
-> On Jakub's machine the marketplace is a *directory* source pointing at the checkout, so
-> the working tree is what loads, everywhere. See the README.
+> Working on the plugin itself? Sessions started inside this repo can load the working tree
+> on top of the released copy — see "Working on this repo" in the README.
 
 ## 1. In the new repo: find the gate before writing anything
 
@@ -76,6 +76,7 @@ identifiers"* does not.
 
 ```json
 {
+  "attribution": { "commit": "", "pr": "", "sessionUrl": false },
   "permissions": {
     "allow": ["Bash(just:*)", "Bash(uv run:*)", "Bash(uv sync)", "Bash(git diff:*)", "Bash(git status)"],
     "ask": ["Bash(git push:*)"],
@@ -100,10 +101,13 @@ Nothing below needs invoking. The skills fire on their own:
 
 | When you're doing this | What loads |
 | --- | --- |
-| Adding an endpoint, deciding where logic belongs | `python-service` |
-| Writing tests, or a suite is slow or flaky | `pytest-suite` |
+| Adding Python, a pyproject, ruff or git hooks | `python-tooling` |
 | Something broken, intermittent, or a fix didn't hold | `debug-systematically` |
 | Committing, slicing work, opening a PR | `commit-and-pr` |
+
+If the repo is a Python *service*, also install the `python-service` kit from
+`claude-python-service` — it adds layering and test-suite skills that do not belong in
+every repo.
 
 Every Python file written is formatted by `ruff` automatically, and whatever ruff can't fix
 comes back as a note. You do nothing.

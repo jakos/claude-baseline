@@ -4,7 +4,15 @@ Personal baseline of Claude Code skills, agents and guardrails. Not project-spec
 this is the layer that applies to everything, so every project inherits the same
 conventions and the same review discipline.
 
-Domain-specific kits live in their own repositories and are installed alongside this one.
+Domain-specific kits live in their own repositories and are installed alongside this one:
+
+- `claude-python-service` — structuring and
+  testing Python backend services (DDD layering, FastAPI, pytest with Testcontainers).
+- `claude-home-assistant` — a Home Assistant
+  config as a git repository.
+
+Python is tooling everywhere, so how to *set up* Python lives here; how to build a *service*
+in it lives in the kit.
 
 ## Install once, globally
 
@@ -34,8 +42,7 @@ repo with it, end to end.
 
 | Skill | Loads when |
 | --- | --- |
-| `python-service` | Structuring a Python backend — DDD layering, FastAPI at the edge, distributed-system boundaries |
-| `pytest-suite` | Writing or fixing tests — unit tests with fakes, integration tests with Testcontainers, flakiness |
+| `python-tooling` | Adding Python to any repo — uv, pyproject, ruff, prek hooks, scripts vs. projects |
 | `project-bootstrap` | Starting a repo or onboarding one: choosing gates, writing a useful CLAUDE.md, wiring plugins |
 | `debug-systematically` | Something is broken, intermittent, or a first fix did not hold |
 | `commit-and-pr` | Committing, slicing work, writing a PR body worth reading |
@@ -57,9 +64,28 @@ want it deeper or cheaper.
 Note for anyone installing this: updates only reach you when `version` in `plugin.json`
 is bumped, so a push alone changes nothing on your machine.
 
-### Hook
+### Hooks
 
-`PostToolUse` on every Python file written: `ruff format`, `ruff check --fix`, then
+**No Claude attribution.** `PreToolUse` on shell commands: a `git commit` or
+`gh pr create/edit` carrying a `Co-Authored-By` trailer naming Claude, a `Claude-Session`
+trailer, or a "Generated with Claude Code" line is denied with a reason, and the model
+reruns it without them. The proper switch is the `attribution` setting, but a plugin
+cannot set it — plugin settings honour only `agent` and `subagentStatusLine` — so this
+hook is what carries the rule to every repo and machine where the plugin is installed.
+Set the setting too, so the trailer is never written in the first place:
+
+```json
+{ "attribution": { "commit": "", "pr": "", "sessionUrl": false } }
+```
+
+Use empty strings, not `false`. The docs allow `false`, but Claude Code 2.1.291 rejects it
+and then ignores the **whole settings file** — `enabledPlugins` and permissions included —
+which shows up only as every plugin reporting "disabled".
+
+It reads only the command text: a message passed with `git commit -F <file>` is not
+checked.
+
+**Python formatter.** `PostToolUse` on every Python file written: `ruff format`, `ruff check --fix`, then
 surface whatever could not be fixed automatically. Prefers
 [habit-hooks](https://github.com/habit-hooks/habit-hooks) when it is installed and the
 project has a `.habit-hooks/config.toml`, because it returns coaching text rather than
@@ -135,33 +161,34 @@ These sit at different layers and compose rather than compete:
 
 ## Working on this repo
 
-Register this checkout as the marketplace, once, and the plugin loads **in place from
-the working tree** instead of a cached clone of GitHub:
+The released plugin stays installed from GitHub, for every other project. Sessions started
+**in this repo** load the working tree on top of it, so edits are live here and nowhere
+else:
 
 ```bash
-claude plugin marketplace add .
+CLAUDE_CODE_PLUGIN_DIRS="$PWD/plugins/dev-baseline" claude
+# or, one-off:
+claude --plugin-dir ./plugins/dev-baseline
 ```
 
-Edits to a `SKILL.md` then take effect at the next session start or `/reload-plugins`,
-with no version bump and no push. It needs no launch flags, so it behaves the same in the
-terminal, in VS Code and in the desktop app.
+A session-only plugin with the same manifest name replaces the installed one for that
+session — silently: `claude plugin list` still shows the installed row, and only a
+`--debug` log says `from --plugin-dir overrides installed version`. Edits to a `SKILL.md`
+take effect at `/reload-plugins`, with no version bump and no push.
 
-**This is global, not per-project.** Marketplaces live in one user-wide file,
-`~/.claude/plugins/known_marketplaces.json`, and a marketplace is keyed by the `name` in
-`marketplace.json` — so the directory source *replaces* the GitHub one everywhere, rather
-than sitting beside it under another name. Every project then runs your working tree,
-uncommitted edits included. That is usually what you want from a personal baseline, and it
-is a bad surprise if you expected the pushed version.
+`.vscode/settings.json` sets the variable for every integrated terminal opened in this
+workspace, so `claude` typed there gets the working tree with no flag. Other terminals and
+the desktop app do not, and get the released version.
 
-To go back to the published copy:
+What does **not** work, both tried:
 
-```bash
-claude plugin marketplace add jakos/claude-baseline
-```
-
-Do not try to express this in a project's `.claude/settings.json`. An
-`extraKnownMarketplaces` entry there looks project-scoped and is not; it rewrites the same
-global file, under the name the marketplace declares rather than the key you gave it.
+- `env` in `.claude/settings.json` or `settings.local.json`. Claude Code refuses
+  `CLAUDE_CODE_PLUGIN_DIRS` from project-scoped settings and logs a warning saying so.
+- `claude plugin marketplace add ./`. It loads in place, but marketplaces are user-wide and
+  keyed by the `name` in `marketplace.json`, so the directory source *replaces* the GitHub
+  one in every project. Undo with `claude plugin marketplace add jakos/claude-baseline`.
+  The same goes for `extraKnownMarketplaces` in a project's settings: it looks
+  project-scoped and rewrites the same global file.
 
 ## Reviewing this repo itself
 
@@ -180,9 +207,10 @@ Its question is not "is this correct" but "if this were broken, what would tell 
 .claude-plugin/marketplace.json      catalog
 plugins/dev-baseline/
     .claude-plugin/plugin.json       manifest
-    skills/<name>/SKILL.md           five skills
+    skills/<name>/SKILL.md           four skills
     agents/code-reviewer.md          read-only reviewer
-    hooks/hooks.json                 python formatter
+    hooks/hooks.json                 attribution guard, python formatter
+    scripts/block_attribution.sh
     scripts/format_python.sh
     templates/CLAUDE.md.template
     evals/<case>/                    behavioural tests: does the skill fire

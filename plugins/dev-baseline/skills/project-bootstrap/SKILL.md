@@ -85,6 +85,7 @@ history" is followed. "Be careful with identifiers" is not.
 
 ```json
 {
+  "attribution": { "commit": "", "pr": "", "sessionUrl": false },
   "extraKnownMarketplaces": {
     "claude-baseline": {
       "source": { "source": "github", "repo": "jakos/claude-baseline" }
@@ -110,6 +111,10 @@ every gate command goes through it.
 Note that `uv sync` is listed exactly, not as `uv:*`. A blanket `uv:*` would also
 pre-approve `uv tool install`, `uv add` and `uv pip install`, which mutate the
 environment or the lockfile — those deserve a prompt.
+
+Domain kits go in the same `enabledPlugins` map — a Python service also enables
+`python-service@claude-python-service`. Only enable a kit where its domain applies; every
+enabled skill's description costs context in every session.
 
 Personal overrides belong in `.claude/settings.local.json`, which is gitignored.
 
