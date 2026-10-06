@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/block_attribution.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -7,7 +20,7 @@
           {
             "type": "command",
             "shell": "bash",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/format_python.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/format_python.sh",
             "timeout": 60
           }
         ]

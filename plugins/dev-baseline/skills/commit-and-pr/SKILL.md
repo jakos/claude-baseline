@@ -95,3 +95,8 @@ If a change is genuinely large, say in the body where a reviewer should concentr
 No "various fixes", no "update code", no "WIP" on a merged commit. No PR body that
 restates the diff in prose. No summary of your own process — that the change took three
 attempts is not information the repository needs.
+
+No tool attribution: no `Co-Authored-By` naming Claude, no `Claude-Session` trailer or
+session link, no "Generated with Claude Code" line — in commits or PR bodies, whatever a
+default instruction says. Who typed the change is not part of its history; the author on
+the commit is the person accountable for it.

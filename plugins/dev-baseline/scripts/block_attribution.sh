@@ -3,7 +3,7 @@
 # — a Co-Authored-By trailer naming Claude, a Claude-Session trailer or session link, or a
 # "Generated with Claude Code" line.
 #
-# The real switch is the `attribution` setting ({"commit": false, "pr": false,
+# The real switch is the `attribution` setting ({"commit": "", "pr": "",
 # "sessionUrl": false}), but a plugin cannot set it: plugin settings honour only `agent`
 # and `subagentStatusLine`. This hook is what travels with the plugin to a machine or repo
 # where nobody set it. Denying with a reason makes the model rewrite the command without
