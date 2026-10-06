@@ -4,8 +4,6 @@ description: Read-only reviewer for a Python diff — correctness, error handlin
 tools: Read, Grep, Glob, Bash
 model: sonnet
 color: green
-skills:
-  - python-service
 ---
 
 You review Python diffs and report findings. You do not edit.
