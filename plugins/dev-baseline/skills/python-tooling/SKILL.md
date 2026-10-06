@@ -17,13 +17,38 @@ fails for you" in Python tooling is two of those places disagreeing.
 ## Machine, once
 
 ```bash
-# uv: https://docs.astral.sh/uv/getting-started/installation/
+# macOS, Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
 uv tool install ruff      # only for the formatter hook in repos without a lockfile
 ```
 
 Interpreters come from `uv python install`, not from python.org, the Microsoft Store or
 the OS package manager. A system Python is for the system. No `pip install` into it,
 ever, and no global `pip install --user` either.
+
+## Which Python
+
+**The newest stable CPython minor version**, for new projects and new scripts. Find it
+rather than remembering it — the examples below say 3.14 because that was current when
+they were written, and a model's training data is always a release or two behind:
+
+```bash
+uv python list --only-downloads   # highest version with no a/b/rc suffix
+```
+
+Stable means a final release: never an alpha, beta or release candidate, even when it is
+the highest number on the list. Use that minor version in `requires-python`, in
+`.python-version` and in PEP 723 headers, and pin only the minor (`3.14`, not `3.14.7`),
+so patch releases arrive through `uv python upgrade` without touching the repo.
+
+For an existing project, upgrading is a change of its own: bump `.python-version`, run
+`uv sync` and the gate, and raise `requires-python` only once that passes. In the first
+weeks after a release, a dependency with compiled extensions may have no wheels for it
+yet; `uv sync` failing to build one is the signal to stay on the previous minor for now,
+not to install a compiler.
 
 ## Script or project?
 
@@ -33,7 +58,7 @@ Decide this first; it changes everything after it.
 
 ```python
 # /// script
-# requires-python = ">=3.13"
+# requires-python = ">=3.14"
 # dependencies = ["httpx>=0.28"]
 # ///
 ```
@@ -53,8 +78,8 @@ the moment it became a project.
 Python as tooling in a repo whose product is not a Python package:
 
 ```bash
-uv init --bare --python 3.13     # pyproject.toml only; no sample code, no build backend
-uv python pin 3.13               # .python-version
+uv init --bare --python 3.14     # pyproject.toml only; no sample code, no build backend
+uv python pin 3.14               # .python-version
 uv add httpx                     # runtime deps of the tooling
 uv add --dev ruff pytest prek    # pinned in uv.lock, not "whatever is installed"
 ```
@@ -63,7 +88,7 @@ uv add --dev ruff pytest prek    # pinned in uv.lock, not "whatever is installed
 [project]
 name = "infra-tools"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = ["httpx>=0.28"]
 
 [dependency-groups]
@@ -178,22 +203,38 @@ If prek rejects a builtin hook id, it says so on the first run — that is why t
 One name for "is this change good", used by people, the agent, the hook and CI alike:
 
 ```just
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 check:
     uv run --locked ruff format --check .
     uv run --locked ruff check .
     uv run --locked pytest -q
 ```
 
+Without the `windows-shell` line the recipe needs `sh`, which stock Windows does not have.
+
 CI runs `uv sync --locked` then `just check` — or `uv run prek run --all-files` plus the
 tests. Never a separate list of commands that drifts from the local one.
 
-## Windows
+## Every OS
 
-- `.gitattributes` with `* text=auto eol=lf`. A hook script or shebang checked out with
-  CRLF fails with "bad interpreter" on Linux and in Git Bash.
-- `uv run` hides the `.venv\Scripts` vs `.venv/bin` difference. Docs and scripts that say
-  `source .venv/bin/activate` are wrong on half the machines; another reason to use
-  `uv run`.
+The same repo gets cloned on macOS, Linux and Windows. Everything above already works on
+all three; these are the places it breaks when nobody checked:
+
+- **Line endings.** `.gitattributes` with `* text=auto eol=lf`, plus `*.bat text eol=crlf`
+  and `*.cmd text eol=crlf` (one pattern per line; git patterns have no `{a,b}`). A script or shebang checked out with CRLF fails with "bad
+  interpreter" on Linux and macOS.
+- **No activation.** `uv run` hides `.venv\Scripts` versus `.venv/bin`. Docs that say
+  `source .venv/bin/activate` are wrong on half the machines.
+- **No shell in the tooling.** prek's `language = "system"` hooks spawn `uv` directly, so
+  they work in PowerShell, cmd and bash alike. Do not wrap an entry in `bash -c`, and
+  write helper logic as a Python script, not a shell one.
+- **`just` on Windows** runs recipes with `sh` unless told otherwise. The `windows-shell`
+  line in the gate above fixes that; recipes that are only `uv run …` lines then behave the
+  same everywhere.
+- **Paths in code.** `pathlib`, never string concatenation with `/` or `\`; open text
+  files with `encoding="utf-8"`. Before Python 3.15, Windows defaults to the locale code
+  page, so the same code reads a file differently there unless it says which encoding.
 
 ## When something disagrees between two machines
 
