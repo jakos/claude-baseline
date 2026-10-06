@@ -6,9 +6,9 @@
         "hooks": [
           {
             "type": "command",
-            "shell": "bash",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/block_attribution.sh",
-            "timeout": 10
+            "command": "uv",
+            "args": ["run", "--quiet", "--script", "${CLAUDE_PLUGIN_ROOT}/scripts/block_attribution.py"],
+            "timeout": 15
           }
         ]
       }
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "shell": "bash",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/format_python.sh",
+            "command": "uv",
+            "args": ["run", "--quiet", "--script", "${CLAUDE_PLUGIN_ROOT}/scripts/format_python.py"],
             "timeout": 60
           }
         ]

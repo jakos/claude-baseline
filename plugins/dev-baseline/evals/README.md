@@ -60,5 +60,5 @@ context. `tool_used: Skill` graders are excluded from the score in two-arm runs 
 never pass without the plugin) and are reported as pass/fail indicators instead; the
 negative cases set `arm: both` so their must-not-fire check is scored in both arms.
 
-Not covered yet: the `code-reviewer` agent and the `format_python.sh` hook. Both need a
+Not covered yet: the `code-reviewer` agent and the `format_python.py` hook. Both need a
 scaffolded workspace (`context.scaffold_script`, which only runs under `--scaffold`).

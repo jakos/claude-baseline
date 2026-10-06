@@ -5,7 +5,9 @@ must never do, and how to check whether a change is correct. About fifteen minut
 
 ## 0. Once per machine
 
-The plugin does nothing on its own — `ruff` is what the hook actually runs:
+Both hooks run through [uv](https://docs.astral.sh/uv/getting-started/installation/), so
+it must be on `PATH` — on macOS, Linux and Windows alike. The formatter also needs a
+`ruff`, either the project's locked one or a global fallback:
 
 ```bash
 uv tool install ruff
@@ -135,7 +137,8 @@ a habit.
 
 | Symptom | Cause |
 | --- | --- |
-| Hook does nothing | `ruff` not on `PATH`. It exits silently by design |
+| Formatter does nothing | No `ruff` — not locked in the project, not on `PATH`. It exits silently by design |
+| Hook error on every tool call | `uv` not on `PATH` for the Claude Code process |
 | Skill never fires | Its description doesn't match how you phrased the request |
 | A pushed change didn't arrive | `version` in `plugin.json` wasn't bumped — updates are gated on it |
 | Plugin missing entirely | `claude plugin list` — a load failure shows only there |

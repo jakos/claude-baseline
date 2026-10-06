@@ -66,6 +66,15 @@ is bumped, so a push alone changes nothing on your machine.
 
 ### Hooks
 
+Both hooks are stdlib-only Python scripts started by `uv run --script` in exec form, so one
+implementation runs on macOS, Linux and Windows — with or without Git Bash, which Windows
+installs need for bash hooks and Claude Code no longer requires. No shell, no `jq`, no
+`sed` dialects, no executable bit. **`uv` on `PATH` is the one requirement**: without it
+both hooks fail to start on every tool call, which shows as a hook error rather than
+silence. On macOS, an app launched from the Dock may not inherit the shell `PATH` that
+finds `~/.local/bin/uv`; start Claude Code from a terminal, or install uv somewhere on the
+system `PATH`. Startup costs about 0.3 s per shell command for the attribution check.
+
 **No Claude attribution.** `PreToolUse` on shell commands: a `git commit` or
 `gh pr create/edit` carrying a `Co-Authored-By` trailer naming Claude, a `Claude-Session`
 trailer, or a "Generated with Claude Code" line is denied with a reason, and the model
@@ -85,7 +94,7 @@ which shows up only as every plugin reporting "disabled".
 It reads only the command text: a message passed with `git commit -F <file>` is not
 checked.
 
-**Python formatter.** `PostToolUse` on every Python file written: `ruff format`, `ruff check --fix`, then
+**Python formatter.** `PostToolUse` on every Python file written: `ruff check --fix`, `ruff format`, then
 surface whatever could not be fixed automatically. Prefers
 [habit-hooks](https://github.com/habit-hooks/habit-hooks) when it is installed and the
 project has a `.habit-hooks/config.toml`, because it returns coaching text rather than
@@ -97,8 +106,8 @@ log and is never read, and exit 2 is not honoured for this event because the too
 already run. A hook that prints its findings has no effect at all; this is easy to get
 wrong and invisible when you do.
 
-Requires `ruff` to do anything (`uv tool install ruff`), and `jq` is used when present.
-Without them the hook exits silently rather than complaining on every edit.
+Requires `ruff` to do anything — the project's locked one, or `uv tool install ruff`.
+Without it the hook exits silently rather than complaining on every edit.
 
 When the project has a `uv.lock` that pins ruff, the hook uses *that* ruff via `uv run`
 rather than the one on `PATH`. Formatting rules change between ruff releases, so a global
@@ -210,8 +219,8 @@ plugins/dev-baseline/
     skills/<name>/SKILL.md           four skills
     agents/code-reviewer.md          read-only reviewer
     hooks/hooks.json                 attribution guard, python formatter
-    scripts/block_attribution.sh
-    scripts/format_python.sh
+    scripts/block_attribution.py
+    scripts/format_python.py
     templates/CLAUDE.md.template
     evals/<case>/                    behavioural tests: does the skill fire
 ```
