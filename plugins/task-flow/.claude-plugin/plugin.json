@@ -1,0 +1,11 @@
+{
+  "name": "task-flow",
+  "description": "Multi-agent workflow for tasks and feature requests: plan, human approval, implement, automated checks, independent review, bounded fix loop. Language-agnostic agents; domain knowledge in profile skills for Python, docs, config and anything else",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jakub Kostrzewa",
+    "email": "jakos@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "dependencies": ["dev-baseline"]
+}
