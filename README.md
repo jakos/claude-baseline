@@ -242,6 +242,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     agents/                          planner, implementer, checker, reviewer
     skills/                          workflow contract, 4 profiles, 8 commands
     hooks/hooks.json, scripts/guard.py
+    tests/test_guard.py
 ```
 
 Validate before pushing:

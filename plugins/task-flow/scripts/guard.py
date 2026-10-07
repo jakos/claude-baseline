@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.14"
 # ///
 """PreToolUse hook: enforce task-flow's agent boundaries deterministically.
 
@@ -15,8 +15,6 @@ Calls from the main session and from any other agent pass through untouched.
 
 Stdlib only, started by `uv run --script`, so it runs on macOS, Linux and Windows.
 """
-
-from __future__ import annotations
 
 import json
 import re
@@ -83,7 +81,9 @@ def main() -> None:
     if tool in SHELL_TOOLS:
         command = str(tool_input.get("command") or "")
         segments = re.split(r"[;&|\n]+", command)
-        if any(LEAVES_MACHINE.search(s) and not CLIENT_DRY_RUN.search(s) for s in segments):
+        if any(
+            LEAVES_MACHINE.search(s) and not CLIENT_DRY_RUN.search(s) for s in segments
+        ):
             deny(
                 "pushing, opening PRs and deploying are not allowed inside task-flow agents. "
                 "Nothing leaves the machine until /task-finish asks the user."
@@ -94,7 +94,9 @@ def main() -> None:
                 "once review has approved them."
             )
         if role in {"planner", "reviewer"} and MUTATES_GIT.search(command):
-            deny(f"the {role} is read-only: this git command changes the tree, index or branches.")
+            deny(
+                f"the {role} is read-only: this git command changes the tree, index or branches."
+            )
 
 
 if __name__ == "__main__":

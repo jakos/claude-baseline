@@ -14,4 +14,4 @@ Arguments: `$ARGUMENTS`
 - Otherwise it is a new request: follow **Phase: new** with everything except `--auto`.
 - `--auto` skips only the plan approval question, and only when the user typed it. It never permits an early stop, push, PR or deploy.
 
-Then follow **The loop**. Update `status.md` after every phase. Stop only at: the approval gate, `BLOCKED` from the planner or implementer, `review-approved`, no progress (escalation), or the round cap (escalation after round 3). Never stop on your own judgment that the run cannot pass.
+Then follow **The loop**. Update `status.md` after every phase. Stop only at: the approval gate (unless `--auto`), `BLOCKED` from the planner or implementer, `review-approved`, no progress (escalation), or the round cap (escalation after round 3). Never stop on your own judgment that the run cannot pass.

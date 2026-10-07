@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.14"
 # ///
 """PostToolUse(Edit|Write) hook: format the Python file just written, then surface what a
 linter could not fix automatically.
@@ -18,8 +18,6 @@ without Git Bash, with no jq and no sed dialect differences; stdlib only, starte
 `uv run --script`.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import shutil
@@ -30,7 +28,9 @@ from pathlib import Path
 TIMEOUT = 25  # per tool run; the hook itself has 60 s
 
 
-def run(cmd: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str] | None:
+def run(
+    cmd: list[str], stdin: str | None = None
+) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
             cmd,
@@ -40,15 +40,21 @@ def run(cmd: list[str], stdin: str | None = None) -> subprocess.CompletedProcess
             encoding="utf-8",
             errors="replace",
             timeout=TIMEOUT,
+            check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
 
 
 def emit(text: str) -> None:
     print(
         json.dumps(
-            {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": text,
+                }
+            }
         )
     )
     sys.exit(0)
@@ -62,7 +68,9 @@ def resolve_ruff(project: Path) -> list[str] | None:
     uv = shutil.which("uv")
     if uv and lock.is_file():
         try:
-            pinned = 'name = "ruff"' in lock.read_text(encoding="utf-8", errors="replace")
+            pinned = 'name = "ruff"' in lock.read_text(
+                encoding="utf-8", errors="replace"
+            )
         except OSError:
             pinned = False
         if pinned:
@@ -75,7 +83,7 @@ def main() -> None:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
         file_path = payload["tool_input"]["file_path"]
-    except (ValueError, KeyError, TypeError):
+    except ValueError, KeyError, TypeError:
         return
     if not isinstance(file_path, str) or not file_path.endswith(".py"):
         return
@@ -98,7 +106,9 @@ def main() -> None:
         if found and found.stdout:
             coached = run([mapper], stdin=found.stdout)
             if coached and coached.stdout.strip():
-                emit(f"habit-hooks findings in {target} — fix these before moving on:\n{coached.stdout}")
+                emit(
+                    f"habit-hooks findings in {target} — fix these before moving on:\n{coached.stdout}"
+                )
 
     remaining = run([*ruff, "check", str(target)])
     if remaining and remaining.returncode != 0:

@@ -78,8 +78,9 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR |
 
 `--auto` skips only the plan approval question. It never allows an early stop, a push, a PR
-or a deploy. With or without it, a run stops only at the approval gate, a `BLOCKED` agent,
-`APPROVED`, no progress, or the round cap.
+or a deploy. A run stops only at the approval gate (skipped by `--auto`), a `BLOCKED`
+agent, `APPROVED`, no progress, or the round cap; the last four apply with or without
+`--auto`.
 Every run can be resumed with `task-run <id>` or the single-step commands, because the
 phase is in `status.md`.
 
@@ -95,10 +96,23 @@ input):
 - no task-flow agent can commit — changes stay staged until `/task-flow:task-finish`;
 - planner and reviewer cannot run git commands that change the tree or branches.
 
+Commands are matched as raw text, split into `;`/`&`/`|`/newline segments, without
+regard to quotes. A `git` segment with whitespace followed by a mutating verb (`add`,
+`checkout`, `reset`, `worktree add`, ...) is denied for planner and reviewer; one with
+whitespace followed by a commit or push verb is denied for every task-flow agent.
+
+Run the guard's test with
+`uv run --script plugins/task-flow/tests/test_guard.py`.
+
 Limits of the guard, stated plainly:
 
 - It sees edit tools and shell command text. A shell redirect such as `echo x > file`
   from the checker or reviewer is not caught; their prompts forbid it, nothing enforces it.
+- **Known false positive:** planner and reviewer are denied when a mutating git phrase
+  appears with whitespace before the verb anywhere in the command text, including inside
+  quotes, e.g. `git grep -e "worktree add"`. Quotes are not parsed. Quoted single words
+  such as `git log --grep 'commit'` pass. Use the Grep tool for such searches. The test
+  pins this.
 - The approval gate, the 3-round cap, the no-progress stop and the list of stops are
   enforced by the orchestration procedure and recorded in `status.md`; they are
   instructions, not hooks.

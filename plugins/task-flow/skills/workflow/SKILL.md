@@ -128,7 +128,8 @@ criterion of the plan is about fixing it.
 
 ### Stops
 
-A run stops at exactly these five points, with or without `--auto`:
+A run stops at exactly these five points. `--auto` skips the approval gate (1); the
+other four apply identically with and without it:
 
 1. the approval gate;
 2. `BLOCKED` from an agent (planner or implementer);

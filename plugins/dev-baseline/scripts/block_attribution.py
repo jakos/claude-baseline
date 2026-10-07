@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.14"
 # ///
 """PreToolUse(Bash|PowerShell) hook: refuse a commit or PR that carries Claude attribution.
 
@@ -24,7 +24,9 @@ import sys
 
 # Only commands that create history or a PR. Without this, a grep for the trailer — or
 # this script's own tests — would be refused.
-CREATES_HISTORY = re.compile(r"\bgit\b[^|;&\n]*\scommit\b|\bgh\s+pr\s+(?:create|edit)\b")
+CREATES_HISTORY = re.compile(
+    r"\bgit\b[^|;&\n]*\scommit\b|\bgh\s+pr\s+(?:create|edit)\b"
+)
 
 ATTRIBUTION = re.compile(
     r"co-authored-by:[^\n]*\b(?:claude|anthropic)\b"
@@ -46,7 +48,7 @@ def main() -> None:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
         command = payload["tool_input"]["command"]
-    except (ValueError, KeyError, TypeError):
+    except ValueError, KeyError, TypeError:
         return
     if not isinstance(command, str):
         return

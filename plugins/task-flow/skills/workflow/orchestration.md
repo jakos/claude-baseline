@@ -99,8 +99,11 @@ current round is 0 (approved, no round run yet), run **Phase: baseline** instead
 
 ## Phase: review (round n)
 
-Phase `reviewing`. Run subagent `task-flow:reviewer`. Read the Verdict line of
-`review-<n>.md` and set `last-verdict`.
+1. Refuse when the current round is 0. Round 0 is the baseline and has no reviewer; tell
+   the user to run `/task-flow:task-implement`.
+2. Refuse when `checks-<n>.md` for the current round n >= 1 does not exist.
+3. Phase `reviewing`. Run subagent `task-flow:reviewer`. Read the Verdict line of
+   `review-<n>.md` and set `last-verdict`.
 
 ## The loop — /task-flow:task-run
 
@@ -122,8 +125,9 @@ triggers it.
 ### Stops
 
 The run stops only at: (1) the approval gate, (2) `BLOCKED` from an agent (planner or
-implementer), (3) `APPROVED`, (4) no progress, (5) the round cap (3). These apply
-identically with and without `--auto`, which skips only the approval question.
+implementer), (3) `APPROVED`, (4) no progress, (5) the round cap (3). `--auto`
+skips the approval gate (recorded as `yes (--auto, <date>)`); the other four stops
+apply identically with and without `--auto`, which never permits an early stop.
 
 **Never stop early on a prediction that the run cannot pass**, and never skip a round on
 your own judgment. A check that fails every round is not a reason to stop; the no-progress
