@@ -8,4 +8,4 @@ disable-model-invocation: true
 Read `${CLAUDE_PLUGIN_ROOT}/skills/workflow/orchestration.md` and `${CLAUDE_PLUGIN_ROOT}/skills/workflow/SKILL.md` first. They are the
 procedure; this command only says which part to run.
 
-Follow **Phase: check** for task `$ARGUMENTS`, for the current round. Show the resulting table.
+Follow **Phase: check** for task `$ARGUMENTS`, for the current round. If the current round is 0 (approved, no round run yet), this runs the baseline check (**Phase: baseline**). Show the resulting table.

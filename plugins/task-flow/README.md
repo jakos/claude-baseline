@@ -6,11 +6,13 @@ A multi-agent workflow for tasks and feature requests:
 /task-flow:task-run "<request>"
   → planner (opus) writes plan.md
   → you approve, edit or cancel          ← nothing is built before this
+  → checker (haiku) runs on the untouched base → checks-0.md
   → round 1..3:
        implementer (sonnet) changes code in a worktree
        checker (haiku) runs tests, lint, builds  → checks-n.md
        reviewer (opus) judges each criterion     → review-n.md
-       APPROVED → stop   CHANGES_REQUESTED → next round   round 3 → escalate to you
+       APPROVED → stop   CHANGES_REQUESTED → next round
+       same introduced failures as the round before (no progress), or round 3 → escalate to you
   → /task-flow:task-finish commits, then asks before push or PR
 ```
 
@@ -68,14 +70,16 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | --- | --- |
 | `task-new <description>` | Creates `.work/<id>/task.md` and `status.md`; asks at most 2 questions |
 | `task-plan [id]` | Runs the planner, shows the plan, asks you to approve, edit or cancel |
-| `task-implement [id]` | Requires approval; creates the branch and worktree; runs the implementer |
+| `task-implement [id]` | Requires approval; runs the baseline check first (creates the branch and worktree); runs the implementer |
 | `task-check [id]` | Runs the checker for the current round |
 | `task-review [id]` | Runs the reviewer for the current round |
 | `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR |
 
-`--auto` skips only the plan approval question. It never allows a push, a PR or a deploy.
+`--auto` skips only the plan approval question. It never allows an early stop, a push, a PR
+or a deploy. With or without it, a run stops only at the approval gate, a `BLOCKED` agent,
+`APPROVED`, no progress, or the round cap.
 Every run can be resumed with `task-run <id>` or the single-step commands, because the
 phase is in `status.md`.
 
@@ -95,8 +99,9 @@ Limits of the guard, stated plainly:
 
 - It sees edit tools and shell command text. A shell redirect such as `echo x > file`
   from the checker or reviewer is not caught; their prompts forbid it, nothing enforces it.
-- The approval gate and the 3-round cap are enforced by the orchestration procedure and
-  recorded in `status.md`; they are instructions, not hooks.
+- The approval gate, the 3-round cap, the no-progress stop and the list of stops are
+  enforced by the orchestration procedure and recorded in `status.md`; they are
+  instructions, not hooks.
 
 ## Project configuration
 

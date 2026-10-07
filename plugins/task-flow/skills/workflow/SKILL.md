@@ -17,7 +17,8 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   task.md          original request, normalized: Goal, Context, Constraints
   plan.md          planner output, format below
   status.md        phase, round, base, branch, worktree, approval, history
-  checks-<n>.md    automated check results for round n
+  checks-0.md      baseline check results on the untouched base, before round 1
+  checks-<n>.md    automated check results for round n (1..3)
   review-<n>.md    reviewer verdict for round n
   summary.md       final summary, when done or escalated
   worktree/        the task's git worktree, when worktrees are used
@@ -72,6 +73,8 @@ The planner writes exactly these headings, in this order:
 `Result` is PASS, FAIL, or ERROR (could not run). A command missing from the repo is
 `Not run`, not FAIL.
 
+Round 0 uses the same format. It is run on the untouched base, before any implementation.
+
 ## review-<n>.md
 
 ```markdown
@@ -79,6 +82,9 @@ The planner writes exactly these headings, in this order:
 ## Acceptance criteria
 | AC | Result | Evidence |
 | AC1 | PASS | tests/test_retry.py::test_gives_up_after_three — passed in checks-2 |
+## Pre-existing failures
+<commands failing in checks-<n>.md that already fail in checks-0.md, with the matching
+checks-0.md evidence; or `none`>
 ## Findings
 1. [blocking] src/client.py:42 — <problem, and the input or state that breaks it>
 2. [suggestion] …
@@ -90,17 +96,48 @@ The planner writes exactly these headings, in this order:
 ```
 
 Rules: evidence is a file:line, a test name, or command output — never "looks fine". Any
-FAIL in `checks-<n>.md` or any FAIL criterion means `CHANGES_REQUESTED`. Unexplained
-out-of-scope changes are blocking.
+**introduced** FAIL or ERROR in `checks-<n>.md`, any FAIL criterion, or any blocking
+finding means `CHANGES_REQUESTED`. Unexplained out-of-scope changes are blocking.
+
+**Pre-existing failure**: a command with Result FAIL or ERROR in `checks-<n>.md` is
+pre-existing when the same command is FAIL or ERROR in `checks-0.md` **and** every failing
+test name or error line reported for it in `checks-<n>.md` also appears in `checks-0.md`.
+Any new failing test or error line makes it an introduced failure. A pre-existing failure
+does not by itself force `CHANGES_REQUESTED`; it blocks only when a Step or acceptance
+criterion of the plan is about fixing it.
 
 ## Rounds and escalation
 
+- Round 0 is the baseline check only: the checker runs the plan's verification commands on
+  the untouched base and writes `checks-0.md`. No implementer, no reviewer. Failures there
+  do not stop the run.
 - A round is implement → check → review. **At most 3 rounds.**
 - In round n > 1 the implementer fixes only the Fix list of `review-<n-1>.md`.
-- After round 3 without `APPROVED`: stop, write `summary.md` with what passed, what still
-  fails and why, and hand back to the human. Never start a 4th round on your own.
+- **No progress**: the failing set of round n is the **introduced** commands (Result FAIL
+  or ERROR in `checks-<n>.md` and not pre-existing, see above; pre-existing ones are
+  excluded) plus the AC ids with Result FAIL in `review-<n>.md`. After review n, if
+  n >= 2, the verdict is `CHANGES_REQUESTED`, and the failing set is **non-empty** and
+  **equal** to that of round n-1, stop and escalate like the round cap, instead of using
+  the remaining rounds. This is a mechanical comparison of the two rounds' tables, not a
+  judgment. An empty set (blocking findings only) never triggers it.
+- After round 3 without `APPROVED`, or on no progress: stop, write `summary.md` with the
+  stop reason (for no progress, also the repeated failing set), what passed, what still fails and why, and hand back to the human. Never
+  start a 4th round on your own.
 - An implementer that finds the plan wrong stops and appends `BLOCKED: <problem>` to
   `status.md`. The orchestrator returns to the human, not to the planner on its own.
+
+### Stops
+
+A run stops at exactly these five points, with or without `--auto`:
+
+1. the approval gate;
+2. `BLOCKED` from an agent (planner or implementer);
+3. `APPROVED`;
+4. no progress;
+5. the round cap (3).
+
+**No agent, and not the orchestrator, may stop a run, skip a round or declare it hopeless
+on its own judgment.** `--auto` changes only the approval gate.
 
 ## Profiles
 

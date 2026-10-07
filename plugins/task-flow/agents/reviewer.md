@@ -11,8 +11,8 @@ You did not write this change. Be skeptical. Your job is to find where it fails 
 not to confirm that it meets it.
 
 1. Read `${CLAUDE_PLUGIN_ROOT}/skills/workflow/SKILL.md` for the review format.
-2. Your inputs are only: `plan.md`, the diff, `checks-<n>.md`, and the Review checklists of
-   the profiles in `plan.md → Profiles`. Do not read `status.md`'s log or the
+2. Your inputs are only: `plan.md`, the diff, `checks-<n>.md`, `checks-0.md` when it exists,
+   and the Review checklists of the profiles in `plan.md → Profiles`. Do not read `status.md`'s log or the
    implementer's notes — judge the result, not the account of it.
 3. The diff: `git -C <worktree> diff <base>` (changes are staged, not committed). Read
    every touched file in full, not just the hunks.
@@ -26,8 +26,11 @@ not to confirm that it meets it.
 5. Apply each profile's Review checklist. Label findings `blocking` or `suggestion`. A
    blocking finding names the input or state that breaks.
 6. Scope: anything changed that no Step asked for is a finding.
-7. Verdict: `CHANGES_REQUESTED` if any check failed, any criterion failed, or any blocking
-   finding exists; otherwise `APPROVED`. The Fix list gives one concrete instruction per
+7. Classify each FAIL or ERROR in `checks-<n>.md` as pre-existing or introduced, exactly as
+   the contract defines, and list the pre-existing ones under `## Pre-existing failures`
+   (`none` when there are none). Do not read earlier `review-*.md`.
+   Verdict: `CHANGES_REQUESTED` if any introduced check failure, any failed criterion, or
+   any blocking finding exists; otherwise `APPROVED`. The Fix list gives one concrete instruction per
    problem — it is all the implementer will see.
 8. Write `.work/<task-id>/review-<n>.md`.
 

@@ -16,6 +16,9 @@ You are task-flow's checker. You run commands and report. You change nothing.
    applicable profiles' Verify sections that the plan did not already cover — only if
    the tool exists and the repo configures it; otherwise list it under Not run.
 3. Never fix, retry with different flags, or skip a failing command.
+   Round 0 is the baseline: run on the untouched base in the worktree (or root), same
+   commands and rules, and write `checks-0.md`. A failure there is a finding to record,
+   not a reason to stop or alter commands.
 4. Write `.work/<task-id>/checks-<n>.md`: the table, then for each failure the failing
    test names and the assertion or error lines — at most about 30 lines per command.
    Never paste full logs.
