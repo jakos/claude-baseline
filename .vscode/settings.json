@@ -7,13 +7,13 @@
   },
   "terminal.integrated.env.windows": {
     "TERM_PROGRAM": "vscode",
-    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline;${workspaceFolder}/plugins/task-flow"
   },
   "terminal.integrated.gpuAcceleration": "off",
   "terminal.integrated.env.osx": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline:${workspaceFolder}/plugins/task-flow"
   },
   "terminal.integrated.env.linux": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline"
+    "CLAUDE_CODE_PLUGIN_DIRS": "${workspaceFolder}/plugins/dev-baseline:${workspaceFolder}/plugins/task-flow"
   }
 }

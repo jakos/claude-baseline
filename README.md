@@ -133,6 +133,19 @@ claude plugin eval . --ablation none    # with-arm only, half the cost, for iter
 `Δ` is the number to read — the with-plugin score minus the no-plugin score. A skill whose
 cases score well in both arms is not earning its context. See `evals/README.md`.
 
+## Second plugin: task-flow
+
+`plugins/task-flow/` — a multi-agent workflow for tasks and feature requests: planner →
+your approval → implementer → checker → independent reviewer, at most three rounds, every
+artifact in `.work/<task-id>/`. Install it only where you want it:
+
+```
+/plugin install task-flow@claude-baseline
+```
+
+It depends on `dev-baseline` and is described in its own
+[README](plugins/task-flow/README.md).
+
 ## These are opinions, not truth
 
 Every skill here encodes a way of working. Where a project disagrees, its own `CLAUDE.md`
@@ -176,6 +189,8 @@ else:
 
 ```bash
 CLAUDE_CODE_PLUGIN_DIRS="$PWD/plugins/dev-baseline" claude
+# both plugins; the separator is ; on Windows and : elsewhere
+CLAUDE_CODE_PLUGIN_DIRS="$PWD/plugins/dev-baseline;$PWD/plugins/task-flow" claude
 # or, one-off:
 claude --plugin-dir ./plugins/dev-baseline
 ```
@@ -203,7 +218,7 @@ What does **not** work, both tried:
 
 `@baseline-reviewer` — a project-scoped agent in `.claude/agents/`, so it exists only here
 and is not part of the published plugin. The shipped `code-reviewer` reads Python diffs
-and so can never review its own repo, which is prose, JSON and one shell script.
+and so can never review its own repo, which is prose, JSON and a few stdlib-only Python hook scripts.
 
 It reviews for the failure mode this repository actually has: things that load but do
 nothing. A hook whose output goes to a debug log, a `hooks.json` the loader rejects whole,
@@ -223,6 +238,10 @@ plugins/dev-baseline/
     scripts/format_python.py
     templates/CLAUDE.md.template
     evals/<case>/                    behavioural tests: does the skill fire
+plugins/task-flow/                   multi-agent task workflow; see its README
+    agents/                          planner, implementer, checker, reviewer
+    skills/                          workflow contract, 4 profiles, 8 commands
+    hooks/hooks.json, scripts/guard.py
 ```
 
 Validate before pushing:
