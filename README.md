@@ -240,9 +240,10 @@ plugins/dev-baseline/
     evals/<case>/                    behavioural tests: does the skill fire
 plugins/task-flow/                   multi-agent task workflow; see its README
     agents/                          planner, implementer, checker, reviewer
-    skills/                          workflow contract, 4 profiles, 8 commands
+    skills/                          workflow contract, 4 profiles, 9 commands
     hooks/hooks.json, scripts/guard.py
-    tests/test_guard.py
+    scripts/task_list.py             table for task-list
+    tests/test_guard.py, tests/test_task_list.py
 ```
 
 Validate before pushing:
