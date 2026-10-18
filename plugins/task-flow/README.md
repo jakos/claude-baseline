@@ -74,8 +74,23 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-check [id]` | Runs the checker for the current round |
 | `task-review [id]` | Runs the reviewer for the current round |
 | `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
+| `task-list [--all]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR |
+
+`task-list` runs `scripts/task_list.py` and sorts rows by phase group, then oldest last
+History entry first, then id:
+
+1. waiting on you: `planned`, `blocked`, `escalated`;
+2. in progress: `approved`, `baseline`, `implementing`, `checking`, `reviewing`,
+   `review-approved`;
+3. not started: `new`;
+4. unrecognised or missing phase;
+5. `done` (only with `--all`).
+
+The timestamp is the first word of the last `## History` bullet; one without a zone counts
+as UTC, and a missing or unparseable one sorts last within its group. Round and last
+verdict are shown but do not affect the order.
 
 `--auto` skips only the plan approval question. It never allows an early stop, a push, a PR
 or a deploy. A run stops only at the approval gate (skipped by `--auto`), a `BLOCKED`
@@ -102,7 +117,8 @@ regard to quotes. A `git` segment with whitespace followed by a mutating verb (`
 whitespace followed by a commit or push verb is denied for every task-flow agent.
 
 Run the guard's test with
-`uv run --script plugins/task-flow/tests/test_guard.py`.
+`uv run --script plugins/task-flow/tests/test_guard.py`, and the task list's with
+`uv run --script plugins/task-flow/tests/test_task_list.py`.
 
 Limits of the guard, stated plainly:
 
@@ -158,7 +174,7 @@ cost no context. Agents read them by path.
 agents/                         planner, implementer, checker, reviewer
 skills/workflow/                shared contract (SKILL.md) + orchestration.md for commands
 skills/profile-*/               python, docs, config, generic
-skills/task-*/                  the 8 commands
-hooks/hooks.json, scripts/guard.py
+skills/task-*/                  the 9 commands
+hooks/hooks.json, scripts/guard.py, scripts/task_list.py
 templates/task-flow.md          project config example
 ```
