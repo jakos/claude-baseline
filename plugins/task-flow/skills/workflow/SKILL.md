@@ -24,6 +24,9 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   worktree/        the task's git worktree, when worktrees are used
 ```
 
+After `/task-finish` only the `.md` files and `worktree/` (if kept) remain; any other file
+or directory in the folder is scratch and is deleted.
+
 Source changes happen **in the worktree** when `status.md` names one, otherwise in the
 repository root on the task branch. `.work/` files are always read and written at the
 repository root, never inside the worktree.

@@ -243,7 +243,8 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     skills/                          workflow contract, 4 profiles, 9 commands
     hooks/hooks.json, scripts/guard.py
     scripts/task_list.py             table for task-list
-    tests/test_guard.py, tests/test_task_list.py
+    scripts/prune_task.py            task-finish keeps only .md files and worktree/
+    tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py
 ```
 
 Validate before pushing:

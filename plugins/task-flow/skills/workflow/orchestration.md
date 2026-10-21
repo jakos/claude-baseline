@@ -152,3 +152,10 @@ Resuming: `/task-flow:task-run <id>` continues from the phase in `status.md`.
 5. **Ask** before each of: push, open a PR, remove the worktree. Do only what is
    confirmed, or what `.claude/task-flow.md → finish` allows without asking.
 6. Phase `done`.
+7. **Prune** (not asked): from the repository root run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/prune_task.py" .work/<id>` and
+   show its output. Every top-level `.md` file stays (task, plan, status, summary, checks,
+   reviews), everything else in the folder is deleted, and `worktree/` is left to the
+   worktree question in step 5. If the script exits non-zero, show stderr: exit 2 means it
+   refused and deleted nothing, exit 1 means some entries (`failed: <name>`) could not be
+   removed and the rest was pruned. Do not retry or delete by hand.
