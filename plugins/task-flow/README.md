@@ -13,7 +13,7 @@ A multi-agent workflow for tasks and feature requests:
        reviewer (opus) judges each criterion     → review-n.md
        APPROVED → stop   CHANGES_REQUESTED → next round
        same introduced failures as the round before (no progress), or round 3 → escalate to you
-  → /task-flow:task-finish commits, then asks before push or PR
+  → /task-flow:task-finish commits, asks before push or PR, then prunes the task folder to its .md files
 ```
 
 Each role is a separate subagent with a fresh context. They share nothing but files in
@@ -76,7 +76,7 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
 | `task-list [--all]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
-| `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR |
+| `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` files (not asked) |
 
 `task-list` runs `scripts/task_list.py` and sorts rows by phase group, then oldest last
 History entry first, then id:
@@ -117,8 +117,9 @@ regard to quotes. A `git` segment with whitespace followed by a mutating verb (`
 whitespace followed by a commit or push verb is denied for every task-flow agent.
 
 Run the guard's test with
-`uv run --script plugins/task-flow/tests/test_guard.py`, and the task list's with
-`uv run --script plugins/task-flow/tests/test_task_list.py`.
+`uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
+`uv run --script plugins/task-flow/tests/test_task_list.py`, and the prune's with
+`uv run --script plugins/task-flow/tests/test_prune_task.py`.
 
 Limits of the guard, stated plainly:
 
@@ -175,6 +176,6 @@ agents/                         planner, implementer, checker, reviewer
 skills/workflow/                shared contract (SKILL.md) + orchestration.md for commands
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 9 commands
-hooks/hooks.json, scripts/guard.py, scripts/task_list.py
+hooks/hooks.json, scripts/guard.py, scripts/task_list.py, scripts/prune_task.py
 templates/task-flow.md          project config example
 ```
