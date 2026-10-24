@@ -12,6 +12,8 @@ Formats are defined in `${CLAUDE_PLUGIN_ROOT}/skills/workflow/SKILL.md`.
 - An argument that names an existing `.work/<id>/` is that task.
 - No argument: if exactly one task under `.work/` is not `done`, use it; otherwise list
   them (as `/task-flow:task-status` does) and ask which.
+- A task is a `.work/<id>/` with a `status.md`. `.work/_autopilot/` holds autopilot runs
+  and is not a task; it has no `status.md` and is never listed or picked as one.
 - Every subagent prompt gives absolute paths: the repository root, `.work/<id>/`, the
   worktree (or "none"), the base ref, and the round number. Nothing else — not this
   conversation, not a summary of earlier rounds.
@@ -131,7 +133,8 @@ apply identically with and without `--auto`, which never permits an early stop.
 
 **Never stop early on a prediction that the run cannot pass**, and never skip a round on
 your own judgment. A check that fails every round is not a reason to stop; the no-progress
-rule and the cap handle it.
+rule and the cap handle it. This governs one task's run. The autopilot's circuit breaker is
+not an exception: it runs only between tasks (see Autopilot).
 
 Escalate: phase `escalated`, write `summary.md` (stop reason — `no progress` or `round
 cap` — goal, what each round changed, which criteria pass, what still fails with the
@@ -140,6 +143,128 @@ stop. The History line names the reason. The user may then edit the plan and run
 the round count restarts only when they say so.
 
 Resuming: `/task-flow:task-run <id>` continues from the phase in `status.md`.
+
+## Autopilot — /task-flow:task-autopilot
+
+Takes requirements to a stack of finished tasks. Every task is an ordinary task-flow task
+and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`:
+`requirements.md`, `backlog.md`, `run.md`, `report.md`. The orchestrator owns `run.md`;
+`autopilot.py` only reads it.
+
+```markdown
+# Autopilot: <run-id>
+- mode: semi | full
+- base: <branch the run starts from>
+- budget: <integer tokens> | none
+- planning-tokens: <integer> | unknown
+- continue-past: none | <task-id>, <task-id>
+- bootstrap: none | <task-id>
+- state: gathering | planning | ready | running | paused | stopped | done
+## Tasks
+| # | Task | Depends on | Tokens used |
+| --- | --- | --- | --- |
+| 1 | bootstrap-project | - | 0 |
+| 2 | add-config-loader | bootstrap-project | unknown |
+## History
+- <ISO timestamp> <state> — <one line>
+```
+
+`Depends on` is `-` or comma-separated ids of earlier rows. `Tokens used` is the sum of
+`total_tokens` of every subagent run for that task after approval (checker, implementer,
+reviewer), an integer, or `unknown` once any result lacked a figure (sticky). `bootstrap`
+names the bootstrap task; it is row 1 and every other row depends on it directly.
+
+1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
+   `.claude/task-flow.md` sets `worktree: no` or `Finish → commit` to anything but `yes`
+   (stacked tasks need a worktree and a commit per task). Run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" inspect .` from
+   the repository root (exit 2: stop with its message).
+   **`commits: no`**: `git worktree add` needs a commit to base tasks on. If the index is
+   empty (`git ls-files` prints nothing), ask: create an empty initial commit / stop.
+   Create runs `git commit --allow-empty -m "chore: initial commit"` (no attribution
+   lines, hooks not skipped), then `inspect` again. If the index is not empty, or the user
+   picks stop: stop with "This repository has no commit yet; task-flow bases each task's
+   worktree on a commit. Make an initial commit, then run the autopilot again." This
+   question is asked even with `--auto` (`--auto` skips only the start gate) and is not a
+   stop of the run: no run folder exists yet. Remember `thin` for Decompose. Ensure
+   `.work/.gitignore` as in Phase: new.
+2. **Gather.** Run id = 3–6 word kebab slug, `-2`, `-3` on collision. Create
+   `.work/_autopilot/<run-id>/run.md` (state `gathering`, mode `semi` unless `--full`,
+   budget from `--budget` or `none`, `planning-tokens: 0`, `continue-past: none`,
+   `bootstrap: none`, base = current branch). From the user: write `requirements.md` from
+   the argument text; if goal or scope is unclear, ask at most 3 messages of at most 4
+   questions each, appending answers in the user's words, nothing invented. With
+   `--from-repo`: the backlog agent extends `requirements.md` from the repository (each
+   requirement cited). Append the `inspect` output to `requirements.md` under
+   `## Repository`.
+3. **Decompose.** Run subagent `task-flow:backlog`, telling it `thin: yes|no` from
+   `inspect`. `BLOCKED: yes`: show the questions, append the answers to `requirements.md`,
+   run it again (both modes; the user is present before the loop). With `thin: yes` the
+   backlog's task 1 must be a bootstrap task that every later task depends on; if it is
+   not, run the backlog agent again once with that instruction, then stop with the problem
+   if it still is not.
+4. **Create and plan.** For each backlog task, in order, follow Phase: new without
+   questions (id from the backlog, de-duplicated; `task.md` from its Goal/Context/
+   Constraints plus a Context line naming the run and its dependencies; `status.md` with
+   the run's base) and add its row to `run.md`; with a bootstrap task set `bootstrap:` to
+   its final id. Then Phase: plan steps 1–3 for each task **without the approval gate**, in
+   table order. **With a bootstrap task, the bootstrap task is planned first**, completely
+   (its planner `BLOCKED: yes` questions asked and answered into its `task.md`, and
+   re-planned, until its `plan.md` is not blocked), before any other task is planned. Every
+   later task's `task.md` Context then carries the line: "Toolchain and verification: read
+   `.work/<bootstrap-id>/plan.md` (the bootstrap task's plan) and use the toolchain and
+   Verification commands it sets up, not only its `task.md`." and the planner prompt for
+   those tasks says the same; the planner agent itself is unchanged. For the remaining
+   tasks, collect planner `BLOCKED: yes` questions, ask them in one message, append the
+   answers to each `task.md`, re-plan those. Add every subagent's `total_tokens` to
+   `planning-tokens` (`unknown` if any is missing). State `planning`, then `ready`. All
+   tasks are still planned before the overview. Later plans are not re-planned after the
+   bootstrap task finishes.
+5. **Overview (always, both modes).** Show, per task, id, goal line and dependencies,
+   marking the bootstrap task; then the output of
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id>`
+   verbatim; the mode; and the sentence: estimates are coarse; the main session's own
+   tokens are not counted; Claude cannot see your plan's session or weekly limit, check it
+   with `/usage`.
+6. **Start gate.** Ask start / edit / cancel. Start: in every task's `status.md` set
+   `plan-approved: yes (user, <date>, autopilot <run-id>)` and phase `approved`. Edit: the
+   change goes into that task's `task.md` (or `requirements.md` for backlog changes),
+   re-plan or re-decompose, show the overview again; an edit that re-plans the bootstrap
+   task re-plans every later task after it, so they keep reading its current `plan.md`.
+   With `--auto` only: skip the question, record `yes (--auto, <date>, autopilot
+   <run-id>)` and say so. State `running`.
+7. **Loop (between tasks).** Run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id>`
+   and obey it exactly; never pick another task or stop on your own judgment.
+   - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
+     `status.md` `base:` to `task/<id>` of the last `done` task of this run in table order,
+     or the run's base if none; then follow The loop for that task from its current phase.
+     Every within-task stop (BLOCKED, APPROVED, no progress, round cap) and "never stop
+     early" apply unchanged and end only that task. On `review-approved` follow Phase:
+     finish steps 1–4, 6 and 7, and replace step 5 with: no push, no PR, keep the worktree,
+     ask nothing; these go into `report.md`. After every subagent call add its
+     `total_tokens` to the task's `Tokens used`. Append a History line to `run.md`, then run
+     `next` again.
+   - `wait <id>: <phase>` (semi only): state `paused`, show the task's `summary.md` or
+     `BLOCKED:` line, ask: continue past it (its dependents are skipped) / stop. To retry,
+     the user runs `/task-flow:task-run <id>` themselves and then resumes the autopilot.
+     Continue: add the id to `continue-past`, run `next` again. Stop: as `stop:`.
+   - `stop: <reason>`: state `stopped`. `done`: state `done`.
+8. **Report.** On `stopped` or `done` write `report.md`: the stop reason (the `next` line
+   verbatim), one row per task (phase, rounds, tokens used, 1-round and 3-round estimates),
+   the branch stack in order (the last `done` branch contains all finished work), skipped
+   and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
+   worktree removal. Show it.
+
+**Stops of an autopilot run:** the start gate (skipped by `--auto`), backlog or planner
+`BLOCKED` before the loop, `wait` (semi), `stop:` (circuit breaker), `done`. The no-commit
+question and the other Preconditions come before a run exists and are preconditions, not
+stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
+cannot finish, burn rate, budget) and is evaluated only between tasks, never inside a
+task's run; `next` returns `run <id>` for a task already in progress.
+
+**Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;
+`paused` asks the wait question again. Preconditions are not re-run.
 
 ## Phase: finish — /task-flow:task-finish
 

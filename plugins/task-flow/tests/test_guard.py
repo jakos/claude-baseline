@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent.parent / "scripts" / "guard.py"
-READ_ONLY_ROLES = ("planner", "reviewer")
-ALL_ROLES = ("planner", "implementer", "checker", "reviewer")
+READ_ONLY_ROLES = ("planner", "reviewer", "backlog")
+ALL_ROLES = ("planner", "implementer", "checker", "reviewer", "backlog")
 
 
 def decide(agent_type: str | None, tool: str, tool_input: dict) -> str:
@@ -151,6 +151,13 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(write("reviewer", "/repo/src/a.py"), "deny")
         self.assertEqual(write("reviewer", "/repo/.work/x/review-1.md"), "allow")
         self.assertEqual(write("implementer", "/repo/src/a.py"), "allow")
+
+    def test_backlog_writes_only_under_work(self):
+        def write(path: str) -> str:
+            return decide("task-flow:backlog", "Write", {"file_path": path})
+
+        self.assertEqual(write("/repo/.work/_autopilot/r/backlog.md"), "allow")
+        self.assertEqual(write("/repo/src/x.py"), "deny")
 
 
 if __name__ == "__main__":

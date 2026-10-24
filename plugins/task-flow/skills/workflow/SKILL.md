@@ -24,6 +24,9 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   worktree/        the task's git worktree, when worktrees are used
 ```
 
+Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `backlog.md`,
+`run.md`, `report.md`); their tasks are ordinary `.work/<task-id>/` folders.
+
 After `/task-finish` only the `.md` files and `worktree/` (if kept) remain; any other file
 or directory in the folder is scratch and is deleted.
 
@@ -139,6 +142,9 @@ other four apply identically with and without it:
 3. `APPROVED`;
 4. no progress;
 5. the round cap (3).
+
+These are the stops of one task's run. `task-autopilot` adds run-level stops that are
+evaluated only between tasks (orchestration.md → Autopilot).
 
 **No agent, and not the orchestrator, may stop a run, skip a round or declare it hopeless
 on its own judgment.** `--auto` changes only the approval gate.

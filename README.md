@@ -239,12 +239,13 @@ plugins/dev-baseline/
     templates/CLAUDE.md.template
     evals/<case>/                    behavioural tests: does the skill fire
 plugins/task-flow/                   multi-agent task workflow; see its README
-    agents/                          planner, implementer, checker, reviewer
-    skills/                          workflow contract, 4 profiles, 9 commands
+    agents/                          planner, implementer, checker, reviewer, backlog
+    skills/                          workflow contract, 4 profiles, 10 commands
     hooks/hooks.json, scripts/guard.py
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps only .md files and worktree/
-    tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py
+    scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
+    tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py, tests/test_autopilot.py
 ```
 
 Validate before pushing:

@@ -8,10 +8,10 @@ not limits. This hook reads `agent_type`, which Claude Code adds to hook input f
 made inside a subagent, and applies the rules below only to task-flow's own agents.
 Calls from the main session and from any other agent pass through untouched.
 
-- planner, checker, reviewer: may write files only under a `.work/` directory.
+- planner, backlog, checker, reviewer: may write files only under a `.work/` directory.
 - every task-flow agent: no push, no PR, no deploy — nothing leaves the machine.
 - every task-flow agent: no `git commit`; committing is `/task-finish`'s job, after review.
-- planner, reviewer: no git command that changes the working tree, index or branches.
+- planner, backlog, reviewer: no git command that changes the working tree, index or branches.
 
 Stdlib only, started by `uv run --script`, so it runs on macOS, Linux and Windows.
 """
@@ -20,7 +20,7 @@ import json
 import re
 import sys
 
-ROLE = re.compile(r"^task-flow[:_](planner|implementer|checker|reviewer)$")
+ROLE = re.compile(r"^task-flow[:_](planner|implementer|checker|reviewer|backlog)$")
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
@@ -93,7 +93,7 @@ def main() -> None:
                 "task-flow agents do not commit. Leave changes staged; /task-finish commits "
                 "once review has approved them."
             )
-        if role in {"planner", "reviewer"} and MUTATES_GIT.search(command):
+        if role in {"planner", "reviewer", "backlog"} and MUTATES_GIT.search(command):
             deny(
                 f"the {role} is read-only: this git command changes the tree, index or branches."
             )
