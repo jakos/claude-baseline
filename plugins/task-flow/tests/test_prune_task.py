@@ -107,6 +107,21 @@ class PruneTaskTest(unittest.TestCase):
         self.assertIn("impl-3.json", lines[-1])
         self.assertNotIn("removed: impl-1.json", lines)
 
+    def test_removes_progress_jsonl(self):
+        self.populate()
+        (self.task / "impl-1.json").write_text("{}", encoding="utf-8")
+        (self.task / "impl-1.progress.jsonl").write_text(
+            '{"turn": 1}\n', encoding="utf-8"
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.task / "impl-1.json").is_file())
+        self.assertFalse((self.task / "impl-1.progress.jsonl").exists())
+        lines = result.stdout.decode("utf-8").splitlines()
+        self.assertIn("removed: impl-1.progress.jsonl", lines)
+        self.assertIn("impl-1.json", lines[-1])
+        self.assertNotIn("removed: impl-1.json", lines)
+
     def test_removes_impl_json_directory(self):
         self.populate()
         (self.task / "impl-1.json").mkdir()

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -93,7 +94,8 @@ def python_command(code):
 
 
 class FakeServer:
-    """Serves a scripted queue: dict -> 200 JSON, int -> that status, (int, headers)."""
+    """Serves a scripted queue: dict -> 200 JSON, int -> that status, (int, headers),
+    ("delay", <seconds>, <item>) -> sleep, then serve <item> as today."""
 
     def __init__(self, responses):
         self.responses = list(responses)
@@ -112,6 +114,9 @@ class FakeServer:
                     }
                 )
                 item = outer.responses.pop(0) if outer.responses else 500
+                if isinstance(item, tuple) and len(item) == 3 and item[0] == "delay":
+                    time.sleep(item[1])
+                    item = item[2]
                 headers = {}
                 if isinstance(item, dict):
                     status, payload = 200, item
@@ -120,13 +125,16 @@ class FakeServer:
                 else:
                     status, payload = item, {"error": "scripted"}
                 data = json.dumps(payload).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                for key, value in headers.items():
-                    self.send_header(key, value)
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    for key, value in headers.items():
+                        self.send_header(key, value)
+                    self.end_headers()
+                    self.wfile.write(data)
+                except OSError:
+                    pass  # the client may have timed out and closed the socket
 
             def log_message(self, *args):
                 pass
@@ -233,9 +241,7 @@ class ImplementTest(unittest.TestCase):
         path.parent.mkdir(exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="")
 
-    def run_round(
-        self, round_no=1, profile="fake", worktree=None, env=None, drop=(), cwd=None
-    ):
+    def round_cmd(self, round_no=1, profile="fake", worktree=None, cwd=None, extra=()):
         cmd = [sys.executable, str(SCRIPT)]
         if cwd is None:
             cmd += ["--task-dir", str(self.task)]
@@ -244,18 +250,35 @@ class ImplementTest(unittest.TestCase):
         cmd += ["--worktree", worktree or str(self.worktree), "--round", str(round_no)]
         if profile:
             cmd += ["--profile", profile]
+        cmd += list(extra)
+        return cmd
+
+    def round_env(self, env=None, drop=()):
         environment = {k: v for k, v in os.environ.items() if k not in drop}
         environment.update({"HOME": str(self.home), "USERPROFILE": str(self.home)})
         environment.update({"FAKE_KEY": "fake-key", "NO_PROXY": "127.0.0.1"})
         environment.update(env or {})
         for name in drop:
             environment.pop(name, None)
+        return environment
+
+    def run_round(
+        self,
+        round_no=1,
+        profile="fake",
+        worktree=None,
+        env=None,
+        drop=(),
+        cwd=None,
+        extra=(),
+    ):
+        cmd = self.round_cmd(round_no, profile, worktree, cwd, extra)
         done = subprocess.run(
             cmd,
             cwd=cwd or self.repo,
             capture_output=True,
             encoding="utf-8",
-            env=environment,
+            env=self.round_env(env, drop),
             timeout=180,
             check=False,
         )
@@ -266,6 +289,11 @@ class ImplementTest(unittest.TestCase):
     def metrics(self, round_no=1):
         text = (self.task / f"impl-{round_no}.json").read_text(encoding="utf-8")
         return json.loads(text)
+
+    def progress(self, round_no=1):
+        path = self.task / f"impl-{round_no}.progress.jsonl"
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
 
     def simple(self, **profile_overrides):
         """One fake profile and a server that makes one edit, then finishes."""
@@ -912,6 +940,7 @@ class ImplementTest(unittest.TestCase):
         self.refusal("round 2 without review-1.md", round_no=2)
         self.refusal("bad worktree", worktree=str(self.repo / "missing"))
         self.refusal("not a git work tree", worktree=str(self.home))
+        self.refusal("negative heartbeat", extra=("--heartbeat", "-1"))
 
         self.write_task("status.md", STATUS.replace("yes (user, 2026-10-31)", "no"))
         self.refusal("unapproved plan")
@@ -929,6 +958,294 @@ class ImplementTest(unittest.TestCase):
         self.refusal("invalid configuration")
 
         self.assertEqual(len(server.requests), 0)
+
+    # ------------------------------------------------------- observability
+
+    TURN_LINE = re.compile(
+        r"^\[implement\] turn \d+ \(\d+\.\d s, [\d.]+k? in / [\d.]+k? out, "
+        r"\$\d+\.\d{4} total\): "
+    )
+
+    def test_turn_line_shows_seconds_tokens_and_cost(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    ),
+                    tool_call(
+                        "run_command", {"command": python_command("print('hi')")}, "c2"
+                    ),
+                    usage={"prompt_tokens": 1200, "completion_tokens": 34},
+                ),
+                reply(
+                    content="done", usage={"prompt_tokens": 10, "completion_tokens": 5}
+                ),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = [
+            line for line in done.stderr.splitlines() if self.TURN_LINE.match(line)
+        ]
+        self.assertEqual(len(lines), 3, done.stderr)
+        self.assertIn("1.2k in", lines[0])
+        self.assertIn("34 out", lines[0])
+        self.assertIn("write_file -> ", lines[0])
+        self.assertRegex(lines[1], r"run_command \[\d+\.\d s\] -> ")
+        self.assertIn("10 in", lines[2])
+        self.assertTrue(lines[2].endswith(": final message"), lines[2])
+
+    def test_heartbeat_while_waiting(self):
+        server = self.server(
+            [
+                (
+                    "delay",
+                    2.5,
+                    reply(
+                        tool_call(
+                            "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                        )
+                    ),
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round(extra=("--heartbeat", "1"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = done.stderr.splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("[implement] ") for line in lines), lines)
+        heartbeat = re.compile(r"^\[implement\] waiting for fake \.\.\. \d+ s$")
+        beats = [i for i, line in enumerate(lines) if heartbeat.match(line)]
+        turns = [i for i, line in enumerate(lines) if self.TURN_LINE.match(line)]
+        self.assertGreaterEqual(len(beats), 1)
+        self.assertTrue(turns)
+        self.assertLess(min(beats), min(turns))
+        self.assertLess(max(beats), max(turns))
+
+    def test_heartbeat_during_command(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "run_command",
+                        {"command": python_command("import time; time.sleep(2.5)")},
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round(extra=("--heartbeat", "1"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        running = re.compile(r"^\[implement\] running .+ \.\.\. \d+ s$")
+        self.assertTrue(
+            any(running.match(line) for line in done.stderr.splitlines()),
+            done.stderr,
+        )
+
+    def test_retry_429_recorded_in_chain(self):
+        server = self.server([(429, {"Retry-After": "0"}), reply(content="done")])
+        self.configure(self.profile("fake", server, retries=1))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        chain = self.metrics()["fallback_chain"]
+        self.assertEqual(len(chain), 1)
+        retries = chain[0]["retries"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["reason"], "HTTP 429")
+        self.assertEqual(retries[0]["turn"], 1)
+        self.assertEqual(self.progress()[0]["retries"], 1)
+
+    def test_timeout_retry_recorded(self):
+        server = self.server(
+            [("delay", 3.0, reply(content="late")), reply(content="done")]
+        )
+        self.configure(
+            self.profile(
+                "fake",
+                server,
+                retries=1,
+                request_timeout_seconds=1,
+                retry_base_seconds=0,
+            )
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        retries = metrics["fallback_chain"][0]["retries"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["reason"], "timeout")
+        self.assertEqual(metrics["slowest_request"]["outcome"], "timeout")
+        self.assertGreaterEqual(metrics["slowest_request"]["seconds"], 1.0)
+
+    def test_timing_metrics(self):
+        command_text = python_command("import time; time.sleep(1)")
+        server = self.server(
+            [
+                (
+                    "delay",
+                    1.0,
+                    reply(tool_call("run_command", {"command": command_text})),
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        for key in (
+            "profile",
+            "model",
+            "turns",
+            "tokens",
+            "cost_usd",
+            "duration_seconds",
+            "status",
+            "reason",
+            "fallback_chain",
+            "settings",
+            "files_changed",
+            "model_seconds",
+            "retry_wait_seconds",
+            "command_seconds",
+            "slowest_request",
+            "slowest_command",
+        ):
+            self.assertIn(key, metrics)
+        self.assertGreaterEqual(metrics["model_seconds"], 1.0)
+        self.assertGreaterEqual(metrics["command_seconds"], 1.0)
+        self.assertEqual(metrics["slowest_request"]["turn"], 1)
+        self.assertEqual(metrics["slowest_request"]["profile"], "fake")
+        self.assertEqual(metrics["slowest_request"]["outcome"], "ok")
+        self.assertIn("time.sleep", metrics["slowest_command"]["command"])
+        self.assertIs(metrics["slowest_command"]["timed_out"], False)
+        self.assertEqual(metrics["fallback_chain"][0]["retries"], [])
+
+    def test_progress_file_one_line_per_turn(self):
+        read = tool_call("read_file", {"path": "README.md"})
+        server = self.server([reply(read), reply(read), reply(content="done")])
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.progress()
+        self.assertEqual([r["turn"] for r in records], [1, 2, 3])
+        self.assertEqual(self.metrics()["turns"], len(records))
+        keys = {
+            "turn",
+            "profile",
+            "tools",
+            "request_seconds",
+            "retries",
+            "command_seconds",
+            "tokens",
+            "cost_usd",
+            "elapsed_seconds",
+        }
+        for record in records:
+            self.assertEqual(set(record), keys)
+            self.assertEqual(set(record["tokens"]), {"input", "cached", "output"})
+            self.assertEqual(record["profile"], "fake")
+        self.assertEqual(records[0]["tools"], ["read_file"])
+        self.assertEqual(records[2]["tools"], [])
+        text = (self.task / "impl-1.progress.jsonl").read_text(encoding="utf-8")
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertNotIn(", ", line)
+            self.assertNotIn(": ", line)
+
+    def test_progress_survives_failure(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call("write_file", {"path": "a.txt", "content": "a\n"}, "a")
+                ),
+                reply(
+                    tool_call("write_file", {"path": "b.txt", "content": "b\n"}, "b")
+                ),
+                400,
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "))
+        records = self.progress()
+        self.assertEqual([r["turn"] for r in records], [1, 2])
+        self.assertEqual(self.metrics()["turns"], 2)
+        self.assertEqual(self.metrics()["status"], "failed")
+
+    def test_progress_survives_kill(self):
+        server = self.server(
+            [
+                reply(tool_call("read_file", {"path": "README.md"}, "a")),
+                reply(tool_call("read_file", {"path": "src/app.py"}, "b")),
+                ("delay", 30.0, reply(content="done")),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        proc = subprocess.Popen(
+            self.round_cmd(extra=("--heartbeat", "5")),
+            cwd=self.repo,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.round_env(),
+        )
+        path = self.task / "impl-1.progress.jsonl"
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if (
+                path.is_file()
+                and len(path.read_text(encoding="utf-8").splitlines()) >= 2
+            ):
+                break
+            time.sleep(0.1)
+        proc.kill()
+        proc.communicate(timeout=30)
+        self.assertFalse((self.task / "impl-1.json").exists())
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+        self.assertEqual(len(lines), 2)
+        records = [json.loads(line) for line in lines]
+        self.assertEqual([r["turn"] for r in records], [1, 2])
+
+    def test_verbose_prints_model_text(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    ),
+                    content="I will write src/new.py now.",
+                ),
+                reply(content="finished writing"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round(extra=("--verbose",))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("turn 1 text: I will write src/new.py now.", done.stderr)
+        self.assertIn("turn 2 text: finished writing", done.stderr)
+        quiet = self.server([reply(content="quiet finish")])
+        self.configure(self.profile("fake", quiet))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("text:", done.stderr)
+
+    def test_stdout_line_unchanged_with_new_options(self):
+        self.simple()
+        done = self.run_round(extra=("--verbose", "--heartbeat", "1"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(
+            lines[0], r"^ok: 1 files changed \(fake/fake-model, 2 turns, \$[\d.]+\)$"
+        )
 
 
 if __name__ == "__main__":
