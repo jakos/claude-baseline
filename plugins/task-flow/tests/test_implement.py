@@ -748,6 +748,109 @@ class ImplementTest(unittest.TestCase):
             },
         )
 
+    # ------------------------------------------------------------------ staging
+
+    def staged(self):
+        return git(self.worktree, "diff", "--cached", "--name-status").splitlines()
+
+    def test_preexisting_untracked_files_not_staged(self):
+        cache = self.worktree / "__pycache__"
+        cache.mkdir()
+        (cache / "x.pyc").write_bytes(b"pyc")
+        (self.worktree / "notes.txt").write_text("n\n", encoding="utf-8", newline="")
+        self.simple()  # the model writes src/new.py, then finishes
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.staged(), ["A\tsrc/new.py"])
+        self.assertEqual(
+            self.metrics()["files_changed"], [{"path": "src/new.py", "status": "A"}]
+        )
+        others = git(self.worktree, "ls-files", "--others").splitlines()
+        self.assertEqual(sorted(others), ["__pycache__/x.pyc", "notes.txt"])
+
+    def test_command_changes_staged_except_artifacts(self):
+        code = (
+            "from pathlib import Path;"
+            "p = Path('README.md');"
+            "p.write_text(p.read_text(encoding='utf-8') + 'more\\n', encoding='utf-8');"
+            "Path('gen.py').write_text('g = 1\\n', encoding='utf-8');"
+            "Path('__pycache__').mkdir(exist_ok=True);"
+            "Path('__pycache__/y.pyc').write_bytes(b'y');"
+            "Path('pkg/__pycache__').mkdir(parents=True, exist_ok=True);"
+            "Path('pkg/__pycache__/z.cpython-314.pyc').write_bytes(b'z');"
+            "Path('.pytest_cache').mkdir(exist_ok=True);"
+            "Path('.pytest_cache/v').write_text('v', encoding='utf-8');"
+            "Path('.DS_Store').write_bytes(b'ds')"
+        )
+        server = self.server(
+            [
+                reply(tool_call("run_command", {"command": python_command(code)})),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(sorted(self.staged()), ["A\tgen.py", "M\tREADME.md"])
+        files = self.metrics()["files_changed"]
+        self.assertEqual(
+            sorted(files, key=lambda f: f["path"]),
+            [{"path": "README.md", "status": "M"}, {"path": "gen.py", "status": "A"}],
+        )
+        others = git(self.worktree, "ls-files", "--others").splitlines()
+        for artifact in (
+            "__pycache__/y.pyc",
+            "pkg/__pycache__/z.cpython-314.pyc",
+            ".pytest_cache/v",
+            ".DS_Store",
+        ):
+            self.assertIn(artifact, others)
+
+    def test_write_tool_paths_staged_artifacts_never(self):
+        (self.worktree / "notes.txt").write_text("n\n", encoding="utf-8", newline="")
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "notes.txt", "content": "edited\n"}
+                    ),
+                    tool_call(
+                        "write_file",
+                        {"path": "build/__pycache__/w.pyc", "content": "w"},
+                        "c2",
+                    ),
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.staged(), ["A\tnotes.txt"])
+        self.assertEqual(
+            self.metrics()["files_changed"], [{"path": "notes.txt", "status": "A"}]
+        )
+        others = git(self.worktree, "ls-files", "--others").splitlines()
+        self.assertIn("build/__pycache__/w.pyc", others)
+
+    def test_preexisting_tracked_change_staged_but_not_reported(self):
+        (self.worktree / "README.md").write_text(
+            "changed before the round\n", encoding="utf-8", newline=""
+        )
+        self.simple()  # the model writes src/new.py, then finishes
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertRegex(
+            done.stdout.splitlines()[0],
+            r"^ok: 1 files changed \(fake/fake-model, 2 turns, \$[\d.]+\)$",
+        )
+        self.assertEqual(sorted(self.staged()), ["A\tsrc/new.py", "M\tREADME.md"])
+        self.assertEqual(
+            self.metrics()["files_changed"], [{"path": "src/new.py", "status": "A"}]
+        )
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertTrue(status.endswith("round 1 implementer: src/new.py (A)\n"))
+
     # ------------------------------------------------------------------ worktree and refusals
 
     def test_worktree_none_uses_repo_root(self):
