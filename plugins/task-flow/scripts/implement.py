@@ -33,8 +33,10 @@ Progress goes to stderr. stdout gets exactly one line and the exit code says how
 
 Files written: <task-dir>/impl-<round>.json (metrics, after exit 0, 1 or 3); status.md is
 appended to under `## Log` only (`round <n> implementer: <path> (A|M|D)` lines on ok,
-`BLOCKED: <reason>` on blocked, nothing on failed). Changes are staged with `git add -A`;
-nothing is ever committed.
+`BLOCKED: <reason>` on blocked, nothing on failed). After the round the script stages what
+the round produced — tracked changes, files written with `write_file`/`edit_file`, and new
+files created by commands — but never pre-existing untracked files or build artifacts such
+as `__pycache__`; nothing is ever committed.
 
 Limits, stated plainly: commands the model runs are matched as text only (a script can
 still push or commit), they run without a shell (no pipes or redirects), their network
@@ -51,6 +53,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +86,9 @@ CHILD_ENV_EXACT = {
     "VIRTUAL_ENV",
 }
 CHILD_ENV_PREFIXES = ("LC_", "UV_", "PYTHON")
+ARTIFACT_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+ARTIFACT_SUFFIXES = (".pyc", ".pyo")
+ARTIFACT_NAMES = {".ds_store", "thumbs.db"}
 
 ADAPTER = """\
 ## Runner adapter (this overrides the instructions above where they differ)
@@ -95,8 +101,10 @@ read_file, write_file, edit_file, list_files, grep, run_command and blocked.
   reach the .work folder and cannot write there, so never try to edit status.md.
 - To report that the plan is wrong or a step cannot be done, call the `blocked` tool with
   the reason. The script then writes the `BLOCKED:` line to status.md for you.
-- Do not run `git add` or `git commit`. The script stages everything with `git add -A` and
-  writes the `round <n> implementer:` Log line itself.
+- Do not run `git add` or `git commit`. The script stages the round's changes itself —
+  tracked edits, files you wrote with `write_file`/`edit_file`, and new files your commands
+  created, but never pre-existing untracked files or build artifacts such as `__pycache__`
+  — and writes the `round <n> implementer:` Log line itself.
 - File paths are relative to the worktree or absolute; both must stay inside the worktree.
 - run_command starts ONE program with arguments, without a shell: no pipes, redirects,
   `&&`, `;`, globbing or variable expansion. The working directory is the worktree. Use
@@ -262,7 +270,12 @@ def truncate(text: str, cap: int = OUTPUT_CAP) -> str:
 # ---------------------------------------------------------------------------- git
 
 
-def git(worktree: Path, *args: str) -> str:
+def git(
+    worktree: Path,
+    *args: str,
+    env: dict | None = None,
+    input: str | None = None,
+) -> str:
     try:
         done = subprocess.run(
             ["git", "-C", str(worktree), *args],
@@ -271,6 +284,8 @@ def git(worktree: Path, *args: str) -> str:
             errors="replace",
             timeout=120,
             check=False,
+            env={**os.environ, **env} if env else None,
+            input=input,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitError(f"git {args[0]}: {exc}") from exc
@@ -279,9 +294,65 @@ def git(worktree: Path, *args: str) -> str:
     return done.stdout
 
 
-def snapshot(worktree: Path) -> str:
-    """Stage everything and return the tree id; creates no commit and no ref."""
-    git(worktree, "add", "-A")
+def is_artifact(path: str) -> bool:
+    """True for a well-known build artifact (git path, /-separated): any component
+    naming an artifact directory, or a file with an artifact suffix or name."""
+    parts = path.split("/")
+    if any(part.casefold() in ARTIFACT_DIRS for part in parts):
+        return True
+    name = parts[-1].casefold()
+    return name in ARTIFACT_NAMES or name.endswith(ARTIFACT_SUFFIXES)
+
+
+def untracked_files(worktree: Path) -> list[str]:
+    """Untracked, non-ignored paths of the worktree, /-separated and unquoted."""
+    out = git(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    return [path for path in out.split("\0") if path]
+
+
+def snapshot(worktree: Path) -> tuple[str, set[str]]:
+    """Return the before tree and the untracked paths present before the round.
+
+    The real index is not modified: the tree that also contains the unstaged
+    modifications of tracked files is built in a temporary index outside the
+    worktree (GIT_INDEX_FILE). Creates no commit and no ref.
+    """
+    base = git(worktree, "write-tree").strip()
+    untracked_before = set(untracked_files(worktree))
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git(worktree, "read-tree", base, env=env)
+        git(worktree, "add", "-u", env=env)
+        before = git(worktree, "write-tree", env=env).strip()
+    return before, untracked_before
+
+
+def stage_round(worktree: Path, untracked_before: set[str], touched: set[str]) -> str:
+    """Stage what the round produced and return the after tree id.
+
+    Stages tracked modifications and deletions, plus untracked files that are
+    new this round or were written with write_file/edit_file, unless they are
+    build artifacts; a nested repository (listed as `dir/`) is never staged.
+    Pre-existing untracked files and untracked artifacts are left alone.
+    Creates no commit and no ref.
+    """
+    git(worktree, "add", "-u")
+    stage = [
+        path
+        for path in untracked_files(worktree)
+        if not path.endswith("/")
+        and not is_artifact(path)
+        and (path not in untracked_before or path in touched)
+    ]
+    if stage:
+        git(
+            worktree,
+            "--literal-pathspecs",
+            "add",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+            input="\0".join(stage) + "\0",
+        )
     return git(worktree, "write-tree").strip()
 
 
@@ -470,9 +541,10 @@ def child_env() -> dict:
 
 
 class Tools:
-    def __init__(self, worktree: Path, command_timeout: float):
+    def __init__(self, worktree: Path, command_timeout: float, touched: set[str]):
         self.root = worktree.resolve()
         self.command_timeout = command_timeout
+        self.touched = touched
 
     # path handling
     def resolve(self, raw, write=False) -> Path:
@@ -543,6 +615,7 @@ class Tools:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
+        self.touched.add(self.rel(path))
         return f"wrote {len(content)} characters to {self.rel(path)}"
 
     def edit_file(self, args):
@@ -566,6 +639,7 @@ class Tools:
             )
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(text.replace(old, new, 1))
+        self.touched.add(self.rel(path))
         return f"edited {self.rel(path)}"
 
     def list_files(self, args):
@@ -807,6 +881,7 @@ class Session:
         self.chain: list[dict] = []
         self.turns = 0
         self.active = ctx.profile_name
+        self.touched: set[str] = set()
 
     def cost(self) -> float:
         total = 0.0
@@ -891,7 +966,9 @@ class Session:
         return "failed", f"all profiles unavailable ({reasons})"
 
     def run_profile(self, name: str, profile: dict, interrupted) -> tuple[str, str]:
-        tools = Tools(self.ctx.worktree, profile["command_timeout_seconds"])
+        tools = Tools(
+            self.ctx.worktree, profile["command_timeout_seconds"], self.touched
+        )
         user = self.user
         if interrupted:
             user += (
@@ -1018,7 +1095,7 @@ def write_metrics(
 def main(argv=None) -> int:
     try:
         ctx = prepare(parse_args(argv))
-        before = snapshot(ctx.worktree)
+        before, untracked_before = snapshot(ctx.worktree)
     except Refusal as exc:
         print(f"refused: {one_line(exc)}")
         return 2
@@ -1036,7 +1113,8 @@ def main(argv=None) -> int:
 
     files: list[dict] = []
     try:
-        files = changed_files(ctx.worktree, before, snapshot(ctx.worktree))
+        after = stage_round(ctx.worktree, untracked_before, session.touched)
+        files = changed_files(ctx.worktree, before, after)
     except GitError as exc:
         if status == "ok":
             status, reason = "failed", f"could not stage the result: {exc}"

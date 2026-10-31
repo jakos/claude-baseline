@@ -336,7 +336,20 @@ copied). On a retryable failure that outlasts `retries`, the run restarts on the
 `fallback` profile with the same prompt and a note that the worktree may hold partial
 changes; any other 4xx fails without fallback.
 
-After the loop it runs `git add -A` and never commits. It appends to `status.md` only under
+After the loop it stages what the round produced and never commits:
+
+- tracked modifications and deletions (`git add -u`), including the ones commands made;
+- a pre-existing untracked file only when the model wrote or edited it with `write_file` /
+  `edit_file`;
+- any other new file — one the file tools created or one a command created (`run_command`,
+  e.g. a generated source file or a lock file) — unless `.gitignore` or `.git/info/exclude`
+  ignores it;
+- never a build artifact: a path with a `__pycache__/`, `.pytest_cache/`, `.ruff_cache/` or
+  `.mypy_cache/` component, a `*.pyc` / `*.pyo` file, `.DS_Store` or `Thumbs.db`. An
+  artifact is never staged while untracked, even when the model wrote it; a tracked
+  artifact is a project decision and follows `git add -u`.
+
+It appends to `status.md` only under
 `## Log`: one `round <n> implementer: <path> (A|M|D)` line per changed file (or `no files
 changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writes
 `<task-dir>/impl-<n>.json` for exit 0, 1 and 3: `profile`, `model`, `turns`, `tokens`
@@ -359,6 +372,14 @@ changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writ
   `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
   `LANG`, `LC_*`, `TERM`, `CI`, `VIRTUAL_ENV`, `UV_*` and `PYTHON*`. Tokens, cloud
   credentials and API keys of any other name never reach them.
+- `implement.py` stages only what the round produced (see above): pre-existing untracked
+  files and build artifacts such as `__pycache__/` are never staged. The Claude
+  `implementer` subagent still runs `git add -A` (`agents/implementer.md` step 8), so in a
+  repository without a `.gitignore` it stages pre-existing untracked files such as
+  `__pycache__/` — add a `.gitignore` entry or unstage them before finishing.
+- A new file a command creates is staged unless it is ignored or on the artifact list
+  above: in a repository without a `.gitignore`, a `node_modules/` or `dist/` a command
+  creates would be staged.
 
 ## Project configuration
 
