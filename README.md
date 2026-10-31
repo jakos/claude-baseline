@@ -245,7 +245,10 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps only .md files and worktree/
     scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
-    tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py, tests/test_autopilot.py
+    scripts/implement.py             one implementer round on an OpenAI-compatible model (by hand)
+    scripts/models.py                reads, merges and validates models.toml
+    tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py, tests/test_autopilot.py,
+    tests/test_models.py, tests/test_implement.py
 ```
 
 Validate before pushing:
