@@ -12,6 +12,7 @@ task's worktree through a small set of tools, then stages the result and logs it
 Usage:
   uv run --script plugins/task-flow/scripts/implement.py \\
       --task-dir .work/<task-id> --worktree <path|none> --round <n> [--profile <name>]
+      [--heartbeat <seconds>] [--verbose]
 
   --task-dir   the task's .work/<task-id> folder; the repository root is the parent of
                the .work folder that contains it
@@ -19,6 +20,9 @@ Usage:
   --round      1 for the first round; n > 1 also needs review-<n-1>.md
   --profile    a [profiles.<name>] of models.toml (see scripts/models.py); without it
                [roles] implementer must name a profile
+  --heartbeat  seconds between heartbeat lines on stderr while a request or a command
+               is in flight (default 30; 0 disables, negative is refused)
+  --verbose    also log the model's text content of each response
 
 Progress goes to stderr. stdout gets exactly one line and the exit code says how it went:
 
@@ -31,7 +35,12 @@ Progress goes to stderr. stdout gets exactly one line and the exit code says how
                         disabled or without its key)
   3  blocked: <reason>  the model reported that the plan is wrong
 
-Files written: <task-dir>/impl-<round>.json (metrics, after exit 0, 1 or 3); status.md is
+Files written: <task-dir>/impl-<round>.json (metrics, after exit 0, 1 or 3; besides the
+keys documented in the plugin README it carries model_seconds, retry_wait_seconds,
+command_seconds, slowest_request and slowest_command, and every fallback_chain entry a
+retries list) and <task-dir>/impl-<round>.progress.jsonl (one compact JSON line per counted
+turn, appended as the round runs, so an interrupted round still shows its turns; it is
+scratch and is deleted at /task-finish, which keeps only impl-*.json); status.md is
 appended to under `## Log` only (`round <n> implementer: <path> (A|M|D)` lines on ok,
 `BLOCKED: <reason>` on blocked, nothing on failed). After the round the script stages what
 the round produced — tracked changes, files written with `write_file`/`edit_file`, and new
@@ -54,10 +63,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Self
 
 import models
 from guard import CLIENT_DRY_RUN, COMMITS, LEAVES_MACHINE
@@ -248,12 +259,53 @@ class Parser(argparse.ArgumentParser):
         raise Refusal(message)
 
 
+_LOG_LOCK = threading.Lock()
+
+
 def log(message: str) -> None:
-    print(f"[implement] {message}", file=sys.stderr, flush=True)
+    with _LOG_LOCK:
+        print(f"[implement] {message}", file=sys.stderr, flush=True)
 
 
 def one_line(text: str, limit: int = 300) -> str:
     return " ".join(str(text).split())[:limit]
+
+
+def fmt_tokens(count: int) -> str:
+    """Token count as an integer, or as `12.3k` when >= 1000."""
+    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
+
+
+class Heartbeat:
+    """While the block runs, log `<label> ... <elapsed> s` every `interval` seconds.
+
+    The thread is a daemon and is joined with a timeout on exit, so a bug here can
+    never hang or change the exit of the round. `interval <= 0` disables it.
+    """
+
+    def __init__(self, interval: float, label: str):
+        self.interval = interval
+        self.label = label
+        self.started = time.monotonic()
+        self.stop = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self) -> Self:
+        if self.interval > 0:
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=max(self.interval, 1.0) + 1.0)
+        return False
+
+    def _run(self) -> None:
+        while not self.stop.wait(self.interval):
+            elapsed = int(time.monotonic() - self.started)
+            log(f"{self.label} ... {elapsed} s")
 
 
 # ---------------------------------------------------------------------------- output
@@ -377,6 +429,9 @@ class Context:
         self.profile_name: str
         self.profiles: dict
         self.files: dict
+        self.heartbeat: float
+        self.verbose: bool
+        self.progress_path: Path
 
 
 def parse_args(argv):
@@ -387,7 +442,22 @@ def parse_args(argv):
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--round", required=True, type=int)
     parser.add_argument("--profile")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=30.0,
+        help="seconds between heartbeat lines while a request or command runs "
+        "(default 30; 0 disables)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also log the model's text content of each response",
+    )
+    args = parser.parse_args(argv)
+    if args.heartbeat < 0:
+        raise Refusal(f"--heartbeat must be 0 or more seconds, got {args.heartbeat:g}")
+    return args
 
 
 def approved(status_text: str) -> bool:
@@ -457,6 +527,9 @@ def prepare(args) -> Context:
             f"profile {name!r}: environment variable {profile['api_key_env']} is not set"
         )
     ctx.profile_name = name
+    ctx.heartbeat = args.heartbeat
+    ctx.verbose = args.verbose
+    ctx.progress_path = ctx.task_dir / f"impl-{ctx.round}.progress.jsonl"
     return ctx
 
 
@@ -541,10 +614,21 @@ def child_env() -> dict:
 
 
 class Tools:
-    def __init__(self, worktree: Path, command_timeout: float, touched: set[str]):
+    def __init__(
+        self,
+        worktree: Path,
+        command_timeout: float,
+        touched: set[str],
+        heartbeat: float = 0.0,
+        on_command=None,
+    ):
         self.root = worktree.resolve()
         self.command_timeout = command_timeout
         self.touched = touched
+        self.heartbeat = heartbeat
+        self.on_command = on_command
+        self.turn = 0
+        self.last_command: float | None = None
 
     # path handling
     def resolve(self, raw, write=False) -> Path:
@@ -765,15 +849,20 @@ class Tools:
         except OSError as exc:
             raise ToolError(f"error: cannot start command: {exc}") from None
         timed_out = False
-        try:
-            output, _ = proc.communicate(timeout=self.command_timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            proc.kill()
+        started = time.monotonic()
+        with Heartbeat(self.heartbeat, f"running {one_line(command, 60)}"):
             try:
-                output, _ = proc.communicate(timeout=5)
+                output, _ = proc.communicate(timeout=self.command_timeout)
             except subprocess.TimeoutExpired:
-                output = b""
+                timed_out = True
+                proc.kill()
+                try:
+                    output, _ = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    output = b""
+        self.last_command = time.monotonic() - started
+        if self.on_command is not None:
+            self.on_command(self.turn, command, self.last_command, timed_out)
         text = output.decode("utf-8", errors="replace")
         head = (
             f"timed out after {self.command_timeout:g} s and was killed"
@@ -820,7 +909,25 @@ def retry_after(headers) -> float | None:
         return None
 
 
-def post(profile: dict, key: str | None, body: dict) -> dict:
+def is_timeout(exc: BaseException) -> bool:
+    """True for a TimeoutError, directly or as the reason of a URLError."""
+    if isinstance(exc, TimeoutError):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, TimeoutError)
+
+
+def post(
+    profile: dict, key: str | None, body: dict, attempts: list | None = None
+) -> dict:
+    """POST one chat completion; retry retryable failures per the profile.
+
+    When `attempts` is a list, every attempt is recorded in it as
+    {"seconds", "outcome", "wait"}: "outcome" is "ok" or the retry reason ("HTTP <code>",
+    "timeout", or the `<ExceptionName>: <message>` text), "wait" the backoff sleep that
+    followed the attempt (0.0 for the last one). The list is filled also when Unavailable
+    or Fatal is raised.
+    """
     url = profile["base_url"].rstrip("/") + "/chat/completions"
     data = json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -830,6 +937,7 @@ def post(profile: dict, key: str | None, body: dict) -> dict:
     last = "no attempt made"
     for attempt in range(retries + 1):
         delay = None
+        started = time.monotonic()
         try:
             request = urllib.request.Request(
                 url, data=data, headers=headers, method="POST"
@@ -837,14 +945,32 @@ def post(profile: dict, key: str | None, body: dict) -> dict:
             with urllib.request.urlopen(
                 request, timeout=profile["request_timeout_seconds"]
             ) as r:
-                return json.loads(r.read().decode("utf-8"))
+                payload = json.loads(r.read().decode("utf-8"))
+            if attempts is not None:
+                attempts.append(
+                    {
+                        "seconds": time.monotonic() - started,
+                        "outcome": "ok",
+                        "wait": 0.0,
+                    }
+                )
+            return payload
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:300].decode("utf-8", errors="replace")
             code = exc.code
             if code in (408, 429) or code >= 500:
                 last = f"HTTP {code}"
+                outcome = last
                 delay = retry_after(exc.headers)
             else:
+                if attempts is not None:
+                    attempts.append(
+                        {
+                            "seconds": time.monotonic() - started,
+                            "outcome": f"HTTP {code}",
+                            "wait": 0.0,
+                        }
+                    )
                 raise Fatal(f"HTTP {code}: {one_line(detail)}") from None
             exc.close()
         except (
@@ -856,6 +982,15 @@ def post(profile: dict, key: str | None, body: dict) -> dict:
             ValueError,
         ) as exc:
             last = f"{type(exc).__name__}: {one_line(exc, 120)}"
+            outcome = "timeout" if is_timeout(exc) else last
+        if attempts is not None:
+            attempts.append(
+                {
+                    "seconds": time.monotonic() - started,
+                    "outcome": outcome,
+                    "wait": 0.0,
+                }
+            )
         if attempt < retries:
             wait = (
                 delay
@@ -863,6 +998,8 @@ def post(profile: dict, key: str | None, body: dict) -> dict:
                 else profile["retry_base_seconds"] * 2**attempt
             )
             log(f"{last}; retrying in {wait:g} s ({attempt + 1}/{retries})")
+            if attempts is not None:
+                attempts[-1]["wait"] = wait
             time.sleep(wait)
     raise Unavailable(f"{last} after {retries + 1} attempts")
 
@@ -872,8 +1009,9 @@ def as_int(value) -> int:
 
 
 class Session:
-    def __init__(self, ctx: Context):
+    def __init__(self, ctx: Context, started: float):
         self.ctx = ctx
+        self.round_started = started
         self.start = ctx.profiles[ctx.profile_name]
         self.system = build_system(ctx.files[ctx.task_dir / "plan.md"])
         self.user = build_user(ctx)
@@ -882,6 +1020,12 @@ class Session:
         self.turns = 0
         self.active = ctx.profile_name
         self.touched: set[str] = set()
+        self.model_seconds = 0.0
+        self.retry_wait_seconds = 0.0
+        self.command_seconds = 0.0
+        self.slowest_request: dict | None = None
+        self.slowest_command: dict | None = None
+        self.retries: dict[str, list] = {}
 
     def cost(self) -> float:
         total = 0.0
@@ -923,7 +1067,8 @@ class Session:
         body.update(profile["extra_body"] or {})
         return body
 
-    def account(self, name: str, usage) -> int:
+    def account(self, name: str, usage) -> dict:
+        """Add one response's usage to the profile's totals; return this call's tokens."""
         usage = usage if isinstance(usage, dict) else {}
         entry = self.usage.setdefault(name, {"input": 0, "cached": 0, "output": 0})
         prompt = as_int(usage.get("prompt_tokens"))
@@ -931,10 +1076,69 @@ class Session:
         cached = (
             as_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
         )
-        entry["input"] += prompt
-        entry["cached"] += min(cached, prompt)
-        entry["output"] += as_int(usage.get("completion_tokens"))
-        return prompt
+        turn = {
+            "input": prompt,
+            "cached": min(cached, prompt),
+            "output": as_int(usage.get("completion_tokens")),
+        }
+        entry["input"] += turn["input"]
+        entry["cached"] += turn["cached"]
+        entry["output"] += turn["output"]
+        return turn
+
+    def note_attempts(self, name: str, attempts: list, turn: int) -> None:
+        """Accumulate one post() call's attempts: model time, waits, slowest request,
+        and one retry record per failed attempt that was followed by another one."""
+        for index, attempt in enumerate(attempts):
+            seconds = attempt["seconds"]
+            self.model_seconds += seconds
+            self.retry_wait_seconds += attempt.get("wait", 0.0)
+            if (
+                self.slowest_request is None
+                or seconds > self.slowest_request["seconds"]
+            ):
+                self.slowest_request = {
+                    "turn": turn,
+                    "profile": name,
+                    "seconds": round(seconds, 3),
+                    "outcome": attempt["outcome"],
+                }
+            if attempt["outcome"] != "ok" and index + 1 < len(attempts):
+                self.retries.setdefault(name, []).append(
+                    {
+                        "turn": turn,
+                        "reason": attempt["outcome"],
+                        "attempt_seconds": round(seconds, 3),
+                        "wait_seconds": round(attempt.get("wait", 0.0), 3),
+                    }
+                )
+
+    def record_command(
+        self, turn: int, command: str, seconds: float, timed_out: bool
+    ) -> None:
+        self.command_seconds += seconds
+        if self.slowest_command is None or seconds > self.slowest_command["seconds"]:
+            self.slowest_command = {
+                "turn": turn,
+                "command": command[:200],
+                "seconds": round(seconds, 3),
+                "timed_out": timed_out,
+            }
+
+    def write_progress(self, profile: str, record: dict) -> None:
+        """Append one turn's progress line; a write error only logs a warning."""
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        try:
+            with open(
+                self.ctx.progress_path, "a", encoding="utf-8", newline=""
+            ) as handle:
+                handle.write(line + "\n")
+                handle.flush()
+        except OSError as exc:
+            log(
+                f"warning: cannot write {self.ctx.progress_path.name}: "
+                f"{one_line(exc, 120)}"
+            )
 
     def run(self) -> tuple[str, str]:
         candidates = [self.ctx.profile_name, *self.start["fallback"]]
@@ -949,13 +1153,25 @@ class Session:
                     skip = f"{profile['api_key_env']} is not set"
                 if skip:
                     self.chain.append(
-                        {"profile": name, "outcome": "skipped", "reason": skip}
+                        {
+                            "profile": name,
+                            "outcome": "skipped",
+                            "reason": skip,
+                            "retries": [],
+                        }
                     )
                     log(f"fallback profile {name} skipped: {skip}")
                     continue
             self.active = name
             status, reason = self.run_profile(name, profile, interrupted)
-            self.chain.append({"profile": name, "outcome": status, "reason": reason})
+            self.chain.append(
+                {
+                    "profile": name,
+                    "outcome": status,
+                    "reason": reason,
+                    "retries": self.retries.get(name, []),
+                }
+            )
             if status != "unavailable":
                 return status, reason
             interrupted = (name, reason)
@@ -967,7 +1183,11 @@ class Session:
 
     def run_profile(self, name: str, profile: dict, interrupted) -> tuple[str, str]:
         tools = Tools(
-            self.ctx.worktree, profile["command_timeout_seconds"], self.touched
+            self.ctx.worktree,
+            profile["command_timeout_seconds"],
+            self.touched,
+            heartbeat=self.ctx.heartbeat,
+            on_command=self.record_command,
         )
         user = self.user
         if interrupted:
@@ -989,69 +1209,132 @@ class Session:
                     "failed",
                     f"max_turns ({profile['max_turns']}) exceeded on {name}",
                 )
+            attempts: list = []
+            request_started = time.monotonic()
+            request_seconds = 0.0
+            turn_tools: list[str] = []
+            turn_tokens = {"input": 0, "cached": 0, "output": 0}
+            command_before = self.command_seconds
+            retries_before = len(self.retries.get(name, []))
+            counted = False
             try:
-                payload = post(profile, key, self.body(profile, messages))
-            except Unavailable as exc:
-                return "unavailable", str(exc)
-            except Fatal as exc:
-                return "failed", f"{name}: {exc}"
-            turns += 1
-            self.turns += 1
-            prompt = self.account(
-                name, payload.get("usage") if isinstance(payload, dict) else None
-            )
-            if cap is not None and self.cost() > cap:
-                return "failed", f"max_cost_usd ({cap:g}) exceeded: ${self.cost():.4f}"
-            if profile["max_context"] is not None and prompt > profile["max_context"]:
-                return (
-                    "failed",
-                    f"max_context ({profile['max_context']}) exceeded: {prompt} tokens",
-                )
-            try:
-                message = payload["choices"][0]["message"]
-                calls = message.get("tool_calls") or []
-                content = message.get("content")
-            except (KeyError, IndexError, TypeError, AttributeError):
-                return "failed", f"{name}: malformed response from the model"
-            if not calls:
-                log(f"turn {self.turns}: final message")
-                return "ok", "finished"
-            assistant = {"role": "assistant", "content": content, "tool_calls": []}
-            results = []
-            for call in calls:
                 try:
-                    call_id = str(call["id"])
-                    function = call["function"]
-                    tool_name = function["name"]
-                    raw = function.get("arguments") or "{}"
-                except (KeyError, TypeError):
-                    return "failed", f"{name}: malformed tool call from the model"
-                assistant["tool_calls"].append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": raw
-                            if isinstance(raw, str)
-                            else json.dumps(raw),
+                    with Heartbeat(self.ctx.heartbeat, f"waiting for {name}"):
+                        payload = post(
+                            profile, key, self.body(profile, messages), attempts
+                        )
+                except Unavailable as exc:
+                    self.note_attempts(name, attempts, self.turns + 1)
+                    return "unavailable", str(exc)
+                except Fatal as exc:
+                    self.note_attempts(name, attempts, self.turns + 1)
+                    return "failed", f"{name}: {exc}"
+                request_seconds = time.monotonic() - request_started
+                self.note_attempts(name, attempts, self.turns + 1)
+                counted = True
+                turns += 1
+                self.turns += 1
+                tools.turn = self.turns
+                turn_tokens = self.account(
+                    name, payload.get("usage") if isinstance(payload, dict) else None
+                )
+                if cap is not None and self.cost() > cap:
+                    return (
+                        "failed",
+                        f"max_cost_usd ({cap:g}) exceeded: ${self.cost():.4f}",
+                    )
+                if (
+                    profile["max_context"] is not None
+                    and turn_tokens["input"] > profile["max_context"]
+                ):
+                    return (
+                        "failed",
+                        (
+                            f"max_context ({profile['max_context']}) exceeded: "
+                            f"{turn_tokens['input']} tokens"
+                        ),
+                    )
+                try:
+                    message = payload["choices"][0]["message"]
+                    calls = message.get("tool_calls") or []
+                    content = message.get("content")
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    return "failed", f"{name}: malformed response from the model"
+                if self.ctx.verbose and isinstance(content, str) and content.strip():
+                    log(f"turn {self.turns} text: {one_line(content, 500)}")
+                prefix = (
+                    f"turn {self.turns} ({request_seconds:.1f} s, "
+                    f"{fmt_tokens(turn_tokens['input'])} in / "
+                    f"{fmt_tokens(turn_tokens['output'])} out, "
+                    f"${self.cost():.4f} total)"
+                )
+                if not calls:
+                    log(f"{prefix}: final message")
+                    return "ok", "finished"
+                assistant = {"role": "assistant", "content": content, "tool_calls": []}
+                results = []
+                for call in calls:
+                    try:
+                        call_id = str(call["id"])
+                        function = call["function"]
+                        tool_name = function["name"]
+                        raw = function.get("arguments") or "{}"
+                    except (KeyError, TypeError):
+                        return "failed", f"{name}: malformed tool call from the model"
+                    turn_tools.append(tool_name)
+                    assistant["tool_calls"].append(
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": raw
+                                if isinstance(raw, str)
+                                else json.dumps(raw),
+                            },
+                        }
+                    )
+                    try:
+                        arguments = json.loads(raw) if isinstance(raw, str) else raw
+                    except ValueError:
+                        result, blocked = "error: arguments are not valid JSON", None
+                    else:
+                        tools.last_command = None
+                        result, blocked = tools.execute(tool_name, arguments)
+                    if tool_name == "run_command" and tools.last_command is not None:
+                        log(
+                            f"{prefix}: run_command [{tools.last_command:.1f} s] -> "
+                            f"{one_line(result, 80)}"
+                        )
+                    else:
+                        log(f"{prefix}: {tool_name} -> {one_line(result, 80)}")
+                    if blocked is not None:
+                        return "blocked", blocked
+                    results.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": result}
+                    )
+                messages.append(assistant)
+                messages.extend(results)
+            finally:
+                if counted:
+                    self.write_progress(
+                        name,
+                        {
+                            "turn": self.turns,
+                            "profile": name,
+                            "tools": turn_tools,
+                            "request_seconds": round(request_seconds, 3),
+                            "retries": len(self.retries.get(name, [])) - retries_before,
+                            "command_seconds": round(
+                                self.command_seconds - command_before, 3
+                            ),
+                            "tokens": turn_tokens,
+                            "cost_usd": round(self.cost(), 6),
+                            "elapsed_seconds": round(
+                                time.monotonic() - self.round_started, 3
+                            ),
                         },
-                    }
-                )
-                try:
-                    arguments = json.loads(raw) if isinstance(raw, str) else raw
-                except ValueError:
-                    result, blocked = "error: arguments are not valid JSON", None
-                else:
-                    result, blocked = tools.execute(tool_name, arguments)
-                log(f"turn {self.turns}: {tool_name} -> {one_line(result, 80)}")
-                if blocked is not None:
-                    return "blocked", blocked
-                results.append(
-                    {"role": "tool", "tool_call_id": call_id, "content": result}
-                )
-            messages.append(assistant)
-            messages.extend(results)
+                    )
 
 
 # ---------------------------------------------------------------------------- results
@@ -1086,6 +1369,11 @@ def write_metrics(
         "fallback_chain": session.chain,
         "settings": session.settings(),
         "files_changed": files,
+        "model_seconds": round(session.model_seconds, 3),
+        "retry_wait_seconds": round(session.retry_wait_seconds, 3),
+        "command_seconds": round(session.command_seconds, 3),
+        "slowest_request": session.slowest_request,
+        "slowest_command": session.slowest_command,
     }
     path = ctx.task_dir / f"impl-{ctx.round}.json"
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -1104,7 +1392,12 @@ def main(argv=None) -> int:
         return 2
 
     started = time.monotonic()
-    session = Session(ctx)
+    try:
+        with open(ctx.progress_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("")
+    except OSError as exc:
+        log(f"warning: cannot create {ctx.progress_path.name}: {one_line(exc, 120)}")
+    session = Session(ctx, started)
     log(f"round {ctx.round}, profile {ctx.profile_name}, worktree {ctx.worktree}")
     try:
         status, reason = session.run()

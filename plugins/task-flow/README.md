@@ -263,12 +263,15 @@ then the `implement.py` command:
 
 ```
 uv run --script plugins/task-flow/scripts/implement.py \
-    --task-dir .work/<task-id> --worktree <path|none> --round <n> [--profile <name>]
+    --task-dir .work/<task-id> --worktree <path|none> --round <n> [--profile <name>] \
+    [--heartbeat <seconds>] [--verbose]
 ```
 
 `--worktree none` means the repository root, which is the parent of the `.work` folder that
-holds the task. Without `--profile`, `[roles] implementer` must name a profile. Progress
-goes to stderr; stdout gets one line:
+holds the task. Without `--profile`, `[roles] implementer` must name a profile.
+`--heartbeat <seconds>` sets the interval of the heartbeat lines on stderr while a request or
+a command runs (default 30, `0` disables, a negative value is refused); `--verbose` also
+logs the model's text content of each response. Progress goes to stderr; stdout gets one line:
 
 | Exit | stdout line | Meaning |
 | --- | --- | --- |
@@ -355,7 +358,32 @@ changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writ
 `<task-dir>/impl-<n>.json` for exit 0, 1 and 3: `profile`, `model`, `turns`, `tokens`
 (`input`, `cached`, `output`), `cost_usd`, `duration_seconds`, `status`, `reason`,
 `fallback_chain`, `settings` (`temperature`, `max_output_tokens`, `extra_body`) and
-`files_changed`.
+`files_changed`, plus the timing keys `model_seconds` (sum of all HTTP attempt durations,
+successful or not, excluding backoff waits), `retry_wait_seconds` (sum of the backoff sleeps),
+`command_seconds` (sum of the `run_command` durations), `slowest_request` (`turn`, `profile`,
+`seconds`, `outcome` — `ok` or the retry reason — of the slowest single HTTP attempt, or
+`null`) and `slowest_command` (`turn`, `command`, `seconds`, `timed_out`, or `null`); every
+`fallback_chain` entry also carries `retries`, one `turn`, `reason`, `attempt_seconds`,
+`wait_seconds` object per failed attempt that was followed by another one on the same
+profile (`[]` when none).
+
+While it runs, stderr shows one line per tool call and one for the final message, each
+starting `[implement] turn N (<req> s, <in> in / <out> out, $<cost> total):` — `<req>` the
+wall seconds of that turn's request including retries and waits, `<in>`/`<out>` the turn's
+prompt/completion tokens (`12.3k` from 1000 on), `<cost>` the running total — and a
+`run_command` line reads `run_command [<secs> s] -> <result>`. With `--heartbeat` it also
+logs `waiting for <profile> ... <elapsed> s` while a request is in flight and
+`running <command> ... <elapsed> s` while a `run_command` runs, so a slow round is
+distinguishable from a hung one. `--verbose` additionally logs `turn N text: <content>` for
+each response whose content is a non-empty string.
+
+Each counted turn also appends one compact JSON line to
+`<task-dir>/impl-<n>.progress.jsonl` — `turn`, `profile`, `tools`, `request_seconds`,
+`retries`, `command_seconds`, `tokens` (`input`, `cached`, `output`), `cost_usd`,
+`elapsed_seconds` — opened, written, flushed and closed per line, so a killed round still
+leaves its complete turns behind. The file is created empty only after the preconditions
+pass (a refusal writes nothing) and a re-run of the same round starts it afresh. It is
+scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
 
 ### Limits, stated plainly
 

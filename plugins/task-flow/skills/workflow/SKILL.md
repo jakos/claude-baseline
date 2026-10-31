@@ -21,6 +21,7 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   checks-<n>.md    automated check results for round n (1..3)
   review-<n>.md    reviewer verdict for round n
   impl-<n>.json    implementer metrics for round n, written by scripts/implement.py when an external profile implements
+  impl-<n>.progress.jsonl  per-turn trail of an external round; scratch, deleted at /task-finish
   summary.md       final summary, when done or escalated
   worktree/        the task's git worktree, when worktrees are used
 ```
