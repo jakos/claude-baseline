@@ -40,6 +40,26 @@ After every phase, so any run can resume: **edit the header lines in place** and
 one line at the end of `## History`**. Never rewrite the file from memory and never add a
 second `## History` or `## Log` heading — read it, change the lines, keep the rest.
 
+## Choosing each role's model
+
+At the start of every phase that runs a subagent, run `models.py roles` once from the
+repository root:
+
+```
+uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>
+```
+
+It prints one JSON object with the five roles (`planner`, `implementer`, `checker`,
+`reviewer`, `backlog`); each maps to `{"value": <configured value, or "claude" when unset>,
+"kind": "claude" | "profile" | "script", "model": <opus|sonnet|haiku, or null>}`. Exit 2:
+show its stderr and end the command without changing `status.md` — a precondition, not a
+stop. Pass a role's subagent call the `model` argument when that role's `model` is not
+null, and no `model` when it is null (the agent's frontmatter model then applies). With no
+`models.toml`, every role is `{"kind": "claude", "model": null, "value": "claude"}` and
+nothing changes. `[roles] checker = "script"` is refused as a precondition with the same
+handling as exit 2, with the message: `[roles] checker = "script"` is reserved for a later
+task-flow version — never a silent fallback to the Claude checker.
+
 ## Phase: new
 
 1. Read `.claude/task-flow.md` if it exists (format: `${CLAUDE_PLUGIN_ROOT}/templates/task-flow.md`).
@@ -54,7 +74,8 @@ second `## History` or `## Log` heading — read it, change the lines, keep the 
 
 ## Phase: plan
 
-1. Run subagent `task-flow:planner` with the paths.
+1. Run subagent `task-flow:planner` with the paths (its model as in "Choosing each role's
+   model").
 2. If `plan.md` starts its open questions with `BLOCKED: yes`: show the questions, set
    phase `new`, stop. After the user answers, append the answers to `task.md` and re-plan.
 3. Otherwise set phase `planned` and show a short summary: goal, profiles, number of
@@ -78,7 +99,8 @@ second `## History` or `## Log` heading — read it, change the lines, keep the 
    fail, `git switch -c task/<id>` in the repository root and record `worktree: none`.
    If the root has uncommitted changes and there is no worktree, stop and ask (a
    precondition, not a stop).
-3. Set round 0, phase `baseline`. Run subagent `task-flow:checker` with round 0. It runs
+3. Set round 0, phase `baseline`. Run subagent `task-flow:checker` with round 0 (its model
+   as in "Choosing each role's model"). It runs
    the plan's verification commands on the untouched base and writes `checks-0.md`.
 4. Failures in `checks-0.md` do not stop the run. They are recorded; continue to round 1.
 
@@ -90,15 +112,18 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 1. Refuse unless `plan-approved` is yes.
 2. Round 1 requires `checks-0.md`; if it is missing, run **Phase: baseline** first.
 3. Pick the implementer.
-   - (a) Resolve the role from the repository root:
-     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" role implementer --project <repo-root>`.
+   - (a) Resolve the roles from the repository root with `models.py roles`:
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`.
      Exit 2: show its stderr and end the command without changing `status.md` (a
-     precondition, like the uncommitted-changes check, not a stop).
+     precondition, like the uncommitted-changes check, not a stop). Read the
+     `implementer` entry of the JSON (as in "Choosing each role's model").
    - (b) Set round n, phase `implementing`.
-   - (c) Value `claude` or `claude:*` (also the result with no config): run subagent
-     `task-flow:implementer` with the paths, and for n > 1 the path of `review-<n-1>.md`,
-     exactly as today.
-   - (d) Any other value is a profile name. From the repository root, in the background
+   - (c) Kind `claude` (value `claude` or `claude:*`, also the result with no config):
+     run subagent `task-flow:implementer` with the paths, and for n > 1 the path of
+     `review-<n-1>.md`, passing the entry's `model` as the subagent call's `model`
+     argument when it is not null, exactly as today otherwise.
+   - (d) Kind `profile`: the entry's `value` is the profile name. From the repository
+     root, in the background
      (the round can outlast the Bash tool's foreground limit), run
      `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/implement.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round <n> --profile <value>`
      and wait for it. Read its exit code and its one result line (the last stdout line
@@ -109,14 +134,15 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
      round n, and end the command; the same command (`task-run <id>` /
      `task-implement <id>`) runs round n again. This is not one of the stops, does not count
      as a round, and is not a judgment that the run cannot pass.
-   - (e) The History line names the implementer: `claude`, or
+   - (e) The History line names the implementer: `claude`, or `claude:<model>`, or
      `<profile> (external): <result line>`.
 4. If the implementer appended `BLOCKED:` to the Log: phase `blocked`, show the problem,
    stop.
 
 ## Phase: check (round n)
 
-Phase `checking`. Run subagent `task-flow:checker`. It writes `checks-<n>.md`. When the
+Phase `checking`. Run subagent `task-flow:checker` (its model as in "Choosing each role's
+model"). It writes `checks-<n>.md`. When the
 current round is 0 (approved, no round run yet), run **Phase: baseline** instead.
 
 ## Phase: review (round n)
@@ -124,7 +150,8 @@ current round is 0 (approved, no round run yet), run **Phase: baseline** instead
 1. Refuse when the current round is 0. Round 0 is the baseline and has no reviewer; tell
    the user to run `/task-flow:task-implement`.
 2. Refuse when `checks-<n>.md` for the current round n >= 1 does not exist.
-3. Phase `reviewing`. Run subagent `task-flow:reviewer`. Read the Verdict line of
+3. Phase `reviewing`. Run subagent `task-flow:reviewer` (its model as in "Choosing each
+   role's model"). Read the Verdict line of
    `review-<n>.md` and set `last-verdict`.
 
 ## The loop — /task-flow:task-run
@@ -219,9 +246,11 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    the argument text; if goal or scope is unclear, ask at most 3 messages of at most 4
    questions each, appending answers in the user's words, nothing invented. With
    `--from-repo`: the backlog agent extends `requirements.md` from the repository (each
-   requirement cited). Append the `inspect` output to `requirements.md` under
+   requirement cited; its model as in "Choosing each role's model"). Append the `inspect`
+   output to `requirements.md` under
    `## Repository`.
-3. **Decompose.** Run subagent `task-flow:backlog`, telling it `thin: yes|no` from
+3. **Decompose.** Run subagent `task-flow:backlog` (its model as in "Choosing each role's
+   model"), telling it `thin: yes|no` from
    `inspect`. `BLOCKED: yes`: show the questions, append the answers to `requirements.md`,
    run it again (both modes; the user is present before the loop). With `thin: yes` the
    backlog's task 1 must be a bootstrap task that every later task depends on; if it is
@@ -232,7 +261,8 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    Constraints plus a Context line naming the run and its dependencies; `status.md` with
    the run's base) and add its row to `run.md`; with a bootstrap task set `bootstrap:` to
    its final id. Then Phase: plan steps 1–3 for each task **without the approval gate**, in
-   table order. **With a bootstrap task, the bootstrap task is planned first**, completely
+   table order; each planner runs with its model as in "Choosing each role's model" (via
+   Phase: plan step 1). **With a bootstrap task, the bootstrap task is planned first**, completely
    (its planner `BLOCKED: yes` questions asked and answered into its `task.md`, and
    re-planned, until its `plan.md` is not blocked), before any other task is planned. Every
    later task's `task.md` Context then carries the line: "Toolchain and verification: read

@@ -247,6 +247,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
     scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
     scripts/models.py                reads, merges and validates models.toml
+    templates/models.toml            commented models.toml example (profiles, [roles])
     tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py, tests/test_autopilot.py,
     tests/test_models.py, tests/test_implement.py
 ```

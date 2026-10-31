@@ -50,6 +50,11 @@ CLI:
   models.py role <role> [--project <repo-root>]
     Print the resolved value of [roles] <role>, or `claude` when it is unset or no
     config exists. Exit 2 with the reason on stderr for invalid config or an unknown role.
+  models.py roles [--project <repo-root>]
+    Print the resolved [roles] mapping as one JSON object with sorted keys: each of the
+    five roles maps to {"value": <configured value, or "claude" when unset>, "kind":
+    "claude" | "profile" | "script", "model": <opus|sonnet|haiku suffix of claude:<m>,
+    or null>}. Exit 2 with the reason on stderr for invalid config.
 """
 
 import argparse
@@ -350,6 +355,23 @@ def show(profile_name: str, project_root: Path) -> str:
     return "\n".join(lines)
 
 
+def resolve_roles(project_root: Path) -> dict:
+    """Resolve every role to {"value", "kind", "model"}; unset roles are bare "claude"."""
+    _profiles, roles = load(project_root)
+    resolved = {}
+    for role in sorted(ROLES):
+        value = roles.get(role, "claude")
+        if value in CLAUDE_VALUES:
+            kind = "claude"
+            model = value.split(":", 1)[1] if value.startswith("claude:") else None
+        elif value == "script":
+            kind, model = "script", None
+        else:
+            kind, model = "profile", None
+        resolved[role] = {"value": value, "kind": kind, "model": model}
+    return resolved
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect task-flow's models.toml")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -363,6 +385,12 @@ def main(argv: list[str] | None = None) -> int:
     role_parser.add_argument(
         "--project", default=".", help="repository root (default: .)"
     )
+    roles_parser = sub.add_parser(
+        "roles", help="print the resolved role mapping as JSON"
+    )
+    roles_parser.add_argument(
+        "--project", default=".", help="repository root (default: .)"
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "role":
@@ -370,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError(f"unknown role {args.role!r} (use {sorted(ROLES)})")
             _profiles, roles = load(Path(args.project).resolve())
             print(roles.get(args.role, "claude"))
+        elif args.command == "roles":
+            mapping = resolve_roles(Path(args.project).resolve())
+            print(json.dumps(mapping, sort_keys=True))
         else:
             print(show(args.profile, Path(args.project).resolve()))
     except ConfigError as exc:

@@ -1,0 +1,44 @@
+# task-flow models.toml — commented example. Copy it to one of:
+#   ~/.claude/task-flow/models.toml            (user scope: every repository)
+#   <repo-root>/.claude/task-flow.models.toml  (project scope: this repository only)
+# The project file wins over the user file, key by key. Never put a secret in this
+# file: api_key_env is the NAME of an environment variable, never the key itself.
+
+[profiles.mistral]
+# One example profile with every key. The model id is a placeholder; take a real
+# one from GET /v1/models.
+driver = "openai-loop"                  # "openai-loop" (required)
+base_url = "https://api.mistral.ai/v1"  # http(s) URL; "/chat/completions" is appended (required)
+model = "<model id from GET /v1/models>"  # model id string (required)
+api_key_env = "MISTRAL_API_KEY"         # NAME of the env var holding the key; required unless billing = "local"
+billing = "api"                         # "subscription", "api" or "local" (required)
+max_turns = 60                          # completion requests allowed on this profile (default 60)
+max_cost_usd = 10.0                     # cost cap over the whole run, all profiles together; omit for no limit
+max_context = 200000                    # fail when a response reports more prompt tokens; omit for no limit
+price_input_per_mtok = 0.0              # USD per 1M input tokens, for the cost figure (default 0)
+price_cached_input_per_mtok = 0.0       # USD per 1M cached input tokens (default 0)
+price_output_per_mtok = 0.0             # USD per 1M output tokens (default 0)
+fallback = []                           # other profiles to try, in order, when this one stays unavailable (default [])
+enabled = true                          # false disables the profile (default true)
+retries = 3                             # retries per request on 408, 429, 5xx, timeouts and connection errors (default 3)
+retry_base_seconds = 2                  # exponential backoff base, seconds (default 2)
+request_timeout_seconds = 300           # per request (default 300)
+command_timeout_seconds = 600           # per run_command call (default 600)
+temperature = 1.0                       # 0..2; omit for the provider's default
+max_output_tokens = 16384               # sent as max_tokens; omit for the provider's default
+extra_body = {}                         # table merged into the request body; model, messages, tools, tool_choice are reserved (default: none)
+
+[roles]
+# One key per task-flow role. Each value is one of:
+#   "claude"                  run the Claude subagent; its agent file's model frontmatter applies
+#   "claude:opus|sonnet|haiku"  run the Claude subagent on that model, passed as the
+#                             subagent call's model argument
+#   a profile name            only valid for implementer: run scripts/implement.py on it
+#   "script"                  only valid for checker; reserved for a later task-flow version
+# Each key below is set to its agent's frontmatter default, so copying this file
+# changes no model.
+planner = "claude:opus"       # planner agent's frontmatter default: opus
+implementer = "claude:sonnet" # implementer agent's frontmatter default: sonnet
+checker = "claude:haiku"      # checker agent's frontmatter default: haiku
+reviewer = "claude:opus"      # reviewer agent's frontmatter default: opus
+backlog = "claude:opus"       # backlog agent's frontmatter default: opus
