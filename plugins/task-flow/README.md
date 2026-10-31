@@ -180,8 +180,10 @@ whitespace followed by a commit or push verb is denied for every task-flow agent
 Run the guard's test with
 `uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
 `uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
-`uv run --script plugins/task-flow/tests/test_prune_task.py`, and the autopilot's with
-`uv run --script plugins/task-flow/tests/test_autopilot.py`.
+`uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
+`uv run --script plugins/task-flow/tests/test_autopilot.py`, the model config's with
+`uv run --script plugins/task-flow/tests/test_models.py` and the external implementer's with
+`uv run --script plugins/task-flow/tests/test_implement.py`.
 
 Limits of the guard, stated plainly:
 
@@ -196,6 +198,113 @@ Limits of the guard, stated plainly:
   enforced by the orchestration procedure and recorded in `status.md`; they are
   instructions, not hooks. The autopilot's circuit breaker is the same: `autopilot.py`
   computes the decision, the procedure obeys it.
+
+## External implementer (by hand, not wired yet)
+
+`scripts/implement.py` performs ONE implementer round with an OpenAI-compatible chat model
+instead of the Claude `implementer` subagent: the Mistral API, any OpenAI-compatible host,
+or a local llama.cpp server. It follows the same contract as `agents/implementer.md` (that
+file's body is its system prompt, plus the Conventions of the plan's profiles). Nothing in
+the commands calls it yet; the wiring is a later task. Run it by hand:
+
+```
+uv run --script plugins/task-flow/scripts/implement.py \
+    --task-dir .work/<task-id> --worktree <path|none> --round <n> [--profile <name>]
+```
+
+`--worktree none` means the repository root, which is the parent of the `.work` folder that
+holds the task. Without `--profile`, `[roles] implementer` must name a profile. Progress
+goes to stderr; stdout gets one line:
+
+| Exit | stdout line | Meaning |
+| --- | --- | --- |
+| 0 | `ok: <k> files changed (<profile>/<model>, <turns> turns, $<cost>)` | round done, changes staged |
+| 1 | `failed: <reason>` | the loop ran but did not finish: every profile unavailable, a non-retryable HTTP error, `max_turns`, `max_cost_usd` or `max_context` exceeded |
+| 2 | `refused: <reason>` | nothing was sent to any model: bad arguments or config, plan not approved, `checks-0.md` or `review-<n-1>.md` missing, worktree missing, profile unknown, disabled or without its key |
+| 3 | `blocked: <reason>` | the model reported that the plan is wrong |
+
+Prerequisites when running by hand are listed under "Limits, stated plainly" below.
+
+### Configuration: `models.toml`
+
+Two optional TOML files: `~/.claude/task-flow/models.toml` (user) and
+`<repo-root>/.claude/task-flow.models.toml` (project). Profiles merge by name, then key by
+key; `[roles]` merges key by key; the project wins. Unknown tables and keys are errors that
+name the file and the key. Keys of `[profiles.<name>]`:
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `driver` | `"openai-loop"` (required) | |
+| `base_url` | `http(s)://` URL; `/chat/completions` is appended (required) | |
+| `model` | model id (required) | |
+| `api_key_env` | NAME of the environment variable holding the key, never the key; required unless `billing = "local"` | none |
+| `billing` | `subscription`, `api` or `local` (required) | |
+| `max_turns` | completion requests allowed on one profile | 60 |
+| `max_cost_usd` | cap over the whole run, all profiles together | none |
+| `max_context` | fail when a response reports more prompt tokens | none |
+| `price_input_per_mtok`, `price_cached_input_per_mtok`, `price_output_per_mtok` | USD per 1M tokens, for the cost figure | 0 |
+| `fallback` | other profiles to try, in order, when this one stays unavailable | `[]` |
+| `enabled` | `false` disables the profile | `true` |
+| `retries`, `retry_base_seconds` | retries per request on 408, 429, 5xx, timeouts and connection errors; exponential backoff, `Retry-After` honoured up to 60 s | 3, 2 |
+| `request_timeout_seconds`, `command_timeout_seconds` | per request, per `run_command` call | 300, 600 |
+| `temperature`, `max_output_tokens` | sent as `temperature` and `max_tokens` | provider default |
+| `extra_body` | table merged into the request body, e.g. reasoning effort; `model`, `messages`, `tools`, `tool_choice` are reserved | none |
+
+`[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
+`claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for
+`implementer` only, `script` for `checker` only. `implement.py` reads only the profiles and
+`[roles] implementer`.
+
+A minimal profile (the model id is a placeholder; take a real one from `GET /v1/models`):
+
+```toml
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "<model id from GET /v1/models>"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+```
+
+`uv run --script plugins/task-flow/scripts/models.py show <profile> [--project <repo-root>]`
+prints the resolved profile and `api_key: set`, `api_key: missing` or `api_key: none needed` (no `api_key_env`), never the key. It
+exits 2 for an unknown profile, no config or invalid config.
+
+### What it does and records
+
+The model gets seven tools: `read_file`, `write_file`, `edit_file` (the old text must occur
+exactly once), `list_files`, `grep`, `run_command` and `blocked`. The file tools are
+confined to the worktree and cannot write under `.git` or `.work`. `run_command` denies the
+commands `guard.py` denies for the implementer (the regexes are imported from it, not
+copied). On a retryable failure that outlasts `retries`, the run restarts on the next
+`fallback` profile with the same prompt and a note that the worktree may hold partial
+changes; any other 4xx fails without fallback.
+
+After the loop it runs `git add -A` and never commits. It appends to `status.md` only under
+`## Log`: one `round <n> implementer: <path> (A|M|D)` line per changed file (or `no files
+changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writes
+`<task-dir>/impl-<n>.json` for exit 0, 1 and 3: `profile`, `model`, `turns`, `tokens`
+(`input`, `cached`, `output`), `cost_usd`, `duration_seconds`, `status`, `reason`,
+`fallback_chain`, `settings` (`temperature`, `max_output_tokens`, `extra_body`) and
+`files_changed`.
+
+### Limits, stated plainly
+
+- Running by hand needs a prepared task: the baseline run is done (`checks-0.md` exists),
+  the worktree exists and `status.md` says `plan-approved: yes`.
+- Commands the model runs are matched as text only. A `python -c` or a script can still
+  push or commit; nothing here can see what a program does.
+- There is no shell: no pipes, redirects or `&&` in a command. On Windows, `.cmd` and
+  `.bat` tools (`npm`, `npx`, `mvn.cmd`, `gradlew.bat`) cannot be started for that reason
+  (follow-up task `windows-cmd-shim-commands`).
+- The network access of commands is not blocked.
+- The code in the worktree, and the task files, are sent to the provider you configured.
+- Commands get only an allowlist of the environment: `PATH`, `PATHEXT`, `SYSTEMROOT`,
+  `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
+  `LANG`, `LC_*`, `TERM`, `CI`, `VIRTUAL_ENV`, `UV_*` and `PYTHON*`. Tokens, cloud
+  credentials and API keys of any other name never reach them.
+- `impl-<n>.json` is not a `.md` file, so `task-finish`'s prune deletes it until the wiring
+  task keeps it.
 
 ## Project configuration
 
@@ -240,6 +349,6 @@ skills/workflow/                shared contract (SKILL.md) + orchestration.md fo
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 10 commands
 hooks/hooks.json, scripts/guard.py, scripts/task_list.py, scripts/prune_task.py,
-scripts/autopilot.py
+scripts/autopilot.py, scripts/implement.py, scripts/models.py
 templates/task-flow.md          project config example
 ```
