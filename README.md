@@ -243,9 +243,9 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     skills/                          workflow contract, 4 profiles, 10 commands
     hooks/hooks.json, scripts/guard.py
     scripts/task_list.py             table for task-list
-    scripts/prune_task.py            task-finish keeps only .md files and worktree/
+    scripts/prune_task.py            task-finish keeps .md, impl-*.json and worktree/
     scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
-    scripts/implement.py             one implementer round on an OpenAI-compatible model (by hand)
+    scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
     scripts/models.py                reads, merges and validates models.toml
     tests/test_guard.py, tests/test_task_list.py, tests/test_prune_task.py, tests/test_autopilot.py,
     tests/test_models.py, tests/test_implement.py

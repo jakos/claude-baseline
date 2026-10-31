@@ -92,6 +92,42 @@ class PruneTaskTest(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("kept: "))
         self.assertIn("plan.md", lines[-1])
 
+    def test_keeps_impl_json_metrics(self):
+        self.populate()
+        self.scratch()
+        (self.task / "impl-1.json").write_text("{}", encoding="utf-8")
+        (self.task / "impl-3.json").write_text("{}", encoding="utf-8")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.task / "impl-1.json").is_file())
+        self.assertTrue((self.task / "impl-3.json").is_file())
+        self.assertFalse((self.task / "tmp.json").exists())
+        lines = result.stdout.decode("utf-8").splitlines()
+        self.assertIn("impl-1.json", lines[-1])
+        self.assertIn("impl-3.json", lines[-1])
+        self.assertNotIn("removed: impl-1.json", lines)
+
+    def test_removes_impl_json_directory(self):
+        self.populate()
+        (self.task / "impl-1.json").mkdir()
+        (self.task / "impl-1.json" / "x.txt").write_text("x", encoding="utf-8")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.task / "impl-1.json").exists())
+
+    def test_symlink_named_impl_json_is_unlinked(self):
+        self.populate()
+        outside_file = self.root / "outside.json"
+        outside_file.write_text("o", encoding="utf-8")
+        try:
+            os.symlink(outside_file, self.task / "impl-2.json")
+        except OSError as exc:
+            self.skipTest(f"cannot create symlinks: {exc}")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(self.task / "impl-2.json"))
+        self.assertEqual(outside_file.read_text(encoding="utf-8"), "o")
+
     def test_removes_markdown_inside_scratch_dirs(self):
         self.populate()
         (self.task / "base" / "sub").mkdir(parents=True)

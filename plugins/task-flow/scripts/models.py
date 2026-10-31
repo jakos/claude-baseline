@@ -47,6 +47,9 @@ CLI:
     Print the resolved profile as `key = value` lines and `api_key: set|missing|none
     needed` (never the key). --project defaults to the current directory. Exit 2 with the
     reason on stderr for an unknown profile, no config or invalid config.
+  models.py role <role> [--project <repo-root>]
+    Print the resolved value of [roles] <role>, or `claude` when it is unset or no
+    config exists. Exit 2 with the reason on stderr for invalid config or an unknown role.
 """
 
 import argparse
@@ -355,9 +358,20 @@ def main(argv: list[str] | None = None) -> int:
     show_parser.add_argument(
         "--project", default=".", help="repository root (default: .)"
     )
+    role_parser = sub.add_parser("role", help="print the value of one role")
+    role_parser.add_argument("role")
+    role_parser.add_argument(
+        "--project", default=".", help="repository root (default: .)"
+    )
     args = parser.parse_args(argv)
     try:
-        print(show(args.profile, Path(args.project).resolve()))
+        if args.command == "role":
+            if args.role not in ROLES:
+                raise ConfigError(f"unknown role {args.role!r} (use {sorted(ROLES)})")
+            _profiles, roles = load(Path(args.project).resolve())
+            print(roles.get(args.role, "claude"))
+        else:
+            print(show(args.profile, Path(args.project).resolve()))
     except ConfigError as exc:
         print(f"models.py: {exc}", file=sys.stderr)
         return 2

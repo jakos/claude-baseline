@@ -13,7 +13,7 @@ A multi-agent workflow for tasks and feature requests:
        reviewer (opus) judges each criterion     → review-n.md
        APPROVED → stop   CHANGES_REQUESTED → next round
        same introduced failures as the round before (no progress), or round 3 → escalate to you
-  → /task-flow:task-finish commits, asks before push or PR, then prunes the task folder to its .md files
+  → /task-flow:task-finish commits, asks before push or PR, then prunes the task folder to its .md files and impl-*.json metrics
 ```
 
 Each role is a separate subagent with a fresh context. They share nothing but files in
@@ -70,14 +70,14 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | --- | --- |
 | `task-new <description>` | Creates `.work/<id>/task.md` and `status.md`; asks at most 2 questions |
 | `task-plan [id]` | Runs the planner, shows the plan, asks you to approve, edit or cancel |
-| `task-implement [id]` | Requires approval; runs the baseline check first (creates the branch and worktree); runs the implementer |
+| `task-implement [id]` | Requires approval; runs the baseline check first (creates the branch and worktree); runs the implementer: the subagent, or `implement.py` when `[roles] implementer` names a profile |
 | `task-check [id]` | Runs the checker for the current round |
 | `task-review [id]` | Runs the reviewer for the current round |
 | `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
 | `task-autopilot [<requirements> \| <run-id>] [--from-repo] [--semi \| --full] [--budget <tokens>] [--auto]` | Gathers requirements, plans them as a stack of tasks, shows tasks and token estimates, then runs them one after another (see Autopilot) |
 | `task-list [--all]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
-| `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` files (not asked) |
+| `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` and `impl-*.json` files (not asked) |
 
 `task-list` runs `scripts/task_list.py` and sorts rows by phase group, then oldest last
 History entry first, then id:
@@ -199,13 +199,67 @@ Limits of the guard, stated plainly:
   instructions, not hooks. The autopilot's circuit breaker is the same: `autopilot.py`
   computes the decision, the procedure obeys it.
 
-## External implementer (by hand, not wired yet)
+## External implementer
 
 `scripts/implement.py` performs ONE implementer round with an OpenAI-compatible chat model
 instead of the Claude `implementer` subagent: the Mistral API, any OpenAI-compatible host,
 or a local llama.cpp server. It follows the same contract as `agents/implementer.md` (that
-file's body is its system prompt, plus the Conventions of the plan's profiles). Nothing in
-the commands calls it yet; the wiring is a later task. Run it by hand:
+file's body is its system prompt, plus the Conventions of the plan's profiles).
+
+### Routing
+
+With `[roles] implementer = "<profile>"` in `models.toml`, `task-run`, `task-implement` and
+the autopilot loop run `implement.py` for the implement phase instead of the
+`task-flow:implementer` subagent. With `claude`, any `claude:*` value or no config, the
+subagent runs exactly as before (the `claude:*` model choice is not honoured yet). The
+orchestrator resolves the role with `models.py role implementer`. `implement.py` runs in
+the background and the orchestrator reads its exit code and result line. A failed round
+(exit 1 or 2) leaves the phase `implementing`; the same command (`task-run <id>` or
+`task-implement <id>`) runs that round again, and whatever the failed round already staged
+stays in the worktree, so the next run starts from that state. In an autopilot run a
+failed round pauses the run (also with `--auto`) and `/task-flow:task-autopilot <run-id>`
+resumes it. An external round adds nothing to the task's `Tokens used`; the run's History
+records `implementer <profile>: tokens n/a`, so the burn-rate and budget triggers
+undercount such tasks until a later cost-accounting task.
+
+Example `models.toml` (the model id is a placeholder):
+
+```toml
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "<model id from GET /v1/models>"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+
+[roles]
+implementer = "mistral"
+```
+
+Set the key in the environment Claude Code is started from. PowerShell:
+
+```powershell
+$env:MISTRAL_API_KEY = "..."
+# persistently, for new processes:
+[Environment]::SetEnvironmentVariable("MISTRAL_API_KEY", "...", "User")
+```
+
+POSIX shells: `export MISTRAL_API_KEY=...`. Restart Claude Code from that environment.
+The orchestrator needs the permission `Bash(uv run:*)` to start the scripts.
+
+Privacy: the provider receives the worktree code and the task files. Opting out of
+training is set at the provider, not here. The guard hook (`guard.py`) does not see the
+external model's commands; `implement.py` applies its own text matching, with the limits
+below.
+
+To try it by hand:
+
+```
+uv run --script plugins/task-flow/scripts/models.py role implementer
+uv run --script plugins/task-flow/scripts/models.py show <profile>
+```
+
+then the `implement.py` command:
 
 ```
 uv run --script plugins/task-flow/scripts/implement.py \
@@ -269,6 +323,8 @@ billing = "api"
 `uv run --script plugins/task-flow/scripts/models.py show <profile> [--project <repo-root>]`
 prints the resolved profile and `api_key: set`, `api_key: missing` or `api_key: none needed` (no `api_key_env`), never the key. It
 exits 2 for an unknown profile, no config or invalid config.
+`models.py role <role> [--project <repo-root>]` prints the resolved value of one `[roles]`
+key (`claude` when unset or without config) and exits 2 for invalid config or an unknown role.
 
 ### What it does and records
 
@@ -303,8 +359,6 @@ changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writ
   `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
   `LANG`, `LC_*`, `TERM`, `CI`, `VIRTUAL_ENV`, `UV_*` and `PYTHON*`. Tokens, cloud
   credentials and API keys of any other name never reach them.
-- `impl-<n>.json` is not a `.md` file, so `task-finish`'s prune deletes it until the wiring
-  task keeps it.
 
 ## Project configuration
 

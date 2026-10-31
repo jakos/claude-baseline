@@ -169,12 +169,15 @@ class ModelsTest(unittest.TestCase):
         self.assertIn("invalid TOML", str(ctx.exception))
 
     def run_show(self, *args, key=None):
+        return self.run_cli("show", *args, key=key)
+
+    def run_cli(self, *args, key=None):
         env = {k: v for k, v in os.environ.items() if k != "MISTRAL_API_KEY"}
         env["HOME"] = env["USERPROFILE"] = str(self.home)
         if key:
             env["MISTRAL_API_KEY"] = key
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "show", *args],
+            [sys.executable, str(SCRIPT), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -208,6 +211,40 @@ class ModelsTest(unittest.TestCase):
         done = self.run_show("mistral")
         self.assertEqual(done.returncode, 2)
         self.assertIn("bogus", done.stderr)
+
+    def test_role_cli_no_config_prints_claude(self):
+        done = self.run_cli("role", "implementer")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "claude")
+
+    def test_role_cli_unset_prints_claude(self):
+        self.project(BASE)
+        done = self.run_cli("role", "implementer")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "claude")
+
+    def test_role_cli_prints_profile_name(self):
+        self.project(BASE + '[roles]\nimplementer = "mistral"\n')
+        done = self.run_cli("role", "implementer", "--project", str(self.repo))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "mistral")
+
+    def test_role_cli_prints_claude_variant(self):
+        self.project('[roles]\nimplementer = "claude:sonnet"\n')
+        done = self.run_cli("role", "implementer")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "claude:sonnet")
+
+    def test_role_cli_invalid_config_exits_2(self):
+        self.project('[roles]\nimplementer = "nosuch"\n')
+        done = self.run_cli("role", "implementer")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("nosuch", done.stderr)
+
+    def test_role_cli_unknown_role_exits_2(self):
+        done = self.run_cli("role", "wizard")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown role", done.stderr)
 
 
 if __name__ == "__main__":

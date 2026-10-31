@@ -89,8 +89,28 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 
 1. Refuse unless `plan-approved` is yes.
 2. Round 1 requires `checks-0.md`; if it is missing, run **Phase: baseline** first.
-3. Set round n, phase `implementing`. Run subagent `task-flow:implementer` with the paths,
-   and for n > 1 the path of `review-<n-1>.md`.
+3. Pick the implementer.
+   - (a) Resolve the role from the repository root:
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" role implementer --project <repo-root>`.
+     Exit 2: show its stderr and end the command without changing `status.md` (a
+     precondition, like the uncommitted-changes check, not a stop).
+   - (b) Set round n, phase `implementing`.
+   - (c) Value `claude` or `claude:*` (also the result with no config): run subagent
+     `task-flow:implementer` with the paths, and for n > 1 the path of `review-<n-1>.md`,
+     exactly as today.
+   - (d) Any other value is a profile name. From the repository root, in the background
+     (the round can outlast the Bash tool's foreground limit), run
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/implement.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round <n> --profile <value>`
+     and wait for it. Read its exit code and its one result line (the last stdout line
+     starting with `ok:`, `failed:`, `refused:` or `blocked:`). The script writes the
+     `## Log` lines and stages the changes; the orchestrator does not.
+     Exit 0: continue (the next phase is check). Exit 3: the script wrote `BLOCKED:`;
+     step 4 applies unchanged. Exit 1 or 2: show the line, leave phase `implementing` and
+     round n, and end the command; the same command (`task-run <id>` /
+     `task-implement <id>`) runs round n again. This is not one of the stops, does not count
+     as a round, and is not a judgment that the run cannot pass.
+   - (e) The History line names the implementer: `claude`, or
+     `<profile> (external): <result line>`.
 4. If the implementer appended `BLOCKED:` to the Log: phase `blocked`, show the problem,
    stop.
 
@@ -130,6 +150,10 @@ The run stops only at: (1) the approval gate, (2) `BLOCKED` from an agent (plann
 implementer), (3) `APPROVED`, (4) no progress, (5) the round cap (3). `--auto`
 skips the approval gate (recorded as `yes (--auto, <date>)`); the other four stops
 apply identically with and without `--auto`, which never permits an early stop.
+
+A failure or refusal of an external implementer (Phase: implement, step 3d) ends the
+command like a failed precondition: `status.md` is unchanged and the same command resumes
+the round. It is not a stop and not a judgment that the run cannot pass.
 
 **Never stop early on a prediction that the run cannot pass**, and never skip a round on
 your own judgment. A check that fails every round is not a reason to stop; the no-progress
@@ -171,7 +195,7 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 
 `Depends on` is `-` or comma-separated ids of earlier rows. `Tokens used` is the sum of
 `total_tokens` of every subagent run for that task after approval (checker, implementer,
-reviewer), an integer, or `unknown` once any result lacked a figure (sticky). `bootstrap`
+reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a figure (sticky). `bootstrap`
 names the bootstrap task; it is row 1 and every other row depends on it directly.
 
 1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
@@ -243,8 +267,12 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
      early" apply unchanged and end only that task. On `review-approved` follow Phase:
      finish steps 1–4, 6 and 7, and replace step 5 with: no push, no PR, keep the worktree,
      ask nothing; these go into `report.md`. After every subagent call add its
-     `total_tokens` to the task's `Tokens used`. Append a History line to `run.md`, then run
-     `next` again.
+     `total_tokens` to the task's `Tokens used`. An external implementer round
+     (Phase: implement, step 3d) adds nothing to it; the `run.md` History line for that task
+     records `implementer <profile>: tokens n/a` (accounting is a later task). If an
+     external round ends with exit 1 or 2, set state `paused` (also with `--auto`), show
+     the line and append the History line `paused: external implementer failed (<id>)`;
+     do not run `next`. Otherwise append a History line to `run.md`, then run `next` again.
    - `wait <id>: <phase>` (semi only): state `paused`, show the task's `summary.md` or
      `BLOCKED:` line, ask: continue past it (its dependents are skipped) / stop. To retry,
      the user runs `/task-flow:task-run <id>` themselves and then resumes the autopilot.
@@ -257,14 +285,18 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    worktree removal. Show it.
 
 **Stops of an autopilot run:** the start gate (skipped by `--auto`), backlog or planner
-`BLOCKED` before the loop, `wait` (semi), `stop:` (circuit breaker), `done`. The no-commit
+`BLOCKED` before the loop, `wait` (semi), `stop:` (circuit breaker), `done`, and the pause
+after a failed external implementer round (exit 1 or 2; a defined rule, with and without
+`--auto`, because `next` would return `run <id>` for the same task again). The no-commit
 question and the other Preconditions come before a run exists and are preconditions, not
 stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
 cannot finish, burn rate, budget) and is evaluated only between tasks, never inside a
 task's run; `next` returns `run <id>` for a task already in progress.
 
 **Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;
-`paused` asks the wait question again. Preconditions are not re-run.
+`paused` by `wait` asks the wait question again; `paused` by the History line `paused:
+external implementer failed (<id>)` skips the wait question and runs `autopilot.py next`,
+which returns `run <id>`, so the task's round runs again. Preconditions are not re-run.
 
 ## Phase: finish — /task-flow:task-finish
 
@@ -280,7 +312,7 @@ task's run; `next` returns `run <id>` for a task already in progress.
 7. **Prune** (not asked): from the repository root run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/prune_task.py" .work/<id>` and
    show its output. Every top-level `.md` file stays (task, plan, status, summary, checks,
-   reviews), everything else in the folder is deleted, and `worktree/` is left to the
+   reviews) and so do the `impl-*.json` files, everything else in the folder is deleted, and `worktree/` is left to the
    worktree question in step 5. If the script exits non-zero, show stderr: exit 2 means it
    refused and deleted nothing, exit 1 means some entries (`failed: <name>`) could not be
    removed and the rest was pruned. Do not retry or delete by hand.
