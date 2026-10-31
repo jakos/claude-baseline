@@ -2,15 +2,15 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""Prune a finished task folder .work/<id>/ down to its Markdown history.
+"""Prune a finished task folder .work/<id>/ down to its Markdown history and implementer metrics.
 
 Usage: prune_task.py [--dry-run] <task-dir>
 
 Keep rule, top-level entries of <task-dir> only:
 
-- kept: a regular file (not a symlink or junction) whose name ends in `.md`
-  (case-insensitive), and the entry named exactly `worktree`
-- deleted: everything else, including directories (and any `.md` inside them), non-`.md`
+- kept: a regular file (not a symlink or junction) whose name ends in `.md` or matches
+  `impl-*.json` (case-insensitive), and the entry named exactly `worktree`
+- deleted: everything else, including directories (and any `.md` inside them), other
   files, symlinks and junctions of any name (unlinked, never followed), and a directory
   whose name ends in `.md`
 
@@ -21,6 +21,7 @@ Stdlib only, started by `uv run --script`, so it runs on macOS, Linux and Window
 """
 
 import argparse
+import fnmatch
 import os
 import shutil
 import stat
@@ -35,7 +36,10 @@ def is_kept(entry: Path) -> bool:
         return True
     if entry.is_symlink() or entry.is_junction():
         return False
-    return entry.is_file() and entry.name.lower().endswith(".md")
+    if not entry.is_file():
+        return False
+    name = entry.name.lower()
+    return name.endswith(".md") or fnmatch.fnmatchcase(name, "impl-*.json")
 
 
 def refusal(task_dir: Path) -> str | None:

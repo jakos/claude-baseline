@@ -14,4 +14,4 @@ Arguments: `$ARGUMENTS`
 - Otherwise it is a new run: the argument text (if any) is the requirements. `--semi` is the default; `--full` keeps going past failed tasks.
 - `--auto` skips only the start question (start / edit / cancel), and only when the user typed it. It never permits an early stop, push, PR or deploy.
 
-Follow **Autopilot** in orchestration.md. Obey `autopilot.py next` exactly between tasks. Never push, open a PR, deploy or remove a worktree, and never make a commit except the initial commit the user chose in Preconditions (each task's own finish commit is the task loop's).
+Follow **Autopilot** in orchestration.md. Obey `autopilot.py next` exactly between tasks. A failed external implementer round (exit 1 or 2 of `implement.py`) pauses the run, also with `--auto`; `/task-flow:task-autopilot <run-id>` resumes it. Never push, open a PR, deploy or remove a worktree, and never make a commit except the initial commit the user chose in Preconditions (each task's own finish commit is the task loop's).

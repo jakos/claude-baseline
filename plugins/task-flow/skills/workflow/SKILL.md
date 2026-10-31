@@ -20,6 +20,7 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   checks-0.md      baseline check results on the untouched base, before round 1
   checks-<n>.md    automated check results for round n (1..3)
   review-<n>.md    reviewer verdict for round n
+  impl-<n>.json    implementer metrics for round n, written by scripts/implement.py when an external profile implements
   summary.md       final summary, when done or escalated
   worktree/        the task's git worktree, when worktrees are used
 ```
@@ -27,8 +28,12 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
 Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `backlog.md`,
 `run.md`, `report.md`); their tasks are ordinary `.work/<task-id>/` folders.
 
-After `/task-finish` only the `.md` files and `worktree/` (if kept) remain; any other file
-or directory in the folder is scratch and is deleted.
+When an external profile implements (`[roles] implementer` in models.toml), the script
+`scripts/implement.py`, not an agent, writes the `round <n> implementer:` and `BLOCKED:`
+Log lines in `status.md`.
+
+After `/task-finish` only the `.md` files, the `impl-*.json` files and `worktree/` (if
+kept) remain; any other file or directory in the folder is scratch and is deleted.
 
 Source changes happen **in the worktree** when `status.md` names one, otherwise in the
 repository root on the task branch. `.work/` files are always read and written at the
@@ -145,6 +150,10 @@ other four apply identically with and without it:
 
 These are the stops of one task's run. `task-autopilot` adds run-level stops that are
 evaluated only between tasks (orchestration.md → Autopilot).
+
+A failure or refusal of an external implementer ends the command like a failed
+precondition: `status.md` is unchanged and the same command resumes the round. It is not a
+stop and not a judgment that the run cannot pass.
 
 **No agent, and not the orchestrator, may stop a run, skip a round or declare it hopeless
 on its own judgment.** `--auto` changes only the approval gate.
