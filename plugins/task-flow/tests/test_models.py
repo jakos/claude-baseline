@@ -7,6 +7,7 @@
 Run: uv run --script plugins/task-flow/tests/test_models.py
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -15,8 +16,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import tomllib
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "models.py"
+TEMPLATE = SCRIPTS.parent / "templates" / "models.toml"
+AGENTS = SCRIPTS.parent / "agents"
 sys.path.insert(0, str(SCRIPTS))
 import models
 
@@ -245,6 +250,100 @@ class ModelsTest(unittest.TestCase):
         done = self.run_cli("role", "wizard")
         self.assertEqual(done.returncode, 2)
         self.assertIn("unknown role", done.stderr)
+
+    def run_roles(self, *args):
+        return self.run_cli("roles", *args)
+
+    def roles_json(self, *args):
+        done = self.run_roles(*args)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_roles_cli_no_config_all_claude_null_model(self):
+        done = self.run_roles()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        mapping = json.loads(done.stdout)
+        self.assertEqual(len(mapping), 5)
+        self.assertEqual(set(mapping), set(models.ROLES))
+        for entry in mapping.values():
+            self.assertEqual(
+                entry, {"kind": "claude", "model": None, "value": "claude"}
+            )
+
+    def test_roles_cli_claude_variants_give_model(self):
+        self.project(
+            '[roles]\nplanner = "claude:haiku"\n'
+            'reviewer = "claude:sonnet"\nchecker = "claude"\n'
+        )
+        mapping = self.roles_json()
+        self.assertEqual(
+            mapping["planner"],
+            {"kind": "claude", "model": "haiku", "value": "claude:haiku"},
+        )
+        self.assertEqual(
+            mapping["reviewer"],
+            {"kind": "claude", "model": "sonnet", "value": "claude:sonnet"},
+        )
+        self.assertEqual(
+            mapping["checker"], {"kind": "claude", "model": None, "value": "claude"}
+        )
+        for role in ("implementer", "backlog"):
+            self.assertEqual(
+                mapping[role], {"kind": "claude", "model": None, "value": "claude"}
+            )
+
+    def test_roles_cli_profile_and_script_kinds(self):
+        self.project(BASE + '[roles]\nimplementer = "mistral"\nchecker = "script"\n')
+        mapping = self.roles_json()
+        self.assertEqual(
+            mapping["implementer"],
+            {"kind": "profile", "model": None, "value": "mistral"},
+        )
+        self.assertEqual(
+            mapping["checker"], {"kind": "script", "model": None, "value": "script"}
+        )
+
+    def test_roles_cli_project_overrides_user(self):
+        self.user('[roles]\nreviewer = "claude:haiku"\n')
+        self.project('[roles]\nreviewer = "claude:opus"\n')
+        mapping = self.roles_json()
+        self.assertEqual(mapping["reviewer"]["model"], "opus")
+        self.assertEqual(mapping["reviewer"]["value"], "claude:opus")
+
+    def test_roles_cli_invalid_value_exits_2(self):
+        self.project('[roles]\nreviewer = "claude:gpt"\n')
+        done = self.run_roles()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("roles.reviewer", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+    def test_roles_cli_misspelled_role_exits_2(self):
+        self.project('[roles]\nreveiwer = "claude:opus"\n')
+        done = self.run_roles()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown role", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+    def test_template_loads_and_covers_every_key(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.project(text)
+        models.load(self.repo)  # must not raise
+        raw = tomllib.loads(text)
+        self.assertEqual(len(raw["profiles"]), 1)
+        profile = next(iter(raw["profiles"].values()))
+        self.assertEqual(set(profile), set(models.PROFILE_KEYS))
+        self.assertEqual(set(raw["roles"]), set(models.ROLES))
+
+    def test_template_roles_match_agent_frontmatter(self):
+        raw = tomllib.loads(TEMPLATE.read_text(encoding="utf-8"))
+        for role, value in raw["roles"].items():
+            agent = (AGENTS / f"{role}.md").read_text(encoding="utf-8")
+            frontmatter = agent.split("---")[1]
+            model_line = next(
+                ln for ln in frontmatter.splitlines() if ln.startswith("model:")
+            )
+            frontmatter_model = model_line.split(":", 1)[1].strip()
+            self.assertEqual(value, f"claude:{frontmatter_model}", role)
 
 
 if __name__ == "__main__":

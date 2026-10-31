@@ -211,8 +211,9 @@ file's body is its system prompt, plus the Conventions of the plan's profiles).
 With `[roles] implementer = "<profile>"` in `models.toml`, `task-run`, `task-implement` and
 the autopilot loop run `implement.py` for the implement phase instead of the
 `task-flow:implementer` subagent. With `claude`, any `claude:*` value or no config, the
-subagent runs exactly as before (the `claude:*` model choice is not honoured yet). The
-orchestrator resolves the role with `models.py role implementer`. `implement.py` runs in
+subagent runs with the `claude:*` model passed as its subagent call's `model` argument
+(see "Choosing Claude models per role"); with bare `claude` or no config, exactly as
+before. The orchestrator resolves the roles with `models.py roles`. `implement.py` runs in
 the background and the orchestrator reads its exit code and result line. A failed round
 (exit 1 or 2) leaves the phase `implementing`; the same command (`task-run <id>` or
 `task-implement <id>`) runs that round again, and whatever the failed round already staged
@@ -255,6 +256,7 @@ below.
 To try it by hand:
 
 ```
+uv run --script plugins/task-flow/scripts/models.py roles
 uv run --script plugins/task-flow/scripts/models.py role implementer
 uv run --script plugins/task-flow/scripts/models.py show <profile>
 ```
@@ -328,6 +330,39 @@ prints the resolved profile and `api_key: set`, `api_key: missing` or `api_key: 
 exits 2 for an unknown profile, no config or invalid config.
 `models.py role <role> [--project <repo-root>]` prints the resolved value of one `[roles]`
 key (`claude` when unset or without config) and exits 2 for invalid config or an unknown role.
+`models.py roles [--project <repo-root>]` prints all five roles as one JSON object with
+sorted keys — the orchestrator reads it to pass each subagent's `model` — e.g.
+`{"backlog": {"kind": "claude", "model": null, "value": "claude"}, "checker": {"kind": "claude", "model": "haiku", "value": "claude:haiku"}, ...}`;
+it exits 2 for invalid config.
+
+### Choosing Claude models per role
+
+`[roles]` also picks the Claude model of every Claude-run role. Values: `claude`,
+`claude:opus`, `claude:sonnet` or `claude:haiku` for any role; a profile name for
+`implementer` only; `script` for `checker` only. A `claude:<model>` value is passed to the
+subagent call as its `model` argument and takes precedence over the agent file's frontmatter;
+bare `claude` passes nothing, so the frontmatter default applies; with no `models.toml` at
+all, nothing changes. A misspelled role or value is refused with exit 2, never silently
+ignored. `checker = "script"` is reserved for a later task-flow version and refused until
+then. Caveat: with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on or
+`CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` set, Claude Code ignores the per-call model.
+
+| Role | Frontmatter default |
+| --- | --- |
+| `planner` | opus |
+| `implementer` | sonnet |
+| `checker` | haiku |
+| `reviewer` | opus |
+| `backlog` | opus |
+
+[templates/models.toml](templates/models.toml) is a commented example with every key, each
+role at its frontmatter default, so copying it changes no model. Example — the reviewer on
+Sonnet to cut cost, the same reason dev-baseline's `code-reviewer` runs on Sonnet:
+
+```toml
+[roles]
+reviewer = "claude:sonnet"
+```
 
 ### What it does and records
 
@@ -454,4 +489,5 @@ skills/task-*/                  the 10 commands
 hooks/hooks.json, scripts/guard.py, scripts/task_list.py, scripts/prune_task.py,
 scripts/autopilot.py, scripts/implement.py, scripts/models.py
 templates/task-flow.md          project config example
+templates/models.toml           commented models.toml example (profiles, [roles])
 ```
