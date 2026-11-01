@@ -212,17 +212,23 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 - bootstrap: none | <task-id>
 - state: gathering | planning | ready | running | paused | stopped | done
 ## Tasks
-| # | Task | Depends on | Tokens used |
-| --- | --- | --- | --- |
-| 1 | bootstrap-project | - | 0 |
-| 2 | add-config-loader | bootstrap-project | unknown |
+| # | Task | Depends on | Tokens used | External USD |
+| --- | --- | --- | --- | --- |
+| 1 | bootstrap-project | - | 0 | 0 |
+| 2 | add-config-loader | bootstrap-project | unknown | unknown |
 ## History
 - <ISO timestamp> <state> — <one line>
 ```
 
 `Depends on` is `-` or comma-separated ids of earlier rows. `Tokens used` is the sum of
 `total_tokens` of every subagent run for that task after approval (checker, implementer,
-reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a figure (sticky). `bootstrap`
+reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a figure (sticky). The
+optional fifth column `External USD` is written when `models.py roles` reports implementer
+kind `profile` at Gather, and is otherwise absent, so runs without `models.toml` keep
+today's 4-column format; if it is missing when a cost must be recorded, add it to the
+header and every row with `0`. Its values are a decimal USD sum, or `unknown` (sticky)
+when an `impl-<n>.json` that should exist is missing or unreadable. `budget` is Claude
+tokens. `bootstrap`
 names the bootstrap task; it is row 1 and every other row depends on it directly.
 
 1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
@@ -242,7 +248,12 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
 2. **Gather.** Run id = 3–6 word kebab slug, `-2`, `-3` on collision. Create
    `.work/_autopilot/<run-id>/run.md` (state `gathering`, mode `semi` unless `--full`,
    budget from `--budget` or `none`, `planning-tokens: 0`, `continue-past: none`,
-   `bootstrap: none`, base = current branch). From the user: write `requirements.md` from
+   `bootstrap: none`, base = current branch). Resolve the roles once with
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
+   (exit 2: show its stderr and end the command without changing `run.md` — a
+   precondition, not a stop); when the implementer's `kind` is `profile`, create the
+   `## Tasks` table with the `External USD` column (header plus `0` in every row),
+   otherwise with today's 4 columns. From the user: write `requirements.md` from
    the argument text; if goal or scope is unclear, ask at most 3 messages of at most 4
    questions each, appending answers in the user's words, nothing invented. With
    `--from-repo`: the backlog agent extends `requirements.md` from the repository (each
@@ -274,9 +285,12 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    `planning-tokens` (`unknown` if any is missing). State `planning`, then `ready`. All
    tasks are still planned before the overview. Later plans are not re-planned after the
    bootstrap task finishes.
-5. **Overview (always, both modes).** Show, per task, id, goal line and dependencies,
-   marking the bootstrap task; then the output of
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id>`
+5. **Overview (always, both modes).** Run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
+   (exit 2: show its stderr and end the command without changing `run.md` — a
+   precondition, not a stop) and read the implementer's `kind`. Show, per task, id, goal
+   line and dependencies, marking the bootstrap task; then the output of
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
    verbatim; the mode; and the sentence: estimates are coarse; the main session's own
    tokens are not counted; Claude cannot see your plan's session or weekly limit, check it
    with `/usage`.
@@ -287,8 +301,11 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    task re-plans every later task after it, so they keep reading its current `plan.md`.
    With `--auto` only: skip the question, record `yes (--auto, <date>, autopilot
    <run-id>)` and say so. State `running`.
-7. **Loop (between tasks).** Run
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id>`
+7. **Loop (between tasks).** Each iteration, run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
+   (exit 2: show its stderr and end the command without changing `run.md` — a
+   precondition, not a stop) and read the implementer's `kind`, then run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
    and obey it exactly; never pick another task or stop on your own judgment.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
      `status.md` `base:` to `task/<id>` of the last `done` task of this run in table order,
@@ -297,9 +314,13 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
      early" apply unchanged and end only that task. On `review-approved` follow Phase:
      finish steps 1–4, 6 and 7, and replace step 5 with: no push, no PR, keep the worktree,
      ask nothing; these go into `report.md`. After every subagent call add its
-     `total_tokens` to the task's `Tokens used`. An external implementer round
-     (Phase: implement, step 3d) adds nothing to it; the `run.md` History line for that task
-     records `implementer <profile>: tokens n/a` (accounting is a later task). If an
+     `total_tokens` to the task's `Tokens used`; that column stays Claude subagents only,
+     an external implementer round (Phase: implement, step 3d) adds nothing to it. After
+     each external implementer round that exits 0, 1 or 3, read
+     `.work/<id>/impl-<n>.json` and add its `cost_usd` to the task's `External USD`
+     (exit 2 adds nothing — a stale file from an earlier attempt may exist; if the column
+     is absent, add it to the header and every row with `0` first), and record the
+     History line `implementer <profile>: <cost_usd> USD external`. If an
      external round ends with exit 1 or 2, set state `paused` (also with `--auto`), show
      the line and append the History line `paused: external implementer failed (<id>)`;
      do not run `next`. Otherwise append a History line to `run.md`, then run `next` again.
@@ -309,8 +330,13 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
      Continue: add the id to `continue-past`, run `next` again. Stop: as `stop:`.
    - `stop: <reason>`: state `stopped`. `done`: state `done`.
 8. **Report.** On `stopped` or `done` write `report.md`: the stop reason (the `next` line
-   verbatim), one row per task (phase, rounds, tokens used, 1-round and 3-round estimates),
-   the branch stack in order (the last `done` branch contains all finished work), skipped
+   verbatim), one row per task (phase, rounds, the implementer profiles used — the
+   distinct `profile` values of its `impl-*.json` in round order, or `claude` when there
+   are none —, Claude tokens used, External USD, the 1-round and 3-round estimates), a
+   totals line with the Claude tokens (`planning-tokens` plus the sum of `Tokens used`,
+   `at least` when any is `unknown`) and the external USD (the sum of the `External USD`
+   column, or `0` when the column is absent), the branch stack in order (the last `done`
+   branch contains all finished work), skipped
    and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
    worktree removal. Show it.
 
@@ -320,7 +346,8 @@ after a failed external implementer round (exit 1 or 2; a defined rule, with and
 `--auto`, because `next` would return `run <id>` for the same task again). The no-commit
 question and the other Preconditions come before a run exists and are preconditions, not
 stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
-cannot finish, burn rate, budget) and is evaluated only between tasks, never inside a
+cannot finish, burn rate, budget — all four count Claude tokens only) and is evaluated
+only between tasks, never inside a
 task's run; `next` returns `run <id>` for a task already in progress.
 
 **Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;

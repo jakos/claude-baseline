@@ -55,8 +55,12 @@ class RunFixture(unittest.TestCase):
         cont="none",
         bootstrap="none",
         omit=(),
+        usd=None,
     ):
-        """rows: (id, depends, tokens, phase) tuples; also creates the task folders."""
+        """rows: (id, depends, tokens, phase) tuples; also creates the task folders.
+
+        usd: None for the 4-column table, or a list of 5th-cell strings, one per row.
+        """
         header = {
             "mode": mode,
             "base": "main",
@@ -68,32 +72,47 @@ class RunFixture(unittest.TestCase):
         }
         lines = ["# Autopilot: r1"]
         lines += [f"- {k}: {v}" for k, v in header.items() if k not in omit]
-        lines += [
-            "## Tasks",
-            "| # | Task | Depends on | Tokens used |",
-            "| --- | --- | --- | --- |",
-        ]
-        for number, (task_id, deps, tokens, phase) in enumerate(rows, 1):
-            lines.append(f"| {number} | {task_id} | {deps} | {tokens} |")
-            self.task(task_id, phase, plan())
+        if usd is None:
+            lines += [
+                "## Tasks",
+                "| # | Task | Depends on | Tokens used |",
+                "| --- | --- | --- | --- |",
+            ]
+            for number, (task_id, deps, tokens, phase) in enumerate(rows, 1):
+                lines.append(f"| {number} | {task_id} | {deps} | {tokens} |")
+                self.task(task_id, phase, plan())
+        else:
+            lines += [
+                "## Tasks",
+                "| # | Task | Depends on | Tokens used | External USD |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+            for number, (row, usd_cell) in enumerate(zip(rows, usd), 1):
+                task_id, deps, tokens, phase = row
+                lines.append(
+                    f"| {number} | {task_id} | {deps} | {tokens} | {usd_cell} |"
+                )
+                self.task(task_id, phase, plan())
         lines += ["## History", "- 2026-10-24T00:00:00Z running — start"]
         (self.run_dir / "run.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def call(self, command, target=None):
+    def call(self, command, target=None, *extra):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), command, str(target or self.run_dir)],
+            [sys.executable, str(SCRIPT), command, str(target or self.run_dir), *extra],
             capture_output=True,
             check=False,
         )
 
-    def out(self, command):
-        result = self.call(command)
+    def out(self, command, *extra):
+        result = self.call(command, self.run_dir, *extra)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.decode("utf-8").strip()
 
 
 MAX = 400000  # 2 steps, 3 criteria, 2 commands
 ONE = 154000
+EXT_MAX = 238000  # same plan with IMPLEMENT = 0 (external implementer)
+EXT_ONE = 100000
 
 
 class EstimateTest(RunFixture):
@@ -326,6 +345,67 @@ class NextTest(RunFixture):
         self.assertEqual(self.out("next"), "wait boot: escalated")
 
 
+class ExternalTest(RunFixture):
+    def test_estimate_external_implementer_zeroes_implement(self):
+        self.run_md([("a", "-", "0", "approved")])
+        out = self.out("estimate", "--implementer-kind", "profile")
+        self.assertIn(f"| 1 | a | 2 | 3 | 2 | {EXT_ONE} | {EXT_MAX} |", out)
+        self.assertIn(
+            "implementer: external profile; IMPLEMENT counts 0 Claude tokens; "
+            "its cost is measured in USD per round (impl-<n>.json), not estimated",
+            out,
+        )
+
+    def test_estimate_default_kind_has_no_external_lines(self):
+        self.run_md([("a", "-", "0", "approved")])
+        out = self.out("estimate")
+        self.assertNotIn("implementer:", out)
+        self.assertNotIn("external spent:", out)
+        self.assertEqual(out, self.out("estimate", "--implementer-kind", "claude"))
+
+    def test_estimate_external_usd_column_summed(self):
+        rows = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        self.run_md(rows, usd=["0.5", "1.25"])
+        self.assertEqual(
+            self.out("estimate").splitlines()[-1], "external spent: 1.75 USD"
+        )
+        self.run_md(rows, usd=["0.5", "unknown"])
+        self.assertEqual(
+            self.out("estimate").splitlines()[-1],
+            "external spent: at least 0.50 USD",
+        )
+
+    def test_next_ignores_external_usd_column(self):
+        rows = [("a", "-", "10", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, usd=["0.5", "1.25"])
+        with_column = self.out("next")
+        self.run_md(rows)
+        self.assertEqual(with_column, self.out("next"))
+        self.assertEqual(with_column, "run b")
+
+    def test_breaker_burn_rate_external(self):
+        self.run_md(
+            [("a", "-", str(2 * EXT_MAX + 1), "done"), ("b", "-", "0", "approved")]
+        )
+        self.assertEqual(
+            self.out("next", "--implementer-kind", "profile"),
+            f"stop: burn rate: a used {2 * EXT_MAX + 1}, "
+            f"more than 2 x its estimate {EXT_MAX}",
+        )
+        self.run_md([("a", "-", str(2 * EXT_MAX), "done"), ("b", "-", "0", "approved")])
+        self.assertEqual(self.out("next", "--implementer-kind", "profile"), "run b")
+
+    def test_breaker_budget_external(self):
+        rows = [("a", "-", "100000", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, budget="387999", planning="50000")
+        self.assertEqual(
+            self.out("next", "--implementer-kind", "profile"),
+            f"stop: budget: spent 150000 + next worst case {EXT_MAX} > budget 387999",
+        )
+        self.run_md(rows, budget="388000", planning="50000")
+        self.assertEqual(self.out("next", "--implementer-kind", "profile"), "run b")
+
+
 class MalformedTest(RunFixture):
     def test_malformed_run_exits_2(self):
         ok = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
@@ -377,6 +457,45 @@ class MalformedTest(RunFixture):
             self.assertEqual((result.returncode, result.stdout), (2, b""))
             self.assertTrue(result.stderr)
             self.assertEqual(self.call("estimate").returncode, 0)
+
+    def test_malformed_external_inputs_exit_2(self):
+        ok = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        for bad in ("abc", "-1"):
+            with self.subTest(usd=bad):
+                self.run_md(ok, usd=[bad, "0"])
+                result = self.call("estimate")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr)
+        with self.subTest(header="wrong 5th cell"):
+            self.run_md(ok, usd=["0", "0"])
+            path = self.run_dir / "run.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "| Tokens used | External USD |", "| Tokens used | Cost |"
+                ),
+                encoding="utf-8",
+            )
+            result = self.call("estimate")
+            self.assertEqual((result.returncode, result.stdout), (2, b""))
+            self.assertTrue(result.stderr)
+        with self.subTest(header="5 cells, short data row"):
+            self.run_md(ok, usd=["0", "0"])
+            path = self.run_dir / "run.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "| 1 | a | - | 0 | 0 |", "| 1 | a | - | 0 |"
+                ),
+                encoding="utf-8",
+            )
+            result = self.call("next")
+            self.assertEqual((result.returncode, result.stdout), (2, b""))
+            self.assertTrue(result.stderr)
+        with self.subTest(kind="external"):
+            self.run_md(ok)
+            result = self.call("estimate", None, "--implementer-kind", "external")
+            self.assertEqual((result.returncode, result.stdout), (2, b""))
+            self.assertTrue(result.stderr)
 
     def test_missing_run_md_exits_2(self):
         result = self.call("next")
