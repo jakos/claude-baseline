@@ -142,7 +142,9 @@ the repos where you want it:
 /plugin install task-flow@claude-baseline
 ```
 
-It is described in its [README](plugins/task-flow/README.md).
+It is described in its [README](plugins/task-flow/README.md). Run
+`/task-flow:task-doctor` (with `--online` once a key is set); it lists what is missing
+and how to fix it.
 
 **External implementer (experimental).** task-flow can hand the implementer role to a
 per-token, non-Claude model (so far only the Mistral API has been exercised) while Claude
@@ -179,6 +181,7 @@ Profiles, roles, limits and how to switch it off again:
 | Skill never fires | Its description doesn't match how you phrased the request |
 | A pushed change didn't arrive | `version` in `plugin.json` wasn't bumped — updates are gated on it |
 | Plugin missing entirely | `claude plugin list` — a load failure shows only there |
+| task-flow setup problem: `uv`, permissions, `models.toml`, key or model id | Run `/task-flow:task-doctor` (or `--online`) — every WARN and FAIL comes with its fix |
 
 Everything in this plugin fails quietly. Nothing errors, output still appears, and it
 looks exactly like working. When in doubt, check `claude plugin details dev-baseline`.

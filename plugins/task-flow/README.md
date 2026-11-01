@@ -45,6 +45,10 @@ The workspace ignores itself: `/task-flow:task-new` writes `.work/.gitignore` co
 .work/
 ```
 
+Then run `/task-flow:task-doctor`: it checks this machine, this session and this
+repository (uv, git, permissions, `models.toml`, API keys) and prints the fix for every
+WARN and FAIL — see [Doctor](#doctor).
+
 ## Permissions
 
 The workflow runs under your normal permission settings; nothing in it bypasses them.
@@ -85,6 +89,7 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-status [id]` | Phase, round and last verdict for one task or all |
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` and `impl-*.json` files (not asked) |
 | `task-release [<version> \| --major \| --minor \| --patch] [--target <name>] [--since <ref>] [--dry-run]` | Releases one target: preconditions, version proposal, checks, changelog entry, one approval, version bump, release commit and annotated tag; push only after a separate question (see Releasing) |
+| `task-doctor [--online]` | Read-only check of the environment and configuration (uv, git, permissions, `models.toml`, keys); prints a fix for every WARN and FAIL (see Doctor) |
 
 `task-list` runs `scripts/task_list.py` and sorts rows by phase group, then oldest last
 History entry first, then id:
@@ -106,6 +111,21 @@ agent, `APPROVED`, no progress, or the round cap; the last four apply with or wi
 `--auto`.
 Every run can be resumed with `task-run <id>` or the single-step commands, because the
 phase is in `status.md`.
+
+## Doctor
+
+`/task-flow:task-doctor` runs `scripts/doctor.py`, a stdlib-only, read-only check of this
+machine, this Claude Code session and this repository: `uv` on `PATH`, the Python the
+scripts need, `git` with worktree support, the repository (work tree, a commit, a clean
+tree), which task-flow the session loaded, `.claude/task-flow.md`, the settings files, the
+recommended permission rules, `ANTHROPIC_API_KEY`, `models.toml`, and every profile the
+`[roles] implementer` uses (enabled, key, `base_url`, limits, driver). Each check is one
+row — PASS, WARN or FAIL — and every WARN and FAIL has its exact fix under `## Fixes`. The
+exit code is 0 when no check is FAIL, 1 otherwise. `--online` adds one authenticated
+`GET <base_url>/models` per profile in use — the provider's model list, which costs no
+tokens — and says whether the configured `model` is among the listed ids. There is no
+`--fix`: the doctor changes nothing, and it never prints a secret (key values are
+redacted).
 
 ## Autopilot
 
@@ -268,8 +288,9 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_gates.py`, the model config's with
 `uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
 `uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
-`uv run --script plugins/task-flow/tests/test_launch.py` and the release script's with
-`uv run --script plugins/task-flow/tests/test_release.py`.
+`uv run --script plugins/task-flow/tests/test_launch.py`, the release script's with
+`uv run --script plugins/task-flow/tests/test_release.py` and the doctor's with
+`uv run --script plugins/task-flow/tests/test_doctor.py`.
 
 Limits of the guard, stated plainly (they apply to `implement.py`'s `run_command` too,
 which uses the same rules from `scripts/rules.py` with the `external-implementer` role):
@@ -348,6 +369,8 @@ $env:MISTRAL_API_KEY = "..."
 ```
 
 POSIX shells: `export MISTRAL_API_KEY=...`. Restart Claude Code from that environment.
+`/task-flow:task-doctor --online` then verifies the key and the model id against the
+provider's model list.
 The orchestrator needs the permission `Bash(uv run:*)` to start the scripts.
 
 Privacy: the provider receives the worktree code and the task files. Opting out of
@@ -907,13 +930,15 @@ cost no context. Agents read them by path.
 agents/                         planner, implementer, checker, reviewer, backlog
 skills/workflow/                shared contract (SKILL.md) + orchestration.md for commands
 skills/profile-*/               python, docs, config, generic
-skills/task-*/                  the 11 commands
+skills/task-*/                  the 12 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
-scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py
+scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
+scripts/doctor.py               read-only environment and configuration check (task-doctor)
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
-tests/test_drivers.py           offline suite for scripts/drivers.py (the other test_*.py
-                                suites cover the other scripts)
+tests/test_drivers.py, tests/test_doctor.py
+                                offline suites for scripts/drivers.py and scripts/doctor.py
+                                (the other test_*.py suites cover the other scripts)
 ```

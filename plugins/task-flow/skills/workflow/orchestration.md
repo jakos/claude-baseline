@@ -477,3 +477,20 @@ live in `.claude/task-flow.release.toml` (override with `--config <path>`).
 7. **Push question — separate, default no.** Yes: `git push origin <branch>`, then
    `git push origin refs/tags/<tag>` — never `--tags`, never `--force`, never tag deletion
    or moving a tag. No: print both commands for later.
+
+## Doctor — /task-flow:task-doctor
+
+1. From the repository root, run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" $ARGUMENTS`.
+2. Show stdout verbatim — do not re-run the script, and do not summarise, re-sort, add or
+   drop rows. Exit 1 means the FAIL rows are the result, not an error of the command;
+   exit 2 is a usage error: show stderr and end.
+3. Change nothing and offer no fixes beyond the printed ones: the doctor is read-only
+   (there is no `--fix`), and it never prints a secret — key values are redacted.
+4. If the command cannot start because `uv` is not found, print the uv installer
+   one-liners for PowerShell
+   (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`)
+   and POSIX (`curl -LsSf https://astral.sh/uv/install.sh | sh`) and "restart Claude Code".
+5. `--online` adds one authenticated request per profile in use,
+   `GET <base_url>/models` — the provider's model list, which costs no tokens — and says
+   whether the configured `model` is among the listed ids.
