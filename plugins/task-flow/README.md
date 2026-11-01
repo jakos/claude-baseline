@@ -284,7 +284,8 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
 `uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
 `uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
-`uv run --script plugins/task-flow/tests/test_autopilot.py`, the deterministic gates' with
+`uv run --script plugins/task-flow/tests/test_autopilot.py`, the benchmark harness' with
+`uv run --script plugins/task-flow/tests/test_bench.py`, the deterministic gates' with
 `uv run --script plugins/task-flow/tests/test_gates.py`, the model config's with
 `uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
 `uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
@@ -884,6 +885,22 @@ so the planner must list every command it wants checked; there is no shell of an
 (pipes, redirects, `&&`, variables, globs, `cd`); the matching patterns are heuristics,
 and a tool with unusual output falls back to its last 30 lines.
 
+## Benchmark
+
+`bench/bench.py` runs the implementer profiles from `models.toml` on frozen task cases
+(`bench/cases/<id>/`, each case × profile × repeat) in isolated scratch repositories —
+up to 3 rounds of `scripts/implement.py` judged by `scripts/gates.py`, then the case's
+hidden acceptance tests — and reports cost per accepted task in
+`.work/_bench/<run-id>/report.md`:
+
+```
+uv run --script plugins/task-flow/bench/bench.py run --profiles <name> [--review] ...
+```
+
+It spends model budget (and with `--review`, Claude limits too), so it is never run by
+the gates — only its test is. See [bench/README.md](bench/README.md) for the case
+format, all commands and flags, the run layout, isolation and safety, and the limits.
+
 ## Project configuration
 
 Optional `.claude/task-flow.md` in the target repository — copy
@@ -935,10 +952,14 @@ hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
+bench/bench.py, bench/README.md  benchmark harness: implementer profiles on frozen cases,
+                                cost per accepted task (see Benchmark); bench/cases/ and
+                                bench/results/ are filled by later tasks
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
 tests/test_drivers.py, tests/test_doctor.py
                                 offline suites for scripts/drivers.py and scripts/doctor.py
                                 (the other test_*.py suites cover the other scripts)
+tests/test_bench.py             offline suite for bench/bench.py
 ```

@@ -28,7 +28,8 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
 
 Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `run.md`,
 `report.md`, plus `backlog.md` only for decomposed runs); their tasks are ordinary
-`.work/<task-id>/` folders.
+`.work/<task-id>/` folders. Benchmark runs live in `.work/_bench/<run-id>/`; their task
+folders are scratch copies under `runs/<n>/.work/`, not real tasks.
 
 When an external profile implements (`[roles] implementer` in models.toml), the script
 `scripts/implement.py`, not an agent, writes the `round <n> implementer:` and `BLOCKED:`
