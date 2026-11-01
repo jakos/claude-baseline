@@ -50,7 +50,9 @@ as `__pycache__`; nothing is ever committed.
 Limits, stated plainly: commands the model runs are matched as text only (a script can
 still push or commit), they run without a shell (no pipes or redirects), their network
 access is not blocked, and only an allowlisted set of environment variables reaches them.
-File tools are confined to the worktree and cannot write under .git or .work.
+File tools are confined to the worktree and cannot write under .git or .work. The
+denial rules live in scripts/rules.py, shared with the guard.py hook; this script calls
+them with the external-implementer role.
 """
 
 import argparse
@@ -71,7 +73,7 @@ from pathlib import Path
 from typing import Self
 
 import models
-from guard import CLIENT_DRY_RUN, COMMITS, LEAVES_MACHINE
+from rules import check_command, check_write
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_CAP = 20000
@@ -634,23 +636,18 @@ class Tools:
     def resolve(self, raw, write=False) -> Path:
         if not isinstance(raw, str) or not raw:
             raise ToolError("error: path must be a non-empty string")
+        if write:
+            reason = check_write(raw, "external-implementer", self.root)
+            if reason is not None:
+                raise ToolError(f"denied: {reason}")
         candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = self.root / candidate
         resolved = candidate.resolve()
         try:
-            relative = resolved.relative_to(self.root)
+            resolved.relative_to(self.root)
         except ValueError:
             raise ToolError(f"denied: {raw} is outside the worktree") from None
-
-        def hidden(parts):
-            return {p.rstrip(". ").casefold() for p in parts} & {".git", ".work"}
-
-        raw_parts = () if Path(raw).is_absolute() else Path(raw).parts
-        if write and (hidden(relative.parts) or hidden(raw_parts)):
-            raise ToolError(
-                f"denied: writing under .git or .work is not allowed ({raw})"
-            )
         return resolved
 
     def inside(self, path: Path) -> bool:
@@ -797,18 +794,9 @@ class Tools:
         command = self.text_arg(args, "command").strip()
         if not command:
             raise ToolError("error: command is empty")
-        segments = re.split(r"[;&|\n]+", command)
-        if any(
-            LEAVES_MACHINE.search(s) and not CLIENT_DRY_RUN.search(s) for s in segments
-        ):
-            raise ToolError(
-                "denied: pushing, opening PRs and deploying are not allowed; "
-                "nothing leaves the machine until /task-finish"
-            )
-        if COMMITS.search(command):
-            raise ToolError(
-                "denied: do not commit; leave changes in the worktree, the script stages them"
-            )
+        reason = check_command(command, "external-implementer")
+        if reason is not None:
+            raise ToolError(f"denied: {reason}")
         env = child_env()
         try:
             if os.name == "nt":

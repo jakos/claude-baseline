@@ -8,6 +8,10 @@ not limits. This hook reads `agent_type`, which Claude Code adds to hook input f
 made inside a subagent, and applies the rules below only to task-flow's own agents.
 Calls from the main session and from any other agent pass through untouched.
 
+The rules themselves live in `scripts/rules.py` (`check_command`, `check_write`), shared
+with `scripts/implement.py`, so this hook and the external implementer are held to the
+same rules by one implementation:
+
 - planner, backlog, checker, reviewer: may write files only under a `.work/` directory.
 - every task-flow agent: no push, no PR, no deploy — nothing leaves the machine.
 - every task-flow agent: no `git commit`; committing is `/task-finish`'s job, after review.
@@ -20,26 +24,12 @@ import json
 import re
 import sys
 
+from rules import check_command, check_write
+
 ROLE = re.compile(r"^task-flow[:_](planner|implementer|checker|reviewer|backlog)$")
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
-
-LEAVES_MACHINE = re.compile(
-    r"\bgit\b[^|;&\n]*\spush\b"
-    r"|\bgh\s+(?:pr\s+(?:create|merge|edit|ready)|release\s+create|repo\s+create)\b"
-    r"|\b(?:kubectl|oc)\s+(?:apply|create|delete|replace|patch|scale|rollout|set|annotate|label)\b"
-    r"|\bhelm\s+(?:install|upgrade|uninstall|rollback|delete)\b"
-    r"|\bdocker\s+push\b|\bpodman\s+push\b"
-    r"|\bterraform\s+(?:apply|destroy)\b"
-)
-# profile-config's own offline check; it renders locally and contacts no cluster.
-CLIENT_DRY_RUN = re.compile(r"\b(?:kubectl|oc)\s+apply\b[^|;&\n]*--dry-run=client\b")
-COMMITS = re.compile(r"\bgit\b[^|;&\n]*\scommit\b")
-MUTATES_GIT = re.compile(
-    r"\bgit\b[^|;&\n]*\s(?:add|checkout|switch|reset|restore|merge|rebase|stash|clean|rm|mv"
-    r"|cherry-pick|revert|branch\s+-[dDmM]|worktree\s+(?:add|remove))\b"
-)
 
 
 def deny(reason: str) -> None:
@@ -69,34 +59,17 @@ def main() -> None:
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
 
-    if tool in WRITE_TOOLS and role != "implementer":
+    if tool in WRITE_TOOLS:
         path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        normalized = "/" + path.replace("\\", "/").lstrip("/")
-        if "/.work/" not in normalized:
-            deny(
-                f"the {role} may only write inside .work/<task-id>/; {path!r} is outside it. "
-                "Record findings in the task's .work files instead of changing the code."
-            )
+        reason = check_write(path, role)
+        if reason is not None:
+            deny(reason)
 
     if tool in SHELL_TOOLS:
         command = str(tool_input.get("command") or "")
-        segments = re.split(r"[;&|\n]+", command)
-        if any(
-            LEAVES_MACHINE.search(s) and not CLIENT_DRY_RUN.search(s) for s in segments
-        ):
-            deny(
-                "pushing, opening PRs and deploying are not allowed inside task-flow agents. "
-                "Nothing leaves the machine until /task-finish asks the user."
-            )
-        if COMMITS.search(command):
-            deny(
-                "task-flow agents do not commit. Leave changes staged; /task-finish commits "
-                "once review has approved them."
-            )
-        if role in {"planner", "reviewer", "backlog"} and MUTATES_GIT.search(command):
-            deny(
-                f"the {role} is read-only: this git command changes the tree, index or branches."
-            )
+        reason = check_command(command, role)
+        if reason is not None:
+            deny(reason)
 
 
 if __name__ == "__main__":
