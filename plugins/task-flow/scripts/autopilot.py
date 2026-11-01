@@ -19,14 +19,25 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   one round = CHECK + ROUND + FINISH, max = CHECK + 3 * ROUND + FINISH. Tasks in phase
   `new` or `planned` count as pending, because the overview runs before the start gate,
   when every task is still `planned`. Pending sums leave out tasks `next` would skip
-  (dependents, direct or transitive, of a failed task).
+  (dependents, direct or transitive, of a failed task). `estimate` and `next` take
+  `--implementer-kind {claude,profile}` (default `claude`): with `profile`,
+  IMPLEMENT = 0 — an external implementer spends no Claude tokens, its USD cost is
+  measured per round (`impl-<n>.json`), not estimated — and `estimate` additionally
+  prints an `implementer: external profile; ...` line. The `## Tasks` table may carry an
+  optional fifth column `External USD` (a non-negative decimal or `unknown` per row);
+  when present, `estimate` ends with an `external spent: <sum> USD` line (`at least`
+  when a row is `unknown`), and the column never influences `next`. The `spent:` and
+  `budget:` lines are about Claude tokens only.
 - `next <run-dir>`: one line, `run <id>`, `wait <id>: <phase>`, `stop: <reason>` or `done`.
   The circuit breaker. It is evaluated between tasks only: a task already in progress
   always gives `run <id>`. Triggers, first match wins: a task in progress; wrong direction
   (the last two finished tasks both failed); semi mode and a failed task not in
   continue-past; nothing runnable left (cannot finish, or done); burn rate (the last
   finished task used more than 2 x its max estimate); budget (spent + the next task's max
-  estimate exceeds the budget). All are counts and sums read from files.
+  estimate exceeds the budget). All are counts and sums read from files, and all count
+  Claude tokens only: `--implementer-kind` is as in `estimate`, and under `profile` the
+  burn-rate and budget triggers compare Claude tokens with a Claude-only estimate
+  (IMPLEMENT = 0).
 
 `<run-dir>` is `.work/_autopilot/<run-id>/` with a `run.md` written by the orchestrator;
 this script only reads. Stdlib only, started by `uv run --script`.
@@ -218,6 +229,14 @@ def token_value(value: str, what: str) -> int | None:
     raise Refusal(f"{what} must be a non-negative integer or 'unknown', got {value!r}")
 
 
+def usd_value(value: str, what: str) -> float | None:
+    if value == "unknown":
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", value):
+        return float(value)
+    raise Refusal(f"{what} must be a non-negative number or 'unknown', got {value!r}")
+
+
 def plan_counts(plan: str) -> tuple[int, int, int]:
     parts = sections(plan)
     steps = sum(1 for line in parts.get("steps", []) if re.match(r"\d+\.\s", line))
@@ -240,15 +259,17 @@ def plan_counts(plan: str) -> tuple[int, int, int]:
     return steps, len(criteria), commands
 
 
-def estimates(steps: int, criteria: int, commands: int) -> tuple[int, int]:
+def estimates(
+    steps: int, criteria: int, commands: int, external: bool = False
+) -> tuple[int, int]:
     check = CHECK_BASE + CHECK_PER_COMMAND * commands
-    implement = IMPLEMENT_BASE + IMPLEMENT_PER_STEP * steps
+    implement = 0 if external else IMPLEMENT_BASE + IMPLEMENT_PER_STEP * steps
     review = REVIEW_BASE + REVIEW_PER_CRITERION * criteria
     one_round = implement + check + review
     return check + one_round + FINISH, check + 3 * one_round + FINISH
 
 
-def load_run(run_dir_arg: str, for_next: bool) -> dict:
+def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
     run_dir = Path(run_dir_arg).resolve()
     if not run_dir.is_dir():
         raise Refusal(f"{run_dir_arg} is not a directory")
@@ -278,13 +299,23 @@ def load_run(run_dir_arg: str, for_next: bool) -> dict:
     bootstrap = fields["bootstrap"]
 
     tasks: list[dict] = []
+    width = 4
     for line in parts.get("tasks", []):
         if not line.startswith("|"):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if cells and (cells[0] == "#" or set(cells[0]) <= set("-: ")):
+        if cells and cells[0] == "#":
+            width = len(cells)
+            if width == 5 and cells[4] != "External USD":
+                raise Refusal(
+                    f"the 5th header cell must be 'External USD', got {cells[4]!r}"
+                )
+            if width not in (4, 5):
+                raise Refusal(f"the header row must have 4 or 5 cells, got {width}")
             continue
-        if len(cells) != 4:
+        if cells and set(cells[0]) <= set("-: "):
+            continue
+        if len(cells) != width:
             raise Refusal(f"malformed task row: {line!r}")
         task_id, deps_text, tokens_text = cells[1], cells[2], cells[3]
         if any(t["id"] == task_id for t in tasks):
@@ -297,6 +328,7 @@ def load_run(run_dir_arg: str, for_next: bool) -> dict:
                     f"{task_id} depends on {dep!r}, which is not an earlier row"
                 )
         used = token_value(tokens_text, f"Tokens used of {task_id}")
+        usd = usd_value(cells[4], f"External USD of {task_id}") if width == 5 else 0.0
         task_dir = work / task_id
         status = task_dir / "status.md"
         plan = task_dir / "plan.md"
@@ -310,12 +342,13 @@ def load_run(run_dir_arg: str, for_next: bool) -> dict:
         if for_next and phase in UNAPPROVED:
             raise Refusal(f"{task_id} is not approved (phase {phase})")
         counts = plan_counts(read_text(plan))
-        one_round, maximum = estimates(*counts)
+        one_round, maximum = estimates(*counts, external=external)
         tasks.append(
             {
                 "id": task_id,
                 "deps": deps,
                 "used": used,
+                "usd": usd,
                 "phase": phase,
                 "counts": counts,
                 "one_round": one_round,
@@ -336,6 +369,8 @@ def load_run(run_dir_arg: str, for_next: bool) -> dict:
         "planning": planning,
         "continue_past": continue_past,
         "tasks": tasks,
+        "external": external,
+        "has_usd": width == 5,
     }
 
 
@@ -347,6 +382,18 @@ def spent(run: dict) -> tuple[int, bool]:
             unknown = True
         else:
             total += task["used"]
+    return total, unknown
+
+
+def external_spent(run: dict) -> tuple[float, bool]:
+    """Sum of the known `External USD` values, and whether any row is unknown."""
+    total = 0.0
+    unknown = False
+    for task in run["tasks"]:
+        if task["usd"] is None:
+            unknown = True
+        else:
+            total += task["usd"]
     return total, unknown
 
 
@@ -400,6 +447,16 @@ def estimate(run: dict) -> str:
         rows.append(
             f"budget: {budget} tokens; pending at 3 rounds each: {word[fits3]}; "
             f"pending at 1 round each: {word[fits1]}"
+        )
+    if run["external"]:
+        rows.append(
+            "implementer: external profile; IMPLEMENT counts 0 Claude tokens; "
+            "its cost is measured in USD per round (impl-<n>.json), not estimated"
+        )
+    if run["has_usd"]:
+        usd_total, usd_unknown = external_spent(run)
+        rows.append(
+            f"external spent: {'at least ' if usd_unknown else ''}{usd_total:.2f} USD"
         )
     return "\n".join(rows)
 
@@ -466,15 +523,27 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("inspect").add_argument("path")
-    sub.add_parser("estimate").add_argument("path")
-    sub.add_parser("next").add_argument("path")
+    estimate_parser = sub.add_parser("estimate")
+    estimate_parser.add_argument("path")
+    estimate_parser.add_argument(
+        "--implementer-kind", choices=("claude", "profile"), default="claude"
+    )
+    next_parser = sub.add_parser("next")
+    next_parser.add_argument("path")
+    next_parser.add_argument(
+        "--implementer-kind", choices=("claude", "profile"), default="claude"
+    )
     args = parser.parse_args()
 
     try:
         if args.command == "inspect":
             output = inspect(args.path)
         else:
-            run = load_run(args.path, for_next=args.command == "next")
+            run = load_run(
+                args.path,
+                for_next=args.command == "next",
+                external=args.implementer_kind == "profile",
+            )
             output = estimate(run) if args.command == "estimate" else next_step(run)
     except Refusal as error:
         print(f"autopilot.py: {error}", file=sys.stderr)

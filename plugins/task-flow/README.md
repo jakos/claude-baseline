@@ -150,14 +150,18 @@ files whether the next task may start. Its four triggers, in both modes:
 - burn rate: the last finished task used more than 2 x its worst-case estimate;
 - budget (with `--budget`): tokens spent plus the next task's worst case exceeds it.
 
-A task already in progress always resumes. The breaker is decided by the script but obeyed
+All four count Claude tokens only; external USD cost is measured and reported, never a
+trigger. A task already in progress always resumes. The breaker is decided by the script but obeyed
 by procedure, not by a hook.
 
 **Estimates are coarse.** Per task: check = 15000 + 3000 x commands, implement = 30000 +
 12000 x steps, review = 30000 + 6000 x criteria, finish = 10000. A round is implement +
 check + review. The 1-round estimate is check (baseline) + 1 round + finish; the 3-round
 (worst case) estimate is check + 3 rounds + finish. The constants are invented, not
-measured. Tokens of your main session are not counted, and Claude cannot see your plan's
+measured. With an external implementer, `autopilot.py estimate` and `next` take
+`--implementer-kind profile` and count the implement term as 0 — the external round's
+cost is measured in USD (the `External USD` column of `run.md`, totalled in `report.md`),
+not estimated. Tokens of your main session are not counted, and Claude cannot see your plan's
 session or weekly limit; check it with `/usage`.
 
 ## What enforces what
@@ -223,9 +227,14 @@ the background and the orchestrator reads its exit code and result line. A faile
 `task-implement <id>`) runs that round again, and whatever the failed round already staged
 stays in the worktree, so the next run starts from that state. In an autopilot run a
 failed round pauses the run (also with `--auto`) and `/task-flow:task-autopilot <run-id>`
-resumes it. An external round adds nothing to the task's `Tokens used`; the run's History
-records `implementer <profile>: tokens n/a`, so the burn-rate and budget triggers
-undercount such tasks until a later cost-accounting task.
+resumes it. An external round adds nothing to the task's `Tokens used` (that column stays
+Claude subagents only); after each external round that exits 0, 1 or 3 the orchestrator
+adds the round's `cost_usd` from `impl-<n>.json` to the task's `External USD` column in
+`run.md` (exit 2 adds nothing), and the run's History records
+`implementer <profile>: <cost_usd> USD external`. `report.md` reports both currencies:
+Claude tokens used and external USD. The burn-rate and budget triggers count Claude tokens
+only, compared against estimates whose implement term is 0 when the implementer is an
+external profile (`autopilot.py estimate|next --implementer-kind profile`).
 
 Example `models.toml` (the model id is a placeholder):
 
