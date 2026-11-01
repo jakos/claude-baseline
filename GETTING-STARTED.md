@@ -133,6 +133,43 @@ Start a fresh session and ask:
 If the answer is vague, the `CLAUDE.md` is vague. Fix it now, while it is one file and not
 a habit.
 
+## Optional: task-flow
+
+For a planned, reviewed workflow on top of the baseline, install the second plugin in
+the repos where you want it:
+
+```
+/plugin install task-flow@claude-baseline
+```
+
+It is described in its [README](plugins/task-flow/README.md).
+
+**External implementer (experimental).** task-flow can hand the implementer role to a
+per-token, non-Claude model (so far only the Mistral API has been exercised) while Claude
+plans and reviews. It needs two things:
+
+- an API key in an environment variable; the profile's `api_key_env` gives the variable's
+  NAME, never the key itself;
+- a `models.toml`: `~/.claude/task-flow/models.toml` for you, or
+  `.claude/task-flow.models.toml` in the repo;
+  [`plugins/task-flow/templates/models.toml`](plugins/task-flow/templates/models.toml) is
+  a commented example.
+
+Set the key in the environment Claude Code is started from, then restart Claude Code.
+PowerShell:
+
+```powershell
+$env:MISTRAL_API_KEY = "..."
+# persistently, for new processes:
+[Environment]::SetEnvironmentVariable("MISTRAL_API_KEY", "...", "User")
+```
+
+POSIX shells: `export MISTRAL_API_KEY=...`.
+
+Profiles, roles, limits and how to switch it off again:
+[External implementer](plugins/task-flow/README.md#external-implementer) and
+[Rolling back](plugins/task-flow/README.md#rolling-back).
+
 ## When something seems wrong
 
 | Symptom | Cause |

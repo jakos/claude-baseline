@@ -16,6 +16,12 @@ A multi-agent workflow for tasks and feature requests:
   → /task-flow:task-finish commits, asks before push or PR, then prunes the task folder to its .md files and impl-*.json metrics
 ```
 
+The models in the diagram are the defaults from each agent file's frontmatter. An
+optional `models.toml` can change the Claude model of any role and can hand the
+implementer role to a non-Claude model; see
+[Choosing Claude models per role](#choosing-claude-models-per-role) and
+[External implementer](#external-implementer).
+
 Each role is a separate subagent with a fresh context. They share nothing but files in
 `.work/<task-id>/`, so the reviewer sees the plan, the diff and the check results — never
 the implementer's reasoning.
@@ -209,7 +215,8 @@ highest tag matching the target's tag pattern; `--since <ref>` overrides it. **T
 release has no tag: `check` refuses with `no-base` and asks for `--since <ref>`**, so the
 first changelog entry states its starting point once, explicitly.
 
-Two rollbacks: pin an earlier tag (install or check out `<target>-<old version>`), or
+Two rollbacks: pin an earlier tag (check out `<target>-<old version>`, or pin an
+installed plugin's marketplace to it as described in [Rolling back](#rolling-back)), or
 simply not push — the release commit and the tag stay local, and you may remove them
 yourself; the command never deletes or moves a tag, never force-pushes, and never pushes
 without its own question.
@@ -243,8 +250,9 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
 `uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
 `uv run --script plugins/task-flow/tests/test_autopilot.py`, the model config's with
-`uv run --script plugins/task-flow/tests/test_models.py` and the external implementer's with
-`uv run --script plugins/task-flow/tests/test_implement.py`.
+`uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
+`uv run --script plugins/task-flow/tests/test_implement.py` and the release script's with
+`uv run --script plugins/task-flow/tests/test_release.py`.
 
 Limits of the guard, stated plainly (they apply to `implement.py`'s `run_command` too,
 which uses the same rules from `scripts/rules.py` with the `external-implementer` role):
@@ -263,10 +271,14 @@ which uses the same rules from `scripts/rules.py` with the `external-implementer
 
 ## External implementer
 
-`scripts/implement.py` performs ONE implementer round with an OpenAI-compatible chat model
-instead of the Claude `implementer` subagent: the Mistral API, any OpenAI-compatible host,
-or a local llama.cpp server. It follows the same contract as `agents/implementer.md` (that
-file's body is its system prompt, plus the Conventions of the plan's profiles).
+**Experimental.** `scripts/implement.py` performs ONE implementer round with an
+OpenAI-compatible chat model instead of the Claude `implementer` subagent. It is written
+for the Mistral API, any OpenAI-compatible host or a local llama.cpp server, but only the
+Mistral API has been exercised so far (see [Limits, stated plainly](#limits-stated-plainly));
+the configuration and the `impl-<n>.json` format may still change between versions. To
+switch it off again, see [Rolling back](#rolling-back). It follows the same contract as
+`agents/implementer.md` (that file's body is its system prompt, plus the Conventions of
+the plan's profiles).
 
 ### Routing
 
@@ -392,6 +404,13 @@ api_key_env = "MISTRAL_API_KEY"
 billing = "api"
 ```
 
+This repository's own [`.claude/task-flow.models.toml`](../../.claude/task-flow.models.toml)
+is an example of a project file: four Mistral profiles (`mistral-large`, `mistral-small`,
+`glm-flash`, `deepseek-flash`), each with `max_turns = 60` and `max_cost_usd = 1.50`, and
+`[roles] implementer = "mistral-large"`. It overrides `~/.claude/task-flow/models.toml`
+key by key and holds no secrets: `api_key_env` names the environment variable
+`MISTRAL_API_KEY`, never the key itself.
+
 `uv run --script plugins/task-flow/scripts/models.py show <profile> [--project <repo-root>]`
 prints the resolved profile and `api_key: set`, `api_key: missing` or `api_key: none needed` (no `api_key_env`), never the key. It
 exits 2 for an unknown profile, no config or invalid config.
@@ -510,6 +529,52 @@ scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
 - A new file a command creates is staged unless it is ignored or on the artifact list
   above: in a repository without a `.gitignore`, a `node_modules/` or `dist/` a command
   creates would be staged.
+- There is no context compaction. Every request resends the whole conversation so far;
+  only each tool result is truncated. With `max_context` set, a response that reports
+  more prompt tokens than `max_context` fails the round (exit 1); without it, the round
+  runs until the provider refuses the request, which fails it too.
+- Only the Mistral API (`https://api.mistral.ai/v1`) has been exercised. Other
+  OpenAI-compatible hosts and local llama.cpp servers are untested; their tool calls,
+  usage figures and error codes may differ.
+- The provider decides a model's status: a model can be in public preview, renamed or
+  retired without task-flow knowing. Check the provider's model list (`GET /v1/models`)
+  and documentation before you set `model`, and give the profile a `fallback`.
+
+### Rolling back
+
+To stop using the external implementer, set this in the project file
+`.claude/task-flow.models.toml`, which wins over the user file:
+
+```toml
+[roles]
+implementer = "claude"
+```
+
+or remove the `implementer` key from `[roles]` in both files (without any `models.toml`,
+nothing changes either). `uv run --script plugins/task-flow/scripts/models.py role
+implementer` then prints `claude`, and the next round runs the `task-flow:implementer`
+subagent again.
+
+To go back to an earlier task-flow release, pin the marketplace to that release's tag.
+[`/task-flow:task-release`](#releasing) creates the tags as `task-flow-<version>` (the
+`tag` pattern in this repository's `.claude/task-flow.release.toml`), so this works only
+for versions released that way; before the first release there is no tag to pin. In a
+Claude Code session:
+
+```
+/plugin marketplace add jakos/claude-baseline#task-flow-<version> --scope user
+```
+
+then, in a shell, `claude plugin update task-flow@claude-baseline`; the pinned version
+loads in the next session or after `/reload-plugins`. `#<ref>` takes a branch or a tag,
+and `jakos/claude-baseline@<ref>` is the same; see
+[Host and maintain a marketplace](https://code.claude.com/docs/en/plugins/host-marketplace)
+in the Claude Code documentation. A marketplace is registered once per `name`, so the
+pinned catalog takes the place of the unpinned `claude-baseline` one, and the pin applies
+to the whole catalog: `dev-baseline` is held at the same tag. To return to the latest
+version, add `jakos/claude-baseline` again without `#<ref>` and update the plugin the
+same way. Do not use `/plugin marketplace remove` for this: removing a marketplace
+uninstalls every plugin installed from it.
 
 ## Project configuration
 
