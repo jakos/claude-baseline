@@ -257,7 +257,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/rules.py                 denial rules shared by guard.py and implement.py
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps .md, impl-*.json and worktree/
-    scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
+    scripts/autopilot.py             task-autopilot: repo check, --tasks list check, token estimate, circuit breaker, stacked base
     scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
     scripts/models.py                reads, merges and validates models.toml
     scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own

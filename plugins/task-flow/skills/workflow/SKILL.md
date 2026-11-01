@@ -26,8 +26,9 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   worktree/        the task's git worktree, when worktrees are used
 ```
 
-Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `backlog.md`,
-`run.md`, `report.md`); their tasks are ordinary `.work/<task-id>/` folders.
+Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `run.md`,
+`report.md`, plus `backlog.md` only for decomposed runs); their tasks are ordinary
+`.work/<task-id>/` folders.
 
 When an external profile implements (`[roles] implementer` in models.toml), the script
 `scripts/implement.py`, not an agent, writes the `round <n> implementer:` and `BLOCKED:`

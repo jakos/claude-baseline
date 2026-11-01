@@ -210,6 +210,7 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 - planning-tokens: <integer> | unknown
 - continue-past: none | <task-id>, <task-id>
 - bootstrap: none | <task-id>
+- source: backlog | tasks
 - state: gathering | planning | ready | running | paused | stopped | done
 ## Tasks
 | # | Task | Depends on | Tokens used | External USD |
@@ -230,6 +231,9 @@ header and every row with `0`. Its values are a decimal USD sum, or `unknown` (s
 when an `impl-<n>.json` that should exist is missing or unreadable. `budget` is Claude
 tokens. `bootstrap`
 names the bootstrap task; it is row 1 and every other row depends on it directly.
+`source` is optional and absent means `backlog`; `tasks` marks a run built from an
+explicit `--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`,
+row 1 depending on `-`, and every later row depending on exactly the previous row.
 
 1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
    `.claude/task-flow.md` sets `worktree: no` or `Finish → commit` to anything but `yes`
@@ -308,8 +312,10 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
    and obey it exactly; never pick another task or stop on your own judgment.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
-     `status.md` `base:` to `task/<id>` of the last `done` task of this run in table order,
-     or the run's base if none; then follow The loop for that task from its current phase.
+     `status.md` `base:` to the output of
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" base .work/_autopilot/<run-id> <id>`
+     (that is `task/<id>` of the last `done` row of this run in table order, or the run's
+     base if none); then follow The loop for that task from its current phase.
      Every within-task stop (BLOCKED, APPROVED, no progress, round cap) and "never stop
      early" apply unchanged and end only that task. On `review-approved` follow Phase:
      finish steps 1–4, 6 and 7, and replace step 5 with: no push, no PR, keep the worktree,
@@ -340,6 +346,44 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
    worktree removal. Show it.
 
+### Explicit task list (`--tasks`)
+
+`/task-flow:task-autopilot --tasks <id>[,<id>...]` runs tasks that already exist in
+`.work/` as a stacked series in the given order, instead of decomposing requirements; a
+run without `--tasks` is unchanged. For such a run, steps 2–4 (Gather, Decompose,
+Create and plan) are replaced by:
+
+(a) **Preconditions** as in step 1, except: `--tasks` together with requirement text or
+`--from-repo` is refused; `commits: no` or `thin: yes` is refused (no initial-commit
+question) with the hint to bootstrap the repository first — a decomposed autopilot run
+or a bootstrap task of its own — then run `--tasks` again.
+(b) Resolve the roles with `models.py roles` (exit 2: as in step 5) and run
+`uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" stack . <ids> --implementer-kind <implementer kind>`
+from the repository root. Exit 2: show the message and end the command before anything
+is written (a precondition, not a stop). Exit 0: its output is the `## Tasks` table.
+(c) Run id and `run.md` as in Gather, with state `planning`, `bootstrap: none`,
+`source: tasks` and base = the current branch, and the `stack` output as `## Tasks`
+(with the `External USD` column when the implementer's kind is `profile`, as in
+Gather). Write `requirements.md`: the id list as given, and the `inspect` output under
+`## Repository`. No `backlog.md`. Ensure `.work/.gitignore` as in Phase: new.
+(d) Set each listed task's `status.md` `base:` to the run's base (all of them are `new`,
+`planned` or `approved`).
+(e) Plan every `new` task in table order with Phase: plan steps 1–3 without the approval
+gate, collecting `BLOCKED: yes` questions in one message, appending the answers to each
+`task.md` and re-planning those; `planned` and `approved` tasks keep their plan. Add
+every planner's `total_tokens` to `planning-tokens` (`unknown` if any is missing).
+State `planning`, then `ready`.
+(f) **Overview, Start gate, Loop and Report** as in steps 5–8, with: no bootstrap task is
+marked; the `warning:` line of `autopilot.py estimate` (more than 10 tasks) is shown
+verbatim; Edit re-plans only that task — changing the list means cancel and start
+again; Start approves the tasks that are not `approved` yet with
+`yes (user, <date>, autopilot <run-id>)` (or `yes (--auto, <date>, autopilot <run-id>)`),
+while tasks already `approved` keep their `plan-approved` line.
+(g) Failure handling is the unchanged `next`: because every row depends on the previous
+one, `--full` skips every task after a failed one (`stop: cannot finish: ...`), and in
+`--semi` choosing "continue past it" also ends in `stop: cannot finish`. Documented,
+not special-cased.
+
 **Stops of an autopilot run:** the start gate (skipped by `--auto`), backlog or planner
 `BLOCKED` before the loop, `wait` (semi), `stop:` (circuit breaker), `done`, and the pause
 after a failed external implementer round (exit 1 or 2; a defined rule, with and without
@@ -353,7 +397,9 @@ task's run; `next` returns `run <id>` for a task already in progress.
 **Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;
 `paused` by `wait` asks the wait question again; `paused` by the History line `paused:
 external implementer failed (<id>)` skips the wait question and runs `autopilot.py next`,
-which returns `run <id>`, so the task's round runs again. Preconditions are not re-run.
+which returns `run <id>`, so the task's round runs again. State `planning` of a
+`source: tasks` run plans the remaining `new` tasks (step (e) of "Explicit task list");
+nothing is decomposed. Preconditions are not re-run.
 
 ## Phase: finish — /task-flow:task-finish
 

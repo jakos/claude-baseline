@@ -80,7 +80,7 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-check [id]` | Runs the checker for the current round |
 | `task-review [id]` | Runs the reviewer for the current round |
 | `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
-| `task-autopilot [<requirements> \| <run-id>] [--from-repo] [--semi \| --full] [--budget <tokens>] [--auto]` | Gathers requirements, plans them as a stack of tasks, shows tasks and token estimates, then runs them one after another (see Autopilot) |
+| `task-autopilot [<requirements> \| <run-id> \| --tasks <id>[,<id>...]] [--from-repo] [--semi \| --full] [--budget <tokens>] [--auto]` | Gathers requirements, plans them as a stack of tasks, shows tasks and token estimates, then runs them one after another; `--tasks` runs existing prepared tasks stacked in the given order (see Autopilot) |
 | `task-list [--all]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` and `impl-*.json` files (not asked) |
@@ -148,6 +148,16 @@ Modes: `--semi` (default) pauses after a failed task (escalated or blocked) and 
 to continue past it (its dependents are skipped) or stop. `--full` keeps going, skipping
 the tasks that depend on a failed one. To retry a failed task, run
 `/task-flow:task-run <id>` yourself, then resume with `task-autopilot <run-id>`.
+
+**Running prepared tasks.** `/task-flow:task-autopilot --tasks <id>[,<id>...]` runs tasks
+that already exist in `.work/` as a stacked series, for example
+`/task-flow:task-autopilot --tasks add-models-config,external-implementer,release-notes --full --auto`.
+The listed order is the run order and each task is stacked on the previous one's branch.
+Accepted phases are `new`, `planned` and `approved`; unplanned (`new`) tasks are planned
+up front, before the overview. Thin repositories are refused — bootstrap the repository
+first, then run `--tasks` again. Above 10 tasks `autopilot.py estimate` prints a warning;
+there is no hard limit. Because each task depends on the previous one, `--full` skips
+everything after a failed task. Resume a run with `/task-flow:task-autopilot <run-id>`.
 
 **Circuit breaker.** Between tasks only, never inside one, `autopilot.py next` decides from
 files whether the next task may start. Its four triggers, in both modes:

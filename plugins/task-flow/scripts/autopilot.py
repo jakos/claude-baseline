@@ -12,6 +12,15 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   meta set (CLAUDE.md, AGENTS.md, anything under .claude/, README[.*], LICENSE[.*],
   .gitignore, .gitattributes, .editorconfig; top level only except .claude/) and
   CLAUDE.md is absent or has at most 40 non-blank lines.
+- `stack <repo-root> <ids> [--implementer-kind {claude,profile}]`: validates a
+  comma-separated list of existing `.work/<id>/` tasks and prints the `## Tasks` table
+  for `run.md` (header, separator, one row per id, `Depends on` the previous id or `-`
+  for row 1, `Tokens used` `0`, plus `External USD` `0` with `profile`). Accepted phases
+  are exactly `new`, `planned`, `approved`; refused are an empty or malformed list, a
+  duplicate id, an unknown id, a `done` task, an `escalated`/`blocked` task, a task in
+  progress, an unrecognised phase, a `planned`/`approved` task without `plan.md`, a task
+  with a worktree, a task whose branch `task/<id>` exists, and a repo root that is not
+  the top level of a git work tree.
 - `estimate <run-dir>`: a Markdown table of coarse token estimates per task plus the
   spent and budget lines. Per task (constants below are coarse defaults, not measured):
   CHECK = 15000 + 3000 * commands, IMPLEMENT = 30000 + 12000 * steps,
@@ -38,13 +47,22 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   Claude tokens only: `--implementer-kind` is as in `estimate`, and under `profile` the
   burn-rate and budget triggers compare Claude tokens with a Claude-only estimate
   (IMPLEMENT = 0).
+- `base <run-dir> <task-id>`: one line — `task/<id>` of the last `done` row of the
+  `## Tasks` table in table order, or the run's `base:` header when no row is `done`.
+  Refused when the id is not a row, when its phase is not `new`, `planned` or
+  `approved`, when `.work/<id>/worktree` exists, or when `run.md` has no `base:`.
 
 `<run-dir>` is `.work/_autopilot/<run-id>/` with a `run.md` written by the orchestrator;
-this script only reads. Stdlib only, started by `uv run --script`.
+this script only reads. The optional header line `source: backlog | tasks` (absent means
+`backlog`) marks a run made from an explicit task list: `tasks` requires `bootstrap:
+none`, row 1 depending on `-`, and every later row depending on exactly the previous
+row, and `estimate` appends a `warning:` line when such a run has more than 10 rows.
+Stdlib only, started by `uv run --script`.
 """
 
 import argparse
 import fnmatch
+import itertools
 import os
 import re
 import subprocess
@@ -99,7 +117,8 @@ def is_meta(path: str) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in META_NAMES)
 
 
-def inspect(root: str) -> str:
+def require_toplevel(root: str) -> None:
+    """Refuse unless root is the top level of a git work tree."""
     top = git(root, "rev-parse", "--show-toplevel")
     if top.returncode != 0:
         raise Refusal(f"{root} is not inside a git work tree")
@@ -110,6 +129,10 @@ def inspect(root: str) -> str:
         same = False
     if not same:
         raise Refusal(f"{root} is not the top level of a git work tree ({toplevel})")
+
+
+def inspect(root: str) -> str:
+    require_toplevel(root)
 
     has_commit = git(root, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
     listed = git(root, "ls-files", "-z")
@@ -297,6 +320,9 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
         set() if cont == "none" else {c.strip() for c in cont.split(",") if c.strip()}
     )
     bootstrap = fields["bootstrap"]
+    source = fields.get("source", "backlog")
+    if source not in ("backlog", "tasks"):
+        raise Refusal(f"source must be backlog or tasks, got {source!r}")
 
     tasks: list[dict] = []
     width = 4
@@ -363,6 +389,19 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
                 raise Refusal(
                     f"{task['id']} does not depend on bootstrap task {bootstrap}"
                 )
+    if source == "tasks":
+        if bootstrap != "none":
+            raise Refusal("a tasks run must have bootstrap: none")
+        if tasks and tasks[0]["deps"]:
+            raise Refusal(
+                f"row 1 of a tasks run must depend on '-', got {tasks[0]['id']}"
+            )
+        for previous, task in itertools.pairwise(tasks):
+            if task["deps"] != [previous["id"]]:
+                raise Refusal(
+                    f"{task['id']} of a tasks run must depend on exactly "
+                    f"{previous['id']}, the previous row"
+                )
     return {
         "mode": mode,
         "budget": budget,
@@ -371,7 +410,101 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
         "tasks": tasks,
         "external": external,
         "has_usd": width == 5,
+        "source": source,
+        "base": fields.get("base"),
     }
+
+
+# --- stack and base ------------------------------------------------------------------
+
+
+def plain_folder_name(task_id: str) -> bool:
+    """True when task_id can name a `.work/<id>/` folder (no path, not dot/underscore)."""
+    if task_id in (".", "..") or task_id.startswith(("_", ".")):
+        return False
+    return "/" not in task_id and "\\" not in task_id
+
+
+def status_phase(work: Path, task_id: str) -> str:
+    status = work / task_id / "status.md"
+    if not status.is_file():
+        raise Refusal(f"unknown task {task_id}: no .work/{task_id}/status.md")
+    return header_fields(sections(read_text(status))[""]).get("phase", "")
+
+
+def stack(root: str, ids_arg: str, external: bool) -> str:
+    """Validate the comma-separated task list and print the `## Tasks` table for run.md."""
+    ids = [part.strip() for part in ids_arg.split(",")]
+    if not ids_arg.strip():
+        raise Refusal("the task list is empty")
+    if any(not task_id for task_id in ids):
+        raise Refusal("the task list has an empty element")
+    for task_id in ids:
+        if not plain_folder_name(task_id):
+            raise Refusal(f"{task_id} is not a plain folder name")
+    seen: set[str] = set()
+    for task_id in ids:
+        if task_id in seen:
+            raise Refusal(f"task id repeats: {task_id}")
+        seen.add(task_id)
+    require_toplevel(root)
+    work = Path(root) / ".work"
+    for task_id in ids:
+        phase = status_phase(work, task_id)
+        if phase == "done":
+            raise Refusal(f"{task_id} is already finished (phase done)")
+        if phase in FAILED:
+            raise Refusal(
+                f"{task_id} failed (phase {phase}); "
+                "resolve it with /task-flow:task-run first"
+            )
+        if phase in IN_PROGRESS:
+            raise Refusal(f"{task_id} has already started (phase {phase})")
+        if phase not in UNAPPROVED | PENDING:
+            raise Refusal(f"{task_id} has unrecognised phase {phase!r}")
+        plan = work / task_id / "plan.md"
+        if phase in ("planned", "approved") and not plan.is_file():
+            raise Refusal(f"{task_id} is {phase} but has no plan.md")
+        if (work / task_id / "worktree").exists():
+            raise Refusal(f"{task_id} already has a worktree")
+        branch = git(
+            root, "rev-parse", "--verify", "--quiet", f"refs/heads/task/{task_id}"
+        )
+        if branch.returncode == 0:
+            raise Refusal(f"{task_id} already has branch task/{task_id}")
+    header = "| # | Task | Depends on | Tokens used |"
+    separator = "| --- | --- | --- | --- |"
+    if external:
+        header += " External USD |"
+        separator += " --- |"
+    rows = [header, separator]
+    for number, task_id in enumerate(ids, 1):
+        depends = "-" if number == 1 else ids[number - 2]
+        row = f"| {number} | {task_id} | {depends} | 0 |"
+        if external:
+            row += " 0 |"
+        rows.append(row)
+    return "\n".join(rows)
+
+
+def base_line(run_dir_arg: str, task_id: str) -> str:
+    """`task/<id>` of the last done row, or the run's base when nothing is done."""
+    run = load_run(run_dir_arg, for_next=False)
+    task = next((t for t in run["tasks"] if t["id"] == task_id), None)
+    if task is None:
+        raise Refusal(f"{task_id} is not a task of this run")
+    if task["phase"] not in UNAPPROVED | PENDING:
+        raise Refusal(f"{task_id} has already started (phase {task['phase']})")
+    work = Path(run_dir_arg).resolve().parent.parent
+    if (work / task_id / "worktree").exists():
+        raise Refusal(f"{task_id} already has a worktree")
+    if run["base"] is None:
+        raise Refusal("run.md has no base: line")
+    last_done = None
+    for row in run["tasks"]:
+        if row["phase"] in FINISHED_OK:
+            last_done = row["id"]
+    return f"task/{last_done}" if last_done is not None else run["base"]
 
 
 def spent(run: dict) -> tuple[int, bool]:
@@ -458,6 +591,12 @@ def estimate(run: dict) -> str:
         rows.append(
             f"external spent: {'at least ' if usd_unknown else ''}{usd_total:.2f} USD"
         )
+    if run["source"] == "tasks" and len(run["tasks"]) > 10:
+        count = len(run["tasks"])
+        rows.append(
+            f"warning: {count} tasks; more than the 10 a decomposed backlog allows — "
+            "check the totals against your usage limit (/usage)"
+        )
     return "\n".join(rows)
 
 
@@ -523,6 +662,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("inspect").add_argument("path")
+    stack_parser = sub.add_parser("stack")
+    stack_parser.add_argument("path")
+    stack_parser.add_argument("ids")
+    stack_parser.add_argument(
+        "--implementer-kind", choices=("claude", "profile"), default="claude"
+    )
+    base_parser = sub.add_parser("base")
+    base_parser.add_argument("path")
+    base_parser.add_argument("task_id")
     estimate_parser = sub.add_parser("estimate")
     estimate_parser.add_argument("path")
     estimate_parser.add_argument(
@@ -538,6 +686,12 @@ def main() -> int:
     try:
         if args.command == "inspect":
             output = inspect(args.path)
+        elif args.command == "stack":
+            output = stack(
+                args.path, args.ids, external=args.implementer_kind == "profile"
+            )
+        elif args.command == "base":
+            output = base_line(args.path, args.task_id)
         else:
             run = load_run(
                 args.path,
