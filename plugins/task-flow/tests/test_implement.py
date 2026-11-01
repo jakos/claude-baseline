@@ -548,11 +548,13 @@ class ImplementTest(unittest.TestCase):
             ]
         )
         self.configure(self.profile("fake", server))
+        # values use "!" and "-", which tempfile names never contain, so they cannot
+        # collide with the printed worktree path
         secrets = {
-            "MISTRAL_API_KEY": "s1",
-            "GH_TOKEN": "s2",
-            "AWS_SECRET_ACCESS_KEY": "s3",
-            "MY_PASSWORD": "s4",
+            "MISTRAL_API_KEY": "!secret-mistral-api-key!",
+            "GH_TOKEN": "!secret-gh-token!",
+            "AWS_SECRET_ACCESS_KEY": "!secret-aws-secret-access-key!",
+            "MY_PASSWORD": "!secret-my-password!",
         }
         done = self.run_round(env=secrets)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
