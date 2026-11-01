@@ -373,3 +373,43 @@ which returns `run <id>`, so the task's round runs again. Preconditions are not 
    worktree question in step 5. If the script exits non-zero, show stderr: exit 2 means it
    refused and deleted nothing, exit 1 means some entries (`failed: <name>`) could not be
    removed and the rest was pruned. Do not retry or delete by hand.
+
+## Release — /task-flow:task-release
+
+A release is not a task run: the five stops of a run (SKILL.md → Stops) do not apply to it;
+it has exactly one gate of its own, the approval in step 5, which `--auto` does not exist
+to skip.
+
+All `release.py` calls run from the repository root:
+`uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/release.py" <subcommand> ...`.
+The targets and their version files, tag patterns, changelog paths, scopes and checks
+live in `.claude/task-flow.release.toml` (override with `--config <path>`).
+
+1. **Target.** Run `release.py targets`. When `$ARGUMENTS` has no `--target` and the
+   config holds more than one target, ask which one; every later command then gets
+   `--target <t>` in addition to `$ARGUMENTS`.
+2. **Check.** Run `release.py check $ARGUMENTS` minus `--dry-run` (plus `--target <t>`
+   when needed) — `check` has no `--dry-run` option. Exit 2 (a config or usage error):
+   show stderr and end. Exit 1 (a refusal): show the failures and end — nothing has
+   changed.
+3. **Verify.** Run `release.py verify --target <t>` in the background (the checks can take
+   a minute) and wait for it. Non-zero exit: show the output and end.
+4. **Dry run** (only when `$ARGUMENTS` has `--dry-run`): run
+   `release.py apply $ARGUMENTS` with `--dry-run`, show its output, and end. A dry run
+   asks nothing.
+5. **Approval gate — always asked, no `--auto`.** Show current → new version and the
+   bump, the files that change, the changelog entry, the commit message and the tag; ask
+   approve / edit / cancel. Edit version: remember that explicit `<version>` and re-run
+   step 2 with it (replacing any version or `--major` / `--minor` / `--patch` in
+   `$ARGUMENTS`). Edit entry: write the edited entry to
+   `.work/_release/<target>-entry.md` (`.work/` is ignored, so the tree stays clean)
+   and pass `--entry-file .work/_release/<target>-entry.md` in step 6. Cancel: end.
+6. **Apply.** Run `release.py apply` with exactly the arguments of the last successful
+   step-2 `check` run, minus `--dry-run` — that is the approved explicit `<version>` (or
+   the original version or `--major` / `--minor` / `--patch` when it was not edited),
+   plus `--target <t>`, `--since <ref>` and `--date` when they were given — plus
+   `--entry-file .work/_release/<target>-entry.md` when the entry was edited; show its
+   one result line. Never retry on your own.
+7. **Push question — separate, default no.** Yes: `git push origin <branch>`, then
+   `git push origin refs/tags/<tag>` — never `--tags`, never `--force`, never tag deletion
+   or moving a tag. No: print both commands for later.

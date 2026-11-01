@@ -240,7 +240,7 @@ plugins/dev-baseline/
     evals/<case>/                    behavioural tests: does the skill fire
 plugins/task-flow/                   multi-agent task workflow; see its README
     agents/                          planner, implementer, checker, reviewer, backlog
-    skills/                          workflow contract, 4 profiles, 10 commands
+    skills/                          workflow contract, 4 profiles, 11 commands
     hooks/hooks.json, scripts/guard.py
     scripts/rules.py               denial rules shared by guard.py and implement.py
     scripts/task_list.py             table for task-list
@@ -248,9 +248,11 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
     scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
     scripts/models.py                reads, merges and validates models.toml
+    scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own
     templates/models.toml            commented models.toml example (profiles, [roles])
+    templates/release.toml           commented release config example (targets, version files)
     tests/test_guard.py, tests/test_rules.py, tests/test_task_list.py, tests/test_prune_task.py,
-    tests/test_autopilot.py, tests/test_models.py, tests/test_implement.py
+    tests/test_autopilot.py, tests/test_models.py, tests/test_implement.py, tests/test_release.py
 ```
 
 Validate before pushing:
