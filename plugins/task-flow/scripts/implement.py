@@ -2,11 +2,14 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""Run ONE task-flow implementer round with an OpenAI-compatible chat model.
+"""Run ONE task-flow implementer round with an external model.
 
 The same contract as agents/implementer.md, for a model that is not a Claude subagent
-(the Mistral API, any OpenAI-compatible host, a local llama.cpp server). The script
-sends the implementer's instructions and the task files to the model, lets it work in the
+(the Mistral API, any OpenAI-compatible host, a local llama.cpp server, or Anthropic
+through the native Messages API). The provider-specific wire format lives in
+scripts/drivers.py (one driver per models.toml `driver`); this script keeps the retry,
+timeout, fallback, tool and staging logic. The script sends the implementer's
+instructions and the task files to the model, lets it work in the
 task's worktree through a small set of tools, then stages the result and logs it.
 
 Usage:
@@ -37,7 +40,9 @@ Progress goes to stderr. stdout gets exactly one line and the exit code says how
 
 Files written: <task-dir>/impl-<round>.json (metrics, after exit 0, 1 or 3; besides the
 keys documented in the plugin README it carries model_seconds, retry_wait_seconds,
-command_seconds, slowest_request and slowest_command, and every fallback_chain entry a
+command_seconds, slowest_request, slowest_command, cache_tokens (prompt-cache read and
+write tokens summed over all profiles; "tokens" itself stays input/cached/output) and
+every fallback_chain entry a
 retries list) and <task-dir>/impl-<round>.progress.jsonl (one compact JSON line per counted
 turn, appended as the round runs, so an interrupted round still shows its turns; it is
 scratch and is deleted at /task-finish, which keeps only impl-*.json); status.md is
@@ -75,6 +80,7 @@ import urllib.request
 from pathlib import Path
 from typing import Self
 
+import drivers
 import models
 from launch import cmd_command_line, cmd_exe, is_cmd_script
 from rules import check_command, check_write
@@ -915,7 +921,8 @@ def is_timeout(exc: BaseException) -> bool:
 def post(
     profile: dict, key: str | None, body: dict, attempts: list | None = None
 ) -> dict:
-    """POST one chat completion; retry retryable failures per the profile.
+    """POST one request to the profile's driver endpoint; retry retryable failures
+    per the profile.
 
     When `attempts` is a list, every attempt is recorded in it as
     {"seconds", "outcome", "wait"}: "outcome" is "ok" or the retry reason ("HTTP <code>",
@@ -923,11 +930,10 @@ def post(
     followed the attempt (0.0 for the last one). The list is filled also when Unavailable
     or Fatal is raised.
     """
-    url = profile["base_url"].rstrip("/") + "/chat/completions"
+    driver = drivers.get(profile["driver"])
+    url = driver.url(profile)
     data = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
+    headers = driver.headers(key)
     retries = profile["retries"]
     last = "no attempt made"
     for attempt in range(retries + 1):
@@ -999,10 +1005,6 @@ def post(
     raise Unavailable(f"{last} after {retries + 1} attempts")
 
 
-def as_int(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 class Session:
     def __init__(self, ctx: Context, started: float):
         self.ctx = ctx
@@ -1026,9 +1028,14 @@ class Session:
         total = 0.0
         for name, tokens in self.usage.items():
             p = self.ctx.profiles[name]
+            write_price = p["price_cache_write_per_mtok"]
+            if write_price is None:
+                write_price = p["price_input_per_mtok"]
             total += (
-                (tokens["input"] - tokens["cached"]) * p["price_input_per_mtok"]
+                (tokens["input"] - tokens["cached"] - tokens["cache_write"])
+                * p["price_input_per_mtok"]
                 + tokens["cached"] * p["price_cached_input_per_mtok"]
+                + tokens["cache_write"] * write_price
                 + tokens["output"] * p["price_output_per_mtok"]
             ) / 1e6
         return total
@@ -1040,6 +1047,14 @@ class Session:
                 total[field] += tokens[field]
         return total
 
+    def cache_tokens(self) -> dict:
+        """Prompt-cache read and write tokens summed over all profiles."""
+        total = {"read": 0, "write": 0}
+        for tokens in self.usage.values():
+            total["read"] += tokens["cached"]
+            total["write"] += tokens["cache_write"]
+        return total
+
     def settings(self) -> dict:
         p = self.ctx.profiles[self.active]
         return {
@@ -1048,37 +1063,28 @@ class Session:
             "extra_body": p["extra_body"],
         }
 
-    def body(self, profile: dict, messages: list) -> dict:
-        body = {
-            "model": profile["model"],
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto",
-        }
-        if profile["temperature"] is not None:
-            body["temperature"] = profile["temperature"]
-        if profile["max_output_tokens"] is not None:
-            body["max_tokens"] = profile["max_output_tokens"]
-        body.update(profile["extra_body"] or {})
-        return body
+    def body(self, profile: dict, conversation: list) -> dict:
+        """The request body for this profile's driver (see scripts/drivers.py)."""
+        return drivers.get(profile["driver"]).body(
+            profile, self.system, conversation, TOOLS
+        )
 
-    def account(self, name: str, usage) -> dict:
+    def account(self, name: str, payload) -> dict:
         """Add one response's usage to the profile's totals; return this call's tokens."""
-        usage = usage if isinstance(usage, dict) else {}
-        entry = self.usage.setdefault(name, {"input": 0, "cached": 0, "output": 0})
-        prompt = as_int(usage.get("prompt_tokens"))
-        details = usage.get("prompt_tokens_details")
-        cached = (
-            as_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+        profile = self.ctx.profiles[name]
+        usage = drivers.get(profile["driver"]).usage(payload)
+        entry = self.usage.setdefault(
+            name, {"input": 0, "cached": 0, "cache_write": 0, "output": 0}
         )
         turn = {
-            "input": prompt,
-            "cached": min(cached, prompt),
-            "output": as_int(usage.get("completion_tokens")),
+            "input": usage["input"],
+            "cached": usage["cached"],
+            "output": usage["output"],
         }
         entry["input"] += turn["input"]
         entry["cached"] += turn["cached"]
         entry["output"] += turn["output"]
+        entry["cache_write"] += usage["cache_write"]
         return turn
 
     def note_attempts(self, name: str, attempts: list, turn: int) -> None:
@@ -1191,10 +1197,8 @@ class Session:
                 f"({interrupted[1]}). The worktree may already hold partial changes; "
                 "inspect it before continuing and do not redo finished work."
             )
-        messages = [
-            {"role": "system", "content": self.system},
-            {"role": "user", "content": user},
-        ]
+        driver = drivers.get(profile["driver"])
+        conversation = driver.start(self.system, user)
         key = models.api_key(profile)
         cap = self.start["max_cost_usd"]
         turns = 0
@@ -1216,7 +1220,7 @@ class Session:
                 try:
                     with Heartbeat(self.ctx.heartbeat, f"waiting for {name}"):
                         payload = post(
-                            profile, key, self.body(profile, messages), attempts
+                            profile, key, self.body(profile, conversation), attempts
                         )
                 except Unavailable as exc:
                     self.note_attempts(name, attempts, self.turns + 1)
@@ -1230,9 +1234,7 @@ class Session:
                 turns += 1
                 self.turns += 1
                 tools.turn = self.turns
-                turn_tokens = self.account(
-                    name, payload.get("usage") if isinstance(payload, dict) else None
-                )
+                turn_tokens = self.account(name, payload)
                 if cap is not None and self.cost() > cap:
                     return (
                         "failed",
@@ -1250,45 +1252,32 @@ class Session:
                         ),
                     )
                 try:
-                    message = payload["choices"][0]["message"]
-                    calls = message.get("tool_calls") or []
-                    content = message.get("content")
-                except (KeyError, IndexError, TypeError, AttributeError):
-                    return "failed", f"{name}: malformed response from the model"
-                if self.ctx.verbose and isinstance(content, str) and content.strip():
-                    log(f"turn {self.turns} text: {one_line(content, 500)}")
+                    reply = driver.read(payload)
+                except drivers.Malformed as exc:
+                    return "failed", f"{name}: {exc}"
+                if reply.refused:
+                    return (
+                        "failed",
+                        f"{name}: the model refused the request (stop_reason refusal)",
+                    )
+                if (
+                    self.ctx.verbose
+                    and isinstance(reply.text, str)
+                    and reply.text.strip()
+                ):
+                    log(f"turn {self.turns} text: {one_line(reply.text, 500)}")
                 prefix = (
                     f"turn {self.turns} ({request_seconds:.1f} s, "
                     f"{fmt_tokens(turn_tokens['input'])} in / "
                     f"{fmt_tokens(turn_tokens['output'])} out, "
                     f"${self.cost():.4f} total)"
                 )
-                if not calls:
+                if not reply.calls:
                     log(f"{prefix}: final message")
                     return "ok", "finished"
-                assistant = {"role": "assistant", "content": content, "tool_calls": []}
                 results = []
-                for call in calls:
-                    try:
-                        call_id = str(call["id"])
-                        function = call["function"]
-                        tool_name = function["name"]
-                        raw = function.get("arguments") or "{}"
-                    except (KeyError, TypeError):
-                        return "failed", f"{name}: malformed tool call from the model"
+                for call_id, tool_name, raw in reply.calls:
                     turn_tools.append(tool_name)
-                    assistant["tool_calls"].append(
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "arguments": raw
-                                if isinstance(raw, str)
-                                else json.dumps(raw),
-                            },
-                        }
-                    )
                     try:
                         arguments = json.loads(raw) if isinstance(raw, str) else raw
                     except ValueError:
@@ -1305,11 +1294,8 @@ class Session:
                         log(f"{prefix}: {tool_name} -> {one_line(result, 80)}")
                     if blocked is not None:
                         return "blocked", blocked
-                    results.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": result}
-                    )
-                messages.append(assistant)
-                messages.extend(results)
+                    results.append((call_id, result))
+                driver.append(conversation, reply, results)
             finally:
                 if counted:
                     self.write_progress(
@@ -1357,6 +1343,7 @@ def write_metrics(
         "model": profile["model"],
         "turns": session.turns,
         "tokens": session.tokens(),
+        "cache_tokens": session.cache_tokens(),
         "cost_usd": round(session.cost(), 6),
         "duration_seconds": round(time.monotonic() - started, 3),
         "status": status,
@@ -1385,6 +1372,11 @@ def main(argv=None) -> int:
     except GitError as exc:
         print(f"refused: {one_line(exc)}")
         return 2
+
+    start = ctx.profiles[ctx.profile_name]
+    watched = {n: ctx.profiles[n] for n in [ctx.profile_name, *start["fallback"]]}
+    for line in models.warnings(watched):
+        log(f"warning: {line}")
 
     started = time.monotonic()
     try:

@@ -284,10 +284,12 @@ which uses the same rules from `scripts/rules.py` with the `external-implementer
 
 ## External implementer
 
-**Experimental.** `scripts/implement.py` performs ONE implementer round with an
-OpenAI-compatible chat model instead of the Claude `implementer` subagent. It is written
-for the Mistral API, any OpenAI-compatible host or a local llama.cpp server, but only the
-Mistral API has been exercised so far (see [Limits, stated plainly](#limits-stated-plainly));
+**Experimental.** `scripts/implement.py` performs ONE implementer round with an external
+model instead of the Claude `implementer` subagent: an OpenAI-compatible chat model
+(`openai-loop` — the Mistral API, any OpenAI-compatible host, a local llama.cpp server) or
+Anthropic through the native Messages API with prompt caching (`anthropic-loop`); the
+per-provider wire formats live in `scripts/drivers.py`. Only the Mistral API has been
+exercised so far (see [Limits, stated plainly](#limits-stated-plainly));
 the configuration and the `impl-<n>.json` format may still change between versions. To
 switch it off again, see [Rolling back](#rolling-back). It follows the same contract as
 `agents/implementer.md` (that file's body is its system prompt, plus the Conventions of
@@ -378,6 +380,97 @@ logs the model's text content of each response. Progress goes to stderr; stdout 
 
 Prerequisites when running by hand are listed under "Limits, stated plainly" below.
 
+### Providers
+
+`scripts/drivers.py` holds one driver per `driver` value; `implement.py` sends the same
+prompt, tools, conversation and results through either of them:
+
+| Provider | `driver` | `base_url` | Key variable | Prompt caching | Status |
+| --- | --- | --- | --- | --- | --- |
+| Mistral | `openai-loop` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` | provider-side; cached tokens reported in the usage | exercised (this repo's own profiles) |
+| OpenAI | `openai-loop` | `https://api.openai.com/v1` | `OPENAI_API_KEY` | provider-side; cached tokens reported in the usage | untested against the real API |
+| Anthropic | `anthropic-loop` | `https://api.anthropic.com/v1` | e.g. `TASK_FLOW_ANTHROPIC_KEY` | `cache_control` breakpoints on the request; cache-aware cost | untested against the real API |
+| any other OpenAI-compatible host, local llama.cpp | `openai-loop` | the host's base URL | the host's variable | depends on the host | untested |
+
+Mistral (as in this repository's [`.claude/task-flow.models.toml`](../../.claude/task-flow.models.toml)):
+
+```toml
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-large-4-0"          # or "mistral-small-2603"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+max_turns = 60
+max_cost_usd = 1.50
+price_input_per_mtok = 0.70
+price_cached_input_per_mtok = 0.07
+price_output_per_mtok = 2.10
+```
+
+OpenAI — **unverified until a first real call**. Reasoning models want `temperature`
+unset, `max_tokens_param = "max_completion_tokens"` and the effort in `extra_body`:
+
+```toml
+[profiles.openai]
+driver = "openai-loop"
+base_url = "https://api.openai.com/v1"
+model = "<model id from GET /v1/models>"
+api_key_env = "OPENAI_API_KEY"
+billing = "api"
+max_tokens_param = "max_completion_tokens"
+# extra_body = { reasoning_effort = "medium" }
+```
+
+Claude on the native Messages API, Sonnet 5.5 or Haiku 5.5 — prices are USD per 1M tokens
+as of 2026-11-01, check the provider's pricing page; Sonnet 5.5: $2.00 input / $10.00
+output / $0.20 cache read, Haiku 5.5: $0.10 / $0.50 / $0.01, cache write (5-minute TTL)
+1.25x the input price:
+
+```toml
+[profiles.claude]
+driver = "anthropic-loop"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-5-5"           # or "claude-haiku-5-5"
+api_key_env = "TASK_FLOW_ANTHROPIC_KEY"
+billing = "api"
+price_input_per_mtok = 2.00
+price_cached_input_per_mtok = 0.20
+price_cache_write_per_mtok = 2.50     # 1.25x the input price; Haiku: 0.125
+price_output_per_mtok = 10.00
+# no temperature: the pinned API version rejects it on every model
+# extra_body = { output_config = { effort = "medium" } }   # optional
+```
+
+Fallback across providers — try Mistral first, then Claude:
+
+```toml
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-large-4-0"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+fallback = ["claude"]
+
+[profiles.claude]
+driver = "anthropic-loop"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-haiku-5-5"
+api_key_env = "TASK_FLOW_ANTHROPIC_KEY"
+billing = "api"
+```
+
+Never use `api_key_env = "ANTHROPIC_API_KEY"`: in a Claude Code session that variable
+makes Claude Code itself bill by API token instead of the subscription. `models.py show`
+prints a warning on stderr for such a profile and `implement.py` logs it before the
+round; use another name, e.g. `TASK_FLOW_ANTHROPIC_KEY`.
+
+Anthropic also serves an OpenAI-compatible endpoint at the same `base_url`, which works
+through `openai-loop` as a quick test path — but without prompt caching and with empty
+cached-token usage, so `cache_tokens` stays zero and cost is not cache-aware. Use
+`anthropic-loop` for real work.
+
 ### Configuration: `models.toml`
 
 Two optional TOML files: `~/.claude/task-flow/models.toml` (user) and
@@ -387,8 +480,8 @@ name the file and the key. Keys of `[profiles.<name>]`:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
-| `driver` | `"openai-loop"` (required) | |
-| `base_url` | `http(s)://` URL; `/chat/completions` is appended (required) | |
+| `driver` | `"openai-loop"` or `"anthropic-loop"` (required) | |
+| `base_url` | `http(s)://` URL; `/chat/completions` is appended on `openai-loop`, `/messages` on `anthropic-loop` (required) | |
 | `model` | model id (required) | |
 | `api_key_env` | NAME of the environment variable holding the key, never the key; required unless `billing = "local"` | none |
 | `billing` | `subscription`, `api` or `local` (required) | |
@@ -396,12 +489,15 @@ name the file and the key. Keys of `[profiles.<name>]`:
 | `max_cost_usd` | cap over the whole run, all profiles together | none |
 | `max_context` | fail when a response reports more prompt tokens | none |
 | `price_input_per_mtok`, `price_cached_input_per_mtok`, `price_output_per_mtok` | USD per 1M tokens, for the cost figure | 0 |
+| `price_cache_write_per_mtok` | USD per 1M prompt-cache-write tokens, `anthropic-loop` (cache writes cost 1.25x the input price for the 5-minute TTL) | `price_input_per_mtok` |
 | `fallback` | other profiles to try, in order, when this one stays unavailable | `[]` |
 | `enabled` | `false` disables the profile | `true` |
 | `retries`, `retry_base_seconds` | retries per request on 408, 429, 5xx, timeouts and connection errors; exponential backoff, `Retry-After` honoured up to 60 s | 3, 2 |
 | `request_timeout_seconds`, `command_timeout_seconds` | per request, per `run_command` call | 300, 600 |
-| `temperature`, `max_output_tokens` | sent as `temperature` and `max_tokens` | provider default |
-| `extra_body` | table merged into the request body, e.g. reasoning effort; `model`, `messages`, `tools`, `tool_choice` are reserved | none |
+| `temperature` | sent as `temperature`; NOT allowed on `anthropic-loop` (the pinned API version rejects it on every model) | provider default |
+| `max_output_tokens` | sent as `max_tokens` on `openai-loop` (under the `max_tokens_param` key) and as `max_tokens` on `anthropic-loop` | provider default; 16000 on `anthropic-loop` |
+| `max_tokens_param` | the body key `max_output_tokens` is sent under on `openai-loop`: `"max_tokens"` or `"max_completion_tokens"`; only `"max_tokens"` on `anthropic-loop` | `"max_tokens"` |
+| `extra_body` | table merged into the request body, e.g. reasoning effort; reserved keys per driver — `openai-loop`: `model`, `messages`, `tools`, `tool_choice`; `anthropic-loop`: those plus `system`, `max_tokens`, `stream`, `temperature`, `top_p`, `top_k` | none |
 
 `[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
 `claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for
@@ -499,7 +595,10 @@ It appends to `status.md` only under
 `## Log`: one `round <n> implementer: <path> (A|M|D)` line per changed file (or `no files
 changed`) on ok, `BLOCKED: <reason>` on blocked, nothing on failed. It also writes
 `<task-dir>/impl-<n>.json` for exit 0, 1 and 3: `profile`, `model`, `turns`, `tokens`
-(`input`, `cached`, `output`), `cost_usd`, `duration_seconds`, `status`, `reason`,
+(`input`, `cached`, `output`), `cache_tokens` (`read`, `write`: prompt-cache read and
+write tokens summed over all profiles; on `anthropic-loop` `tokens.input` is one
+request's total prompt — uncached + cache-creation + cache-read — and `cache_tokens`
+separates the cache parts), `cost_usd`, `duration_seconds`, `status`, `reason`,
 `fallback_chain`, `settings` (`temperature`, `max_output_tokens`, `extra_body`) and
 `files_changed`, plus the timing keys `model_seconds` (sum of all HTTP attempt durations,
 successful or not, excluding backoff waits), `retry_wait_seconds` (sum of the backoff sleeps),
@@ -559,9 +658,16 @@ scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
   only each tool result is truncated. With `max_context` set, a response that reports
   more prompt tokens than `max_context` fails the round (exit 1); without it, the round
   runs until the provider refuses the request, which fails it too.
-- Only the Mistral API (`https://api.mistral.ai/v1`) has been exercised. Other
-  OpenAI-compatible hosts and local llama.cpp servers are untested; their tool calls,
-  usage figures and error codes may differ.
+- Only the Mistral API (`https://api.mistral.ai/v1`) has been exercised against a real
+  provider. `openai-loop` on other hosts (OpenAI itself, any OpenAI-compatible host, a
+  local llama.cpp server) and `anthropic-loop` are untested against the real APIs; their
+  tool calls, usage figures and error codes may differ. `anthropic-loop` pins
+  `anthropic-version: 2026-10-21` on every request, so a future API version needs a code
+  change.
+- Haiku 5.5 (`claude-haiku-5-5`) costs more above 100k prompt tokens per request
+  ($0.50 / $2.50 per 1M instead of $0.10 / $0.50); flat profile prices under-count such
+  requests. Set `max_context = 100000` on a Haiku profile when the price ceiling matters —
+  that fails the round (exit 1) rather than limiting it.
 - The provider decides a model's status: a model can be in public preview, renamed or
   retired without task-flow knowing. Check the provider's model list (`GET /v1/models`)
   and documentation before you set `model`, and give the profile a `fallback`.
@@ -718,9 +824,11 @@ skills/workflow/                shared contract (SKILL.md) + orchestration.md fo
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 11 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
-scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/launch.py,
-scripts/gates.py, scripts/models.py, scripts/release.py
+scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
+scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
+tests/test_drivers.py           offline suite for scripts/drivers.py (the other test_*.py
+                                suites cover the other scripts)
 ```

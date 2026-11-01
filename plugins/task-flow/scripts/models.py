@@ -21,8 +21,9 @@ not pass silently. With neither file present there are no profiles and no roles.
 [profiles.<name>] keys (required: driver, base_url, model, billing; api_key_env is
 required unless billing = "local"):
 
-  driver                      "openai-loop"
-  base_url                    http(s) URL; "/chat/completions" is appended
+  driver                      "openai-loop" | "anthropic-loop"
+  base_url                    http(s) URL; "/chat/completions" is appended on
+                              "openai-loop", "/messages" on "anthropic-loop"
   model                       model id string
   api_key_env                 NAME of an environment variable holding the key
   billing                     "subscription" | "api" | "local"
@@ -32,16 +33,28 @@ required unless billing = "local"):
   price_input_per_mtok        number >= 0, USD per 1M tokens (default 0)
   price_cached_input_per_mtok number >= 0                   (default 0)
   price_output_per_mtok       number >= 0                   (default 0)
+  price_cache_write_per_mtok  number >= 0, USD per 1M prompt-cache-write tokens
+                              (default: price_input_per_mtok)
   fallback                    list of other profile names   (default [])
   enabled                     bool                          (default true)
   retries                     int >= 0                      (default 3)
   retry_base_seconds          number >= 0                   (default 2)
   request_timeout_seconds     number > 0                    (default 300)
   command_timeout_seconds     number > 0                    (default 600)
-  temperature                 number 0..2                   (default: provider's)
-  max_output_tokens           int > 0, sent as max_tokens   (default: provider's)
-  extra_body                  table merged into the request body; the keys model,
-                              messages, tools and tool_choice are reserved
+  temperature                 number 0..2                   (default: provider's;
+                              rejected on "anthropic-loop", whose pinned API
+                              version refuses it on every model)
+  max_output_tokens           int > 0                       (default: provider's;
+                              "anthropic-loop" sends it as max_tokens and
+                              defaults to 16000 when unset)
+  max_tokens_param            "max_tokens" | "max_completion_tokens", the body key
+                              max_output_tokens is sent under (default
+                              "max_tokens"; only "max_tokens" on "anthropic-loop")
+  extra_body                  table merged into the request body; the reserved
+                              keys are per driver — "openai-loop": model,
+                              messages, tools, tool_choice; "anthropic-loop":
+                              those plus system, max_tokens, stream, temperature,
+                              top_p, top_k
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
 "claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (implementer
@@ -51,7 +64,9 @@ CLI:
   models.py show <profile> [--project <repo-root>]
     Print the resolved profile as `key = value` lines and `api_key: set|missing|none
     needed` (never the key). --project defaults to the current directory. Exit 2 with the
-    reason on stderr for an unknown profile, no config or invalid config.
+    reason on stderr for an unknown profile, no config or invalid config. A profile
+    whose api_key_env is ANTHROPIC_API_KEY also gets a warning on stderr (that variable
+    makes Claude Code itself bill by API token instead of the subscription).
   models.py role <role> [--project <repo-root>]
     Print the resolved value of [roles] <role>, or `claude` when it is unset or no
     config exists. Exit 2 with the reason on stderr for invalid config or an unknown role.
@@ -71,13 +86,29 @@ from pathlib import Path
 
 import tomllib
 
-DRIVERS = {"openai-loop"}
+DRIVERS = {"openai-loop", "anthropic-loop"}
 BILLINGS = {"subscription", "api", "local"}
 ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
 GATES_KEYS = {"command_timeout_seconds"}
 GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
-RESERVED_BODY_KEYS = {"model", "messages", "tools", "tool_choice"}
+# Reserved extra_body keys per driver, checked on the merged profile (the driver and
+# extra_body may come from different files), after the user/project merge.
+RESERVED_BODY_KEYS = {
+    "openai-loop": {"model", "messages", "tools", "tool_choice"},
+    "anthropic-loop": {
+        "model",
+        "system",
+        "messages",
+        "tools",
+        "tool_choice",
+        "max_tokens",
+        "stream",
+        "temperature",
+        "top_p",
+        "top_k",
+    },
+}
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 URL = re.compile(r"^https?://\S+$")
 
@@ -175,9 +206,6 @@ def _check_fallback(value):
 def _check_extra_body(value):
     if not isinstance(value, dict):
         raise TypeError(f"must be a table, got {value!r}")
-    reserved = sorted(RESERVED_BODY_KEYS & set(value))
-    if reserved:
-        raise ValueError(f"must not set the reserved keys {reserved}")
     if not _json_compatible(value):
         raise ValueError("must contain only JSON-compatible values")
 
@@ -195,6 +223,7 @@ PROFILE_KEYS = {
     "price_input_per_mtok": (_check_num(0), False, 0),
     "price_cached_input_per_mtok": (_check_num(0), False, 0),
     "price_output_per_mtok": (_check_num(0), False, 0),
+    "price_cache_write_per_mtok": (_check_num(0), False, None),
     "fallback": (_check_fallback, False, []),
     "enabled": (_check_bool, False, True),
     "retries": (_check_int(0), False, 3),
@@ -203,6 +232,11 @@ PROFILE_KEYS = {
     "command_timeout_seconds": (_check_num(0, strict=True), False, 600),
     "temperature": (_check_temperature, False, None),
     "max_output_tokens": (_check_int(1), False, None),
+    "max_tokens_param": (
+        _check_choice({"max_tokens", "max_completion_tokens"}),
+        False,
+        "max_tokens",
+    ),
     "extra_body": (_check_extra_body, False, None),
 }
 
@@ -312,6 +346,28 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
             if value is _ABSENT:
                 value = list(default) if isinstance(default, list) else default
             full[key] = value
+        if full["driver"] == "anthropic-loop":
+            if full["temperature"] is not None:
+                raise ConfigError(
+                    f"{where}: profiles.{name}.temperature: not allowed on driver "
+                    '"anthropic-loop" (the pinned API version rejects temperature on '
+                    "every model)"
+                )
+            if full["max_tokens_param"] != "max_tokens":
+                raise ConfigError(
+                    f"{where}: profiles.{name}.max_tokens_param: must be "
+                    f'"max_tokens" on driver "anthropic-loop", got '
+                    f"{full['max_tokens_param']!r}"
+                )
+        if full["extra_body"]:
+            reserved = sorted(
+                RESERVED_BODY_KEYS[full["driver"]] & set(full["extra_body"])
+            )
+            if reserved:
+                raise ConfigError(
+                    f"{where}: profiles.{name}.extra_body: must not set the reserved "
+                    f"keys {reserved}"
+                )
         resolved[name] = full
 
     for name, profile in resolved.items():
@@ -382,18 +438,38 @@ def _format(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def show(profile_name: str, project_root: Path) -> str:
-    profiles, _roles = load(project_root)
-    if profile_name not in profiles:
-        known = ", ".join(sorted(profiles)) or "none"
-        raise ConfigError(f"unknown profile {profile_name!r} (known: {known})")
-    profile = profiles[profile_name]
+def warnings(profiles: dict) -> list[str]:
+    """One line per profile whose api_key_env is exactly ANTHROPIC_API_KEY: in a Claude
+    Code session that variable makes Claude Code itself bill by API token instead of
+    the subscription, so the profile should use another variable name."""
+    lines = []
+    for name in sorted(profiles):
+        profile = profiles[name]
+        if profile.get("api_key_env") == "ANTHROPIC_API_KEY":
+            lines.append(
+                f'profiles.{name}: api_key_env = "ANTHROPIC_API_KEY" - that variable is '
+                "also read by Claude Code itself, where it switches billing from the "
+                "subscription to per-API-token; use another name, e.g. "
+                '"TASK_FLOW_ANTHROPIC_KEY"'
+            )
+    return lines
+
+
+def show_text(profile: dict) -> str:
     lines = [f"{key} = {_format(value)}" for key, value in profile.items()]
     if not profile["api_key_env"]:
         lines.append("api_key: none needed")
     else:
         lines.append("api_key: set" if api_key(profile) else "api_key: missing")
     return "\n".join(lines)
+
+
+def show(profile_name: str, project_root: Path) -> str:
+    profiles, _roles = load(project_root)
+    if profile_name not in profiles:
+        known = ", ".join(sorted(profiles)) or "none"
+        raise ConfigError(f"unknown profile {profile_name!r} (known: {known})")
+    return show_text(profiles[profile_name])
 
 
 def resolve_roles(project_root: Path) -> dict:
@@ -443,7 +519,14 @@ def main(argv: list[str] | None = None) -> int:
             mapping = resolve_roles(Path(args.project).resolve())
             print(json.dumps(mapping, sort_keys=True))
         else:
-            print(show(args.profile, Path(args.project).resolve()))
+            project = Path(args.project).resolve()
+            profiles, _roles = load(project)
+            if args.profile not in profiles:
+                known = ", ".join(sorted(profiles)) or "none"
+                raise ConfigError(f"unknown profile {args.profile!r} (known: {known})")
+            print(show_text(profiles[args.profile]))
+            for line in warnings({args.profile: profiles[args.profile]}):
+                print(f"models.py: warning: {line}", file=sys.stderr)
     except ConfigError as exc:
         print(f"models.py: {exc}", file=sys.stderr)
         return 2

@@ -147,8 +147,10 @@ It depends on `dev-baseline` and is described in its own
 [README](plugins/task-flow/README.md).
 
 Optional and experimental: the implementer role can run on a per-token, non-Claude model
-through `plugins/task-flow/scripts/implement.py` (so far only the Mistral API has been
-exercised) while Claude still plans, checks and reviews. A `models.toml` turns it on; see
+through `plugins/task-flow/scripts/implement.py` — Mistral or any OpenAI-compatible host,
+or Anthropic through the native Messages API via `scripts/drivers.py` (so far only the
+Mistral API has been exercised) — while Claude still plans, checks and reviews. A
+`models.toml` turns it on; see
 [External implementer](plugins/task-flow/README.md#external-implementer). This
 repository's own `.claude/task-flow.models.toml` is such a project file and holds no
 secrets, only the name of the key's environment variable. Releases (version, changelog
@@ -258,7 +260,8 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps .md, impl-*.json and worktree/
     scripts/autopilot.py             task-autopilot: repo check, --tasks list check, token estimate, circuit breaker, stacked base
-    scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
+    scripts/implement.py             one implementer round on an OpenAI-compatible or Anthropic Messages API model, used when [roles] implementer names a profile
+    scripts/drivers.py               the per-provider request/response formats of implement.py (openai-loop, anthropic-loop)
     scripts/launch.py                starts .cmd/.bat tools on Windows through cmd.exe, shared by implement.py
     scripts/gates.py                 runs plan.md's verification commands without a model, when [roles] checker = "script"
     scripts/models.py                reads, merges and validates models.toml
@@ -266,8 +269,8 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     templates/models.toml            commented models.toml example (profiles, [roles])
     templates/release.toml           commented release config example (targets, version files)
     tests/test_guard.py, tests/test_rules.py, tests/test_task_list.py, tests/test_prune_task.py,
-    tests/test_autopilot.py, tests/test_gates.py, tests/test_models.py, tests/test_implement.py,
-    tests/test_launch.py, tests/test_release.py
+    tests/test_autopilot.py, tests/test_gates.py, tests/test_models.py, tests/test_drivers.py,
+    tests/test_implement.py, tests/test_launch.py, tests/test_release.py
 ```
 
 Validate before pushing:

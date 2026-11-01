@@ -69,6 +69,32 @@ def reply(*calls, content=None, usage=None):
     }
 
 
+def anthropic_text(text):
+    return {"type": "text", "text": text}
+
+
+def anthropic_tool_use(name, args, use_id="t1"):
+    return {"type": "tool_use", "id": use_id, "name": name, "input": args}
+
+
+def anthropic_reply(*blocks, stop_reason=None, usage=None):
+    """A Messages-API-shaped response: content blocks plus stop_reason and usage."""
+    content = list(blocks) if blocks else [anthropic_text("done")]
+    if stop_reason is None:
+        stop_reason = (
+            "tool_use"
+            if any(block.get("type") == "tool_use" for block in content)
+            else "end_turn"
+        )
+    return {
+        "content": content,
+        "stop_reason": stop_reason,
+        "usage": usage
+        if usage is not None
+        else {"input_tokens": 10, "output_tokens": 5},
+    }
+
+
 def toml_value(value):
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -110,6 +136,8 @@ class FakeServer:
                     {
                         "path": self.path,
                         "auth": self.headers.get("Authorization"),
+                        "api_key": self.headers.get("x-api-key"),
+                        "anthropic_version": self.headers.get("anthropic-version"),
                         "body": body,
                     }
                 )
@@ -178,7 +206,10 @@ def tree_snapshot(path, skip=()):
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not installed")
-class ImplementTest(unittest.TestCase):
+class RoundFixture(unittest.TestCase):
+    """Temp git repo with a worktree and .work/t1 fixtures, a scripted fake server,
+    and the helpers to configure a profile and run one round by subprocess."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -310,6 +341,48 @@ class ImplementTest(unittest.TestCase):
         self.configure(self.profile("fake", server, **profile_overrides))
         return server
 
+    def one_round_of_calls(self, *calls):
+        server = self.server([reply(*calls), reply(content="done")])
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return server.tool_results(1)
+
+    # ------------------------------------------------------------------ staging
+
+    def staged(self):
+        return git(self.worktree, "diff", "--cached", "--name-status").splitlines()
+
+    # ------------------------------------------------------- worktree and refusals
+
+    def refusal(self, label, **kwargs):
+        before_task = tree_snapshot(self.task, skip=("worktree",))
+        before_wt = git(self.worktree, "status", "--porcelain")
+        before_index = git(self.worktree, "diff", "--cached", "--name-only")
+        done = self.run_round(**kwargs)
+        self.assertEqual(done.returncode, 2, f"{label}: {done.stdout}{done.stderr}")
+        lines = done.stdout.splitlines()
+        self.assertEqual(len(lines), 1, label)
+        self.assertTrue(lines[0].startswith("refused: "), label)
+        self.assertEqual(
+            tree_snapshot(self.task, skip=("worktree",)), before_task, label
+        )
+        self.assertEqual(git(self.worktree, "status", "--porcelain"), before_wt, label)
+        self.assertEqual(
+            git(self.worktree, "diff", "--cached", "--name-only"), before_index, label
+        )
+        self.assertFalse(list(self.task.glob("impl-*.json")), label)
+
+    # ------------------------------------------------------- observability
+
+    TURN_LINE = re.compile(
+        r"^\[implement\] turn \d+ \(\d+\.\d s, [\d.]+k? in / [\d.]+k? out, "
+        r"\$\d+\.\d{4} total\): "
+    )
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class ImplementTest(RoundFixture):
     # ------------------------------------------------------------------ happy path
 
     def test_round1_writes_stages_and_logs(self):
@@ -428,13 +501,6 @@ class ImplementTest(unittest.TestCase):
         self.assertTrue((self.task / "impl-2.json").is_file())
 
     # ------------------------------------------------------------------ file tools
-
-    def one_round_of_calls(self, *calls):
-        server = self.server([reply(*calls), reply(content="done")])
-        self.configure(self.profile("fake", server))
-        done = self.run_round()
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        return server.tool_results(1)
 
     def test_path_outside_worktree_denied(self):
         (self.repo / "secret.txt").write_text("TOPSECRET", encoding="utf-8")
@@ -854,10 +920,47 @@ class ImplementTest(unittest.TestCase):
             },
         )
 
-    # ------------------------------------------------------------------ staging
+    def test_openai_max_completion_tokens_param(self):
+        server = self.server([reply(content="done")])
+        self.configure(
+            self.profile(
+                "fake",
+                server,
+                max_tokens_param="max_completion_tokens",
+                max_output_tokens=777,
+            )
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        body = server.requests[0]["body"]
+        self.assertEqual(body["max_completion_tokens"], 777)
+        self.assertNotIn("max_tokens", body)
+        self.assertEqual(self.metrics()["settings"]["max_output_tokens"], 777)
 
-    def staged(self):
-        return git(self.worktree, "diff", "--cached", "--name-status").splitlines()
+    def test_openai_cache_tokens_in_metrics(self):
+        server = self.server(
+            [
+                reply(
+                    content="done",
+                    usage={
+                        "prompt_tokens": 100,
+                        "completion_tokens": 5,
+                        "prompt_tokens_details": {"cached_tokens": 40},
+                    },
+                )
+            ]
+        )
+        self.configure(self.profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        self.assertEqual(metrics["tokens"], {"input": 100, "cached": 40, "output": 5})
+        self.assertEqual(metrics["cache_tokens"], {"read": 40, "write": 0})
+        self.assertEqual(
+            set(metrics["settings"]), {"temperature", "max_output_tokens", "extra_body"}
+        )
+
+    # ------------------------------------------------------------------ staging
 
     def test_preexisting_untracked_files_not_staged(self):
         cache = self.worktree / "__pycache__"
@@ -986,24 +1089,6 @@ class ImplementTest(unittest.TestCase):
             server.requests[0]["body"]["messages"][1]["content"].lower(),
         )
 
-    def refusal(self, label, **kwargs):
-        before_task = tree_snapshot(self.task, skip=("worktree",))
-        before_wt = git(self.worktree, "status", "--porcelain")
-        before_index = git(self.worktree, "diff", "--cached", "--name-only")
-        done = self.run_round(**kwargs)
-        self.assertEqual(done.returncode, 2, f"{label}: {done.stdout}{done.stderr}")
-        lines = done.stdout.splitlines()
-        self.assertEqual(len(lines), 1, label)
-        self.assertTrue(lines[0].startswith("refused: "), label)
-        self.assertEqual(
-            tree_snapshot(self.task, skip=("worktree",)), before_task, label
-        )
-        self.assertEqual(git(self.worktree, "status", "--porcelain"), before_wt, label)
-        self.assertEqual(
-            git(self.worktree, "diff", "--cached", "--name-only"), before_index, label
-        )
-        self.assertFalse(list(self.task.glob("impl-*.json")), label)
-
     def test_refusals_write_nothing(self):
         server = self.server([reply(content="done")] * 3)
         self.configure(
@@ -1038,11 +1123,6 @@ class ImplementTest(unittest.TestCase):
         self.assertEqual(len(server.requests), 0)
 
     # ------------------------------------------------------- observability
-
-    TURN_LINE = re.compile(
-        r"^\[implement\] turn \d+ \(\d+\.\d s, [\d.]+k? in / [\d.]+k? out, "
-        r"\$\d+\.\d{4} total\): "
-    )
 
     def test_turn_line_shows_seconds_tokens_and_cost(self):
         server = self.server(
@@ -1324,6 +1404,197 @@ class ImplementTest(unittest.TestCase):
         self.assertRegex(
             lines[0], r"^ok: 1 files changed \(fake/fake-model, 2 turns, \$[\d.]+\)$"
         )
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class AnthropicLoopTest(RoundFixture):
+    """The anthropic-loop driver (native Messages API) end to end against the fake
+    server: requests, cache-aware cost, fallback, refusal and blocked."""
+
+    def anthropic_profile(self, name, server, **overrides):
+        return self.profile(name, server, driver="anthropic-loop", **overrides)
+
+    def test_anthropic_round_writes_stages_and_logs(self):
+        server = self.server(
+            [
+                anthropic_reply(
+                    anthropic_tool_use(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                anthropic_reply(anthropic_text("done"), stop_reason="end_turn"),
+            ]
+        )
+        self.configure(self.anthropic_profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.worktree / "src/new.py").read_bytes(), b"x = 1\n")
+        staged = git(self.worktree, "diff", "--cached", "--name-only").split()
+        self.assertIn("src/new.py", staged)
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertTrue(status.endswith("round 1 implementer: src/new.py (A)\n"))
+        # requests went to /v1/messages with the key in x-api-key, no Authorization
+        self.assertEqual(server.requests[0]["path"], "/v1/messages")
+        self.assertEqual(server.requests[0]["api_key"], "fake-key")
+        self.assertEqual(server.requests[0]["anthropic_version"], "2026-10-21")
+        self.assertIsNone(server.requests[0]["auth"])
+        body = server.requests[0]["body"]
+        self.assertEqual(body["tool_choice"], {"type": "auto"})
+        self.assertEqual(body["max_tokens"], 16000)
+        self.assertIn("cache_control", body["system"][0])
+        self.assertNotIn("temperature", body)
+        self.assertEqual(
+            [tool["name"] for tool in body["tools"]],
+            [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_files",
+                "grep",
+                "run_command",
+                "blocked",
+            ],
+        )
+        self.assertEqual(body["messages"][0]["role"], "user")
+        self.assertEqual(body["messages"][0]["content"][0]["type"], "text")
+        # turn 1's tool result went back as ONE user message of tool_result blocks,
+        # whose last block carries the moving cache breakpoint in the sent body
+        second = server.requests[1]["body"]["messages"]
+        self.assertEqual(second[1]["role"], "assistant")
+        self.assertEqual(second[1]["content"][0]["type"], "tool_use")
+        self.assertEqual(len(second[2]["content"]), 1)
+        tool_block = second[2]["content"][0]
+        self.assertEqual(tool_block["type"], "tool_result")
+        self.assertEqual(tool_block["tool_use_id"], "t1")
+        self.assertEqual(tool_block["content"], "wrote 6 characters to src/new.py")
+        self.assertIn("cache_control", tool_block)
+
+    def test_anthropic_cost_with_cache_reads_and_writes(self):
+        usage1 = {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 1000,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 100,
+        }
+        usage2 = {
+            "input_tokens": 50,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 1000,
+            "output_tokens": 20,
+        }
+        server = self.server(
+            [
+                anthropic_reply(
+                    anthropic_tool_use(
+                        "write_file", {"path": "m.txt", "content": "m\n"}
+                    ),
+                    usage=usage1,
+                ),
+                anthropic_reply(
+                    anthropic_text("done"), stop_reason="end_turn", usage=usage2
+                ),
+            ]
+        )
+        self.configure(
+            self.anthropic_profile(
+                "fake",
+                server,
+                price_input_per_mtok=2.0,
+                price_cached_input_per_mtok=0.2,
+                price_cache_write_per_mtok=2.5,
+                price_output_per_mtok=10.0,
+            )
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$0.0047", done.stdout)
+        metrics = self.metrics()
+        self.assertEqual(
+            metrics["tokens"], {"input": 2350, "cached": 1000, "output": 120}
+        )
+        self.assertEqual(metrics["cache_tokens"], {"read": 1000, "write": 1200})
+        self.assertAlmostEqual(metrics["cost_usd"], 0.0047, places=7)
+        for record in self.progress():
+            self.assertEqual(set(record["tokens"]), {"input", "cached", "output"})
+
+    def test_cache_write_price_defaults_to_input_price(self):
+        usage = {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 1000,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+        }
+        server = self.server(
+            [
+                anthropic_reply(
+                    anthropic_text("done"), stop_reason="end_turn", usage=usage
+                )
+            ]
+        )
+        # no price_cache_write_per_mtok: cache writes are priced at price_input_per_mtok
+        self.configure(self.anthropic_profile("fake", server, price_input_per_mtok=3.0))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$0.0030", done.stdout)
+        self.assertAlmostEqual(self.metrics()["cost_usd"], 0.003, places=9)
+        self.assertEqual(self.metrics()["cache_tokens"], {"read": 0, "write": 1000})
+
+    def test_fallback_openai_to_anthropic(self):
+        down = self.server([503, 503])
+        up = self.server(
+            [
+                anthropic_reply(
+                    anthropic_tool_use(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                anthropic_reply(anthropic_text("done"), stop_reason="end_turn"),
+            ]
+        )
+        text = self.profile("fake", down, retries=1, fallback=["claude"])
+        text += self.anthropic_profile("claude", up)
+        self.configure(text)
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(down.requests), 2)
+        chain = [
+            (entry["profile"], entry["outcome"])
+            for entry in self.metrics()["fallback_chain"]
+        ]
+        self.assertEqual(chain, [("fake", "unavailable"), ("claude", "ok")])
+        self.assertEqual(up.requests[0]["path"], "/v1/messages")
+        self.assertEqual(up.requests[0]["api_key"], "fake-key")
+        # the "previous attempt" note is in the first user message of the Messages call
+        first_user = up.requests[0]["body"]["messages"][0]
+        self.assertIn("previous attempt", first_user["content"][0]["text"])
+
+    def test_anthropic_refusal_fails(self):
+        server = self.server(
+            [anthropic_reply(anthropic_text("I cannot help"), stop_reason="refusal")]
+        )
+        self.configure(self.anthropic_profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "), done.stdout)
+        self.assertIn("refused", done.stdout)
+        self.assertEqual(self.metrics()["status"], "failed")
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), STATUS)
+
+    def test_anthropic_blocked_exits_3(self):
+        server = self.server(
+            [
+                anthropic_reply(
+                    anthropic_tool_use("blocked", {"reason": "plan is wrong"})
+                )
+            ]
+        )
+        self.configure(self.anthropic_profile("fake", server))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(done.stdout.strip(), "blocked: plan is wrong")
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertEqual(status, STATUS + "BLOCKED: plan is wrong\n")
+        self.assertEqual(self.metrics()["status"], "blocked")
 
 
 if __name__ == "__main__":
