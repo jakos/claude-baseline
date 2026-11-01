@@ -162,9 +162,11 @@ session or weekly limit; check it with `/usage`.
 
 ## What enforces what
 
-Prompts are advice; a hook is a rule. `scripts/guard.py` runs before every edit and shell
-command and applies only to task-flow's own agents (it reads `agent_type` from the hook
-input):
+Prompts are advice; a hook is a rule. The rules live in `scripts/rules.py`
+(`check_command`, `check_write`) — one implementation used by the hook
+`scripts/guard.py`, which runs before every edit and shell command and applies only to
+task-flow's own agents (it reads `agent_type` from the hook input), and by
+`scripts/implement.py` for the external implementer (role `external-implementer`):
 
 - planner, backlog, checker and reviewer can write only under `.work/`;
 - no task-flow agent can push, open a PR, `kubectl`/`oc apply`, `helm install`, `docker
@@ -177,7 +179,8 @@ regard to quotes. A `git` segment with whitespace followed by a mutating verb (`
 `checkout`, `reset`, `worktree add`, ...) is denied for planner and reviewer; one with
 whitespace followed by a commit or push verb is denied for every task-flow agent.
 
-Run the guard's test with
+Run the rules' test with
+`uv run --script plugins/task-flow/tests/test_rules.py`, the guard's with
 `uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
 `uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
 `uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
@@ -185,7 +188,8 @@ Run the guard's test with
 `uv run --script plugins/task-flow/tests/test_models.py` and the external implementer's with
 `uv run --script plugins/task-flow/tests/test_implement.py`.
 
-Limits of the guard, stated plainly:
+Limits of the guard, stated plainly (they apply to `implement.py`'s `run_command` too,
+which uses the same rules from `scripts/rules.py` with the `external-implementer` role):
 
 - It sees edit tools and shell command text. A shell redirect such as `echo x > file`
   from the checker or reviewer is not caught; their prompts forbid it, nothing enforces it.
@@ -250,8 +254,8 @@ The orchestrator needs the permission `Bash(uv run:*)` to start the scripts.
 
 Privacy: the provider receives the worktree code and the task files. Opting out of
 training is set at the provider, not here. The guard hook (`guard.py`) does not see the
-external model's commands; `implement.py` applies its own text matching, with the limits
-below.
+external model's commands; `implement.py` calls the same rules from `scripts/rules.py`
+with the `external-implementer` role, with the limits below.
 
 To try it by hand:
 
@@ -369,8 +373,8 @@ reviewer = "claude:sonnet"
 The model gets seven tools: `read_file`, `write_file`, `edit_file` (the old text must occur
 exactly once), `list_files`, `grep`, `run_command` and `blocked`. The file tools are
 confined to the worktree and cannot write under `.git` or `.work`. `run_command` denies the
-commands `guard.py` denies for the implementer (the regexes are imported from it, not
-copied). On a retryable failure that outlasts `retries`, the run restarts on the next
+commands `rules.py` denies for the `external-implementer` role — the same rules the
+`guard.py` hook applies to the Claude agents. On a retryable failure that outlasts `retries`, the run restarts on the next
 `fallback` profile with the same prompt and a note that the worktree may hold partial
 changes; any other 4xx fails without fallback.
 
@@ -486,8 +490,8 @@ agents/                         planner, implementer, checker, reviewer, backlog
 skills/workflow/                shared contract (SKILL.md) + orchestration.md for commands
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 10 commands
-hooks/hooks.json, scripts/guard.py, scripts/task_list.py, scripts/prune_task.py,
-scripts/autopilot.py, scripts/implement.py, scripts/models.py
+hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
+scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/models.py
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles])
 ```
