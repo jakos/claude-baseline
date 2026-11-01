@@ -1,0 +1,49 @@
+# task-flow release configuration — commented example. Copy it to
+#   <repo-root>/.claude/task-flow.release.toml
+# and edit the targets. scripts/release.py reads it strictly with tomllib: unknown keys
+# anywhere are an error (exit 2), and every path is repo-relative. No secrets here.
+#
+# Top level: only [targets.<name>]. Each target needs:
+#   tag         the tag pattern; must contain {version} exactly once
+#   changelog   the changelog file the entry is prepended to
+#   scope       only commits touching these paths land in the changelog entry
+#   branches    optional, default ["main"]; the release refuses on any other branch
+#   checks      optional, default []; each check is an argument list (no shell, so no
+#               quoting rules on any OS), run from the repository root by `release.py verify`
+#   version_files  at least one [[targets.<name>.version_files]] with:
+#     path      the file holding the version, repo-relative
+#     format    "json" | "toml"
+#     selector  where the version lives: dot-separated segments, each `key` or
+#               `key[field=value]`; the filter form picks the one element of the list
+#               `key` whose `field` equals `value`. TOML allows only plain `key` segments.
+#
+# Selector examples:
+#   "version"                        a top-level JSON key (plugin.json, package.json)
+#   "package.version"                a TOML key in the [package] table (Cargo.toml)
+#   "project.version"                a TOML key in the [project] table (pyproject.toml)
+#   "plugins[name=task-flow].version"  one element of a JSON list (marketplace.json)
+
+[targets.web]
+tag = "web-{version}"
+changelog = "CHANGELOG.md"
+scope = ["src/web", "package.json"]
+branches = ["main"]
+checks = [
+  ["uv", "run", "--script", "tests/test_web.py"],
+  ["uvx", "ruff", "check", "src/web"],
+]
+[[targets.web.version_files]]
+path = ".claude-plugin/plugin.json"
+format = "json"
+selector = "version"
+
+[targets.app]
+tag = "app-{version}"
+changelog = "apps/app/CHANGELOG.md"
+scope = ["apps/app"]
+[[targets.app.version_files]]
+path = "apps/app/pyproject.toml"
+format = "toml"
+selector = "project.version"
+# package.json style:  format = "json", selector = "version"
+# Cargo.toml style:    format = "toml", selector = "package.version"

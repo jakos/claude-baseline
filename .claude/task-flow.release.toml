@@ -1,0 +1,52 @@
+# task-flow release configuration for THIS repository (project file).
+# /task-flow:task-release reads it via scripts/release.py; --config <path> overrides
+# the location. Parsed strictly with tomllib: unknown keys anywhere are an error (exit 2).
+# No secrets here. The checks are argument lists, so there is no shell quoting; each
+# plugins/task-flow/tests/test_*.py file is one entry, because there is no shell glob —
+# add a new test file here by hand.
+
+[targets.task-flow]
+tag = "task-flow-{version}"
+changelog = "plugins/task-flow/CHANGELOG.md"
+scope = ["plugins/task-flow"]
+branches = ["main"]
+checks = [
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_autopilot.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_guard.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_implement.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_models.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_prune_task.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_release.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_rules.py"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_task_list.py"],
+  ["uvx", "ruff", "check", "plugins/task-flow/scripts", "plugins/task-flow/tests"],
+  ["uvx", "ruff", "format", "--check", "plugins/task-flow/scripts", "plugins/task-flow/tests"],
+  ["claude", "plugin", "validate", "."],
+]
+[[targets.task-flow.version_files]]
+path = "plugins/task-flow/.claude-plugin/plugin.json"
+format = "json"
+selector = "version"
+[[targets.task-flow.version_files]]
+path = ".claude-plugin/marketplace.json"
+format = "json"
+selector = "plugins[name=task-flow].version"
+
+[targets.dev-baseline]
+tag = "dev-baseline-{version}"
+changelog = "plugins/dev-baseline/CHANGELOG.md"
+scope = ["plugins/dev-baseline"]
+branches = ["main"]
+checks = [
+  ["uvx", "ruff", "check", "plugins/dev-baseline/scripts"],
+  ["uvx", "ruff", "format", "--check", "plugins/dev-baseline/scripts"],
+  ["claude", "plugin", "validate", "."],
+]
+[[targets.dev-baseline.version_files]]
+path = "plugins/dev-baseline/.claude-plugin/plugin.json"
+format = "json"
+selector = "version"
+[[targets.dev-baseline.version_files]]
+path = ".claude-plugin/marketplace.json"
+format = "json"
+selector = "plugins[name=dev-baseline].version"

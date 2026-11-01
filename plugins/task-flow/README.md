@@ -78,6 +78,7 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | `task-list [--all]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
 | `task-finish [id]` | After `APPROVED`: summary, commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` and `impl-*.json` files (not asked) |
+| `task-release [<version> \| --major \| --minor \| --patch] [--target <name>] [--since <ref>] [--dry-run]` | Releases one target: preconditions, version proposal, checks, changelog entry, one approval, version bump, release commit and annotated tag; push only after a separate question (see Releasing) |
 
 `task-list` runs `scripts/task_list.py` and sorts rows by phase group, then oldest last
 History entry first, then id:
@@ -163,6 +164,59 @@ measured. With an external implementer, `autopilot.py estimate` and `next` take
 cost is measured in USD (the `External USD` column of `run.md`, totalled in `report.md`),
 not estimated. Tokens of your main session are not counted, and Claude cannot see your plan's
 session or weekly limit; check it with `/usage`.
+
+## Releasing
+
+`/task-flow:task-release` releases one target — a plugin or a project — in one controlled
+procedure, and `scripts/release.py` computes every decision, so the command is a thin
+wrapper around it. The procedure is **Release** in
+[skills/workflow/orchestration.md](skills/workflow/orchestration.md): list the targets,
+`check` (every precondition, one JSON report), `verify` (the target's checks, run in the
+background), optionally `apply --dry-run`, then **one approval gate — always asked, there
+is no `--auto` for it** — then `apply` (the version bump in every version file, the
+changelog entry, the release commit `chore(release): <target> <version>` and the annotated
+tag), and finally a separate push question, default no. Nothing changes before the
+approval. `--dry-run` runs check, verify and `apply --dry-run` and asks nothing.
+
+The targets live in `.claude/task-flow.release.toml` (override with `--config <path>`);
+[`templates/release.toml`](templates/release.toml) is a commented example. The file is
+parsed strictly with `tomllib` — unknown keys anywhere are a config error (exit 2). Schema:
+
+```toml
+[targets.<name>]
+tag = "<name>-{version}"          # required; must contain {version} exactly once
+changelog = "path/CHANGELOG.md"   # required, repo-relative
+scope = ["path", ...]             # required, non-empty; only commits touching these count
+branches = ["main"]               # optional, default ["main"]
+checks = [["cmd", "arg"], ...]    # optional, default []; each an argument list, no shell quoting
+[[targets.<name>.version_files]]  # required, at least one
+path = "package.json"             # repo-relative
+format = "json"                   # "json" | "toml"
+selector = "version"              # dot-separated; a segment is key or key[field=value]
+```
+
+The selector picks the version value: `version` (plugin.json, package.json),
+`plugins[name=task-flow].version` (a marketplace-style list, exactly one element must
+match), `project.version` (pyproject.toml), `package.version` (Cargo.toml). TOML files
+allow only plain `key` segments, because the write is a single-line replacement.
+
+Version rule: strict `MAJOR.MINOR.PATCH`. With no explicit version and no flag, a breaking
+change (`!` after the type or scope, or `BREAKING CHANGE:` in the body) gives major —
+except below 1.0.0, where it gives minor and never an automatic 1.0.0 (`--major` on 0.x
+does give 1.0.0); any `feat` gives minor; anything else gives patch. An explicit version is
+taken as given and must be higher than the current one. The commit range starts at the
+highest tag matching the target's tag pattern; `--since <ref>` overrides it. **The first
+release has no tag: `check` refuses with `no-base` and asks for `--since <ref>`**, so the
+first changelog entry states its starting point once, explicitly.
+
+Two rollbacks: pin an earlier tag (install or check out `<target>-<old version>`), or
+simply not push — the release commit and the tag stay local, and you may remove them
+yourself; the command never deletes or moves a tag, never force-pushes, and never pushes
+without its own question.
+
+The checks list has no shell glob: each `plugins/task-flow/tests/test_*.py` is one
+`["uv", "run", "--script", <file>]` entry in `.claude/task-flow.release.toml`, so a new test
+file must be added there by hand.
 
 ## What enforces what
 
@@ -465,6 +519,11 @@ path→profile mappings, exact verification commands per profile (replacing the
 defaults), architecture rules, base branch, branch naming, whether to use worktrees, and
 what `task-finish` may do without asking. It is Markdown because only agents read it.
 
+Optional `.claude/task-flow.release.toml` configures `/task-flow:task-release` — the
+release targets, their version files, tag patterns, changelogs, scopes and checks (see
+Releasing, and [`templates/release.toml`](templates/release.toml) for a commented
+example). It is TOML because a script parses it strictly, unlike `task-flow.md`.
+
 The planner copies what applies into `plan.md → Project rules` and `Verification
 commands`, so the other agents never read the config themselves.
 
@@ -498,9 +557,11 @@ cost no context. Agents read them by path.
 agents/                         planner, implementer, checker, reviewer, backlog
 skills/workflow/                shared contract (SKILL.md) + orchestration.md for commands
 skills/profile-*/               python, docs, config, generic
-skills/task-*/                  the 10 commands
+skills/task-*/                  the 11 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
-scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/models.py
+scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/models.py,
+scripts/release.py
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles])
+templates/release.toml          commented release config example (targets, version files)
 ```

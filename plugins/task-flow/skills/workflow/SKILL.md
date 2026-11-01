@@ -152,6 +152,9 @@ other four apply identically with and without it:
 These are the stops of one task's run. `task-autopilot` adds run-level stops that are
 evaluated only between tasks (orchestration.md → Autopilot).
 
+`/task-flow:task-release` is not a task run: its single approval gate is defined in
+orchestration.md → Release, and the five stops above do not apply to it.
+
 A failure or refusal of an external implementer ends the command like a failed
 precondition: `status.md` is unchanged and the same command resumes the round. It is not a
 stop and not a judgment that the run cannot pass.
