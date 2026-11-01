@@ -21,18 +21,25 @@ Rules per role:
 - external-implementer: no push, no PR, no deploy and no commit (the same regexes, its
   own reason texts); writes are confined to the worktree root and kept out of `.git`
   and `.work` (its own reason texts). `git add` and read-only commands stay allowed.
+- every role, the Claude agents and the external implementer alike: no snoozing a
+  habit-hooks finding — writing a path that ends in `.habit-hooks/snooze.json` and
+  running `habit-snooze --snooze` or `habit-snooze --prune` are denied (habit-hooks'
+  own guidance: never snooze without the user's explicit approval).
 
 Documented limits, stated plainly: commands and paths are matched as raw text, without
 parsing quotes, so a mutating git phrase inside quotes is still denied for the
 read-only roles — the known false positive, pinned in tests/test_guard.py and
 tests/test_rules.py (use the Grep tool for such searches). A shell redirect such as
-`echo x > file` is not caught. A program such as `python -c` can still push or commit;
-nothing here can see what a program does.
+`echo x > file` is not caught, and neither is a redirect or a `cp` into
+`.habit-hooks/snooze.json` — only the write-tool path and the command text are
+matched. A program such as `python -c` can still push or commit; nothing here can see
+what a program does.
 
 Stdlib only, started by `uv run --script` or imported as a sibling module by guard.py and
 implement.py, so it runs on macOS, Linux and Windows.
 """
 
+import posixpath
 import re
 from pathlib import Path
 
@@ -58,6 +65,9 @@ MUTATES_GIT = re.compile(
     r"|cherry-pick|revert|branch\s+-[dDmM]|worktree\s+(?:add|remove))\b"
 )
 SEGMENTS = re.compile(r"[;&|\n]+")
+HABIT_SNOOZE = re.compile(
+    r"\bhabit-snooze(?:\.exe)?\b[^|;&\n]*\s--(?:snooze|prune)\b", re.IGNORECASE
+)
 
 CLAUDE_LEAVES = (
     "pushing, opening PRs and deploying are not allowed inside task-flow agents. "
@@ -74,6 +84,14 @@ EXTERNAL_LEAVES = (
 EXTERNAL_COMMITS = (
     "do not commit; leave changes in the worktree, the script stages them"
 )
+SNOOZE_WRITE = (
+    "snoozing a habit-hooks finding needs the user's explicit approval; do not write "
+    ".habit-hooks/snooze.json — fix the finding, or record it for the user"
+)
+SNOOZE_COMMAND = (
+    "snoozing a habit-hooks finding needs the user's explicit approval; do not run "
+    "habit-snooze --snooze or --prune — fix the finding, or record it for the user"
+)
 
 
 def _known_role(role: str) -> None:
@@ -81,28 +99,48 @@ def _known_role(role: str) -> None:
         raise ValueError(f"unknown role: {role!r}")
 
 
+def _is_snooze_file(path: str) -> bool:
+    """True when the normalized path ends with the components .habit-hooks/snooze.json.
+
+    Backslashes count as separators, `..` is normalized away, and each component is
+    stripped of trailing dots and spaces and casefolded, so `C:\\repo\\.HABIT-HOOKS\\
+    Snooze.json.` and `sub/../.habit-hooks/snooze.json` both match.
+    """
+    parts = [
+        part.rstrip(". ").casefold()
+        for part in posixpath.normpath(path.replace("\\", "/")).split("/")
+    ]
+    return parts[-2:] == [".habit-hooks", "snooze.json"]
+
+
 def check_command(command: str, role: str) -> str | None:
     """Return None to allow `command` for `role`, or the denial reason.
 
     `command` is the raw command text, as the caller passes it. The leaves-machine rule
     is checked per `;`/`&`/`|`/newline segment (a client dry run in the same segment
-    exempts it), the commit rule on the whole command, then the read-only git rule.
+    exempts it), the commit rule on the whole command, then the snooze rule per
+    segment, then the read-only git rule.
     """
     _known_role(role)
     segments = SEGMENTS.split(command)
     leaves = any(
         LEAVES_MACHINE.search(s) and not CLIENT_DRY_RUN.search(s) for s in segments
     )
+    snoozes = any(HABIT_SNOOZE.search(s) for s in segments)
     if role == "external-implementer":
         if leaves:
             return EXTERNAL_LEAVES
         if COMMITS.search(command):
             return EXTERNAL_COMMITS
+        if snoozes:
+            return SNOOZE_COMMAND
         return None
     if leaves:
         return CLAUDE_LEAVES
     if COMMITS.search(command):
         return CLAUDE_COMMITS
+    if snoozes:
+        return SNOOZE_COMMAND
     if role in READ_ONLY_ROLES and MUTATES_GIT.search(command):
         return f"the {role} is read-only: this git command changes the tree, index or branches."
     return None
@@ -113,9 +151,13 @@ def check_write(path: str, role: str, root: Path | str | None = None) -> str | N
 
     `root` is the external-implementer's worktree and is required for that role
     (ValueError without it); it is ignored for the Claude roles, whose writes are
-    confined to `.work/` directories.
+    confined to `.work/` directories. The snooze check runs before every other write
+    rule; for the external implementer it runs after the outside-worktree check, on
+    both the raw path and the resolved worktree-relative path.
     """
     _known_role(role)
+    if role != "external-implementer" and _is_snooze_file(path):
+        return SNOOZE_WRITE
     if role == "implementer":
         return None
     if role == "external-implementer":
@@ -130,6 +172,8 @@ def check_write(path: str, role: str, root: Path | str | None = None) -> str | N
             relative = resolved.relative_to(worktree)
         except ValueError:
             return f"{path} is outside the worktree"
+        if _is_snooze_file(path) or _is_snooze_file(relative.as_posix()):
+            return SNOOZE_WRITE
 
         def hidden(parts) -> bool:
             return bool({p.rstrip(". ").casefold() for p in parts} & {".git", ".work"})

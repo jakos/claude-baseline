@@ -729,6 +729,187 @@ class ImplementTest(RoundFixture):
         self.assertLess(len(big), 20500)
         self.assertIn("exit code: 0", big)
 
+    # ------------------------------------------------------------------ post_edit
+
+    def test_post_edit_feedback_returned_to_model(self):
+        checker = python_command(
+            "import sys; print('checked', sys.argv[1]); sys.exit(1)"
+        )
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server, post_edit=[checker + " {path}"]))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = server.tool_results(1)[0]
+        self.assertIn("wrote 6 characters to src/new.py", result)
+        self.assertIn("post_edit:", result)
+        self.assertIn("(exit code 1)", result)
+        self.assertIn("checked src/new.py", result)
+        self.assertIn(
+            "src/new.py", git(self.worktree, "diff", "--cached", "--name-only")
+        )
+
+    def test_post_edit_runs_after_edit_file(self):
+        checker = python_command("import sys; print('edited-check', sys.argv[1])")
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "edit_file",
+                        {"path": "src/app.py", "old": "1", "new": "2"},
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server, post_edit=[checker + " {path}"]))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = server.tool_results(1)[0]
+        self.assertIn("edited src/app.py", result)
+        self.assertIn("post_edit:", result)
+        self.assertIn("(exit code 0)", result)
+        self.assertIn("edited-check src/app.py", result)
+
+    def test_post_edit_output_capped(self):
+        printer = python_command("print('\\n'.join(f'line {i}' for i in range(100)))")
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(self.profile("fake", server, post_edit=[printer + " {path}"]))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = server.tool_results(1)[0]
+        self.assertIn("post_edit:", result)
+        output_lines = [ln for ln in result.splitlines() if ln.startswith("line ")]
+        self.assertEqual(len(output_lines), 40, result)
+        self.assertEqual(output_lines[0], "line 0")
+        self.assertEqual(output_lines[-1], "line 39")
+        self.assertIn("...[60 more lines]", result)
+
+    def test_post_edit_clean_run_is_silent(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(
+            self.profile("fake", server, post_edit=[python_command("pass") + " {path}"])
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(server.tool_results(1)[0], "wrote 6 characters to src/new.py")
+
+    def test_post_edit_denied_and_missing_program_are_feedback(self):
+        server = self.server(
+            [
+                reply(
+                    tool_call(
+                        "write_file", {"path": "src/new.py", "content": "x = 1\n"}
+                    )
+                ),
+                reply(content="done"),
+            ]
+        )
+        self.configure(
+            self.profile(
+                "fake",
+                server,
+                post_edit=[
+                    "git commit -m x",
+                    "habit-snooze --snooze x {path}",
+                    "no-such-program-xyz {path}",
+                ],
+            )
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = server.tool_results(1)[0]
+        self.assertIn("post_edit:", result)
+        self.assertEqual(result.count("denied:"), 2, result)
+        self.assertEqual(result.count("error:"), 1, result)
+        self.assertEqual(git(self.repo, "rev-list", "--all", "--count").strip(), "1")
+
+    def test_post_edit_not_run_for_denied_write(self):
+        server = self.server(
+            [
+                reply(tool_call("write_file", {"path": ".git/x", "content": "x"})),
+                reply(content="done"),
+            ]
+        )
+        self.configure(
+            self.profile(
+                "fake", server, post_edit=[python_command("print('must not run')")]
+            )
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = server.tool_results(1)[0]
+        self.assertTrue(result.startswith("denied"), result)
+        self.assertNotIn("post_edit:", result)
+        self.assertNotIn("must not run", result)
+
+    # ------------------------------------------------------------- prompt_extras
+
+    def test_prompt_extras_appended_before_adapter(self):
+        (self.repo / "extras").mkdir()
+        (self.repo / "extras" / "one.md").write_text(
+            "extra one text\n", encoding="utf-8", newline=""
+        )
+        absolute = self.home / "absolute-extra.md"
+        absolute.write_text("absolute extra text\n", encoding="utf-8", newline="")
+        server = self.simple(prompt_extras=["extras/one.md", str(absolute)])
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        content = server.requests[0]["body"]["messages"][0]["content"]
+        first = content.index("# Extra instructions: extras/one.md")
+        second = content.index(f"# Extra instructions: {absolute}")
+        adapter = content.index("## Runner adapter")
+        self.assertLess(first, content.index("extra one text"))
+        self.assertLess(content.index("extra one text"), second)
+        self.assertLess(second, content.index("absolute extra text"))
+        self.assertLess(content.index("absolute extra text"), adapter)
+
+    def test_prompt_extras_missing_file_refused(self):
+        server = self.server([reply(content="done")])
+        self.configure(self.profile("fake", server, prompt_extras=["no-such-extra.md"]))
+        before = (self.task / "status.md").read_text(encoding="utf-8")
+        done = self.run_round()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("refused:"), done.stdout)
+        self.assertIn("no-such-extra.md", done.stdout)
+        self.assertEqual(len(server.requests), 0)
+        self.assertFalse(list(self.task.glob("impl-*.json")))
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), before)
+
+    def test_without_new_keys_results_unchanged(self):
+        server = self.simple()
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(server.tool_results(1)[0], "wrote 6 characters to src/new.py")
+        content = server.requests[0]["body"]["messages"][0]["content"]
+        self.assertNotIn("# Extra instructions:", content)
+
     # ------------------------------------------------------------------ driver
 
     def test_retry_on_429_then_success(self):

@@ -61,6 +61,21 @@ command is rejected if it contains `& | < > ^ % !` or a newline, inside quotes t
 File tools are confined to the worktree and cannot write under .git or .work. The
 denial rules live in scripts/rules.py, shared with the guard.py hook; this script calls
 them with the external-implementer role.
+
+Two optional profile keys add feedback around the file tools. `post_edit` (a list of
+commands) runs after each *successful* `write_file`/`edit_file` call — not after
+`run_command` and not after a denied or failed write — with every literal `{path}`
+replaced by the written file's worktree-relative path, quoted for the platform. Each
+command runs through the same path as `run_command` (the same rules, no shell, the
+worktree as cwd, `command_timeout_seconds`, its duration counted in `command_seconds`),
+and its exit code and output (capped to 40 lines) are appended to that tool call's
+result; a denial, a missing program, a timeout or a non-zero exit is feedback text
+only and never fails, blocks or ends the round. `prompt_extras` (a list of files,
+`~` expanded, relative paths resolved against the repository root) is read in
+`prepare()` — a missing, unreadable or non-UTF-8 file refuses the round (exit 2,
+nothing sent) — and its contents are appended to the system prompt before the runner
+adapter section, so an extra file cannot override the adapter's rules. Without the
+two keys nothing changes.
 """
 
 import argparse
@@ -87,6 +102,7 @@ from rules import check_command, check_write
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_CAP = 20000
+POST_EDIT_MAX_LINES = 40
 GREP_MAX_MATCHES = 200
 LIST_MAX_ENTRIES = 500
 READ_DEFAULT_LIMIT = 2000
@@ -443,6 +459,7 @@ class Context:
         self.profile_name: str
         self.profiles: dict
         self.files: dict
+        self.extras: list
         self.heartbeat: float
         self.verbose: bool
         self.progress_path: Path
@@ -541,10 +558,32 @@ def prepare(args) -> Context:
             f"profile {name!r}: environment variable {profile['api_key_env']} is not set"
         )
     ctx.profile_name = name
+    ctx.extras = load_extras(ctx.repo_root, profile)
     ctx.heartbeat = args.heartbeat
     ctx.verbose = args.verbose
     ctx.progress_path = ctx.task_dir / f"impl-{ctx.round}.progress.jsonl"
     return ctx
+
+
+def load_extras(repo_root: Path, profile: dict) -> list:
+    """Read the profile's prompt_extras files: [(configured path, text)] in order.
+
+    `~` is expanded; a relative path resolves against the repository root (the
+    parent of the .work folder), not the worktree, so an untracked local file works.
+    A missing, unreadable or non-UTF-8 file refuses the round: a typo must not
+    silently drop part of the prompt.
+    """
+    extras = []
+    for configured in profile["prompt_extras"]:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            path = repo_root / path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise Refusal(f"prompt_extras: cannot read {configured}: {exc}") from exc
+        extras.append((configured, text))
+    return extras
 
 
 # ---------------------------------------------------------------------------- prompt
@@ -586,7 +625,7 @@ def conventions(profile: str) -> str | None:
     return (rest[: nxt.start()] if nxt else rest).strip()
 
 
-def build_system(plan_text: str) -> str:
+def build_system(plan_text: str, extras: list) -> str:
     parts = [implementer_body()]
     for name in plan_profiles(plan_text):
         section = conventions(name)
@@ -596,6 +635,8 @@ def build_system(plan_text: str) -> str:
             )
             continue
         parts.append(f"# Profile `{name}`\n\n{section}")
+    for configured, text in extras:
+        parts.append(f"# Extra instructions: {configured}\n\n{text}")
     parts.append(ADAPTER.strip())
     return "\n\n".join(parts)
 
@@ -627,6 +668,13 @@ def child_env() -> dict:
     return env
 
 
+def quote_path(path: str) -> str:
+    """Quote a worktree-relative, /-separated path for a command line on this platform."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([path])
+    return shlex.quote(path)
+
+
 class Tools:
     def __init__(
         self,
@@ -635,12 +683,14 @@ class Tools:
         touched: set[str],
         heartbeat: float = 0.0,
         on_command=None,
+        post_edit=(),
     ):
         self.root = worktree.resolve()
         self.command_timeout = command_timeout
         self.touched = touched
         self.heartbeat = heartbeat
         self.on_command = on_command
+        self.post_edit = list(post_edit)
         self.turn = 0
         self.last_command: float | None = None
 
@@ -709,7 +759,9 @@ class Tools:
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         self.touched.add(self.rel(path))
-        return f"wrote {len(content)} characters to {self.rel(path)}"
+        return self._with_post_edit(
+            f"wrote {len(content)} characters to {self.rel(path)}", self.rel(path)
+        )
 
     def edit_file(self, args):
         path = self.resolve(args.get("path"), write=True)
@@ -733,7 +785,50 @@ class Tools:
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(text.replace(old, new, 1))
         self.touched.add(self.rel(path))
-        return f"edited {self.rel(path)}"
+        return self._with_post_edit(f"edited {self.rel(path)}", self.rel(path))
+
+    def _with_post_edit(self, result: str, rel_path: str) -> str:
+        """Append the post_edit feedback of a successful write to its result."""
+        if not self.post_edit:
+            return result
+        feedback = self._run_post_edit(rel_path)
+        if feedback:
+            return f"{result}\n\n{feedback}"
+        return result
+
+    def _run_post_edit(self, rel_path: str) -> str:
+        """Run every post_edit command for the written file; return the feedback text.
+
+        Each command runs like run_command with every literal `{path}` replaced by
+        the written file's quoted worktree-relative path. Per command the feedback is
+        `post_edit: <command as run> (<outcome>)`, then its output capped to
+        POST_EDIT_MAX_LINES lines with a `...[<k> more lines]` marker. A denial, a
+        missing program, a timeout or a non-zero exit is feedback only; a command
+        that exits 0 with empty output appends nothing.
+        """
+        blocks = []
+        for command in self.post_edit:
+            as_run = command.replace("{path}", quote_path(rel_path))
+            try:
+                head, output, _timed_out = self._execute(as_run)
+            except ToolError as exc:
+                blocks.append(f"post_edit: {as_run} ({exc})")
+                continue
+            if head == "exit code: 0" and not output.strip():
+                continue
+            outcome = (
+                f"exit code {head[len('exit code: ') :]}"
+                if head.startswith("exit code: ")
+                else head
+            )
+            lines = output.splitlines()
+            if len(lines) > POST_EDIT_MAX_LINES:
+                shown = "\n".join(lines[:POST_EDIT_MAX_LINES])
+                body = f"{shown}\n...[{len(lines) - POST_EDIT_MAX_LINES} more lines]"
+            else:
+                body = output
+            blocks.append(f"post_edit: {as_run} ({outcome})\n{body}")
+        return "\n\n".join(blocks)
 
     def list_files(self, args):
         base = self.resolve(args.get("path", "."))
@@ -806,6 +901,18 @@ class Tools:
         command = self.text_arg(args, "command").strip()
         if not command:
             raise ToolError("error: command is empty")
+        head, output, _timed_out = self._execute(command)
+        return f"{head}\n{output}"
+
+    def _execute(self, command: str) -> tuple[str, str, bool]:
+        """Run one command without a shell in the worktree, like run_command does.
+
+        Returns (head, output, timed_out), where head is `exit code: <n>` or
+        `timed out after <s> s and was killed`. Raises ToolError for a denial, an
+        unparsable command, a missing program or a failed start. The duration is
+        recorded through on_command and last_command, so a post_edit command counts
+        in command_seconds / slowest_command exactly like a run_command call.
+        """
         reason = check_command(command, "external-implementer")
         if reason is not None:
             raise ToolError(f"denied: {reason}")
@@ -870,7 +977,7 @@ class Tools:
             if timed_out
             else f"exit code: {proc.returncode}"
         )
-        return f"{head}\n{text}"
+        return head, text, timed_out
 
     def execute(self, name: str, args) -> tuple[str, str | None]:
         """Run a tool; returns (result text, blocked reason or None)."""
@@ -1010,7 +1117,7 @@ class Session:
         self.ctx = ctx
         self.round_started = started
         self.start = ctx.profiles[ctx.profile_name]
-        self.system = build_system(ctx.files[ctx.task_dir / "plan.md"])
+        self.system = build_system(ctx.files[ctx.task_dir / "plan.md"], ctx.extras)
         self.user = build_user(ctx)
         self.usage: dict[str, dict] = {}
         self.chain: list[dict] = []
@@ -1189,6 +1296,7 @@ class Session:
             self.touched,
             heartbeat=self.ctx.heartbeat,
             on_command=self.record_command,
+            post_edit=profile["post_edit"],
         )
         user = self.user
         if interrupted:

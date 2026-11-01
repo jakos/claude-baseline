@@ -248,7 +248,11 @@ task-flow's own agents (it reads `agent_type` from the hook input), and by
 - no task-flow agent can push, open a PR, `kubectl`/`oc apply`, `helm install`, `docker
   push` or `terraform apply`;
 - no task-flow agent can commit — changes stay staged until `/task-flow:task-finish`;
-- planner, backlog and reviewer cannot run git commands that change the tree or branches.
+- planner, backlog and reviewer cannot run git commands that change the tree or branches;
+- no task-flow agent, and not the external implementer either, can snooze a habit-hooks
+  finding — writing a path that ends in `.habit-hooks/snooze.json` or running
+  `habit-snooze --snooze` / `habit-snooze --prune` is denied (habit-hooks' own guidance:
+  never snooze without the user's explicit approval).
 
 Commands are matched as raw text, split into `;`/`&`/`|`/newline segments, without
 regard to quotes. A `git` segment with whitespace followed by a mutating verb (`add`,
@@ -272,6 +276,8 @@ which uses the same rules from `scripts/rules.py` with the `external-implementer
 
 - It sees edit tools and shell command text. A shell redirect such as `echo x > file`
   from the checker or reviewer is not caught; their prompts forbid it, nothing enforces it.
+  The snooze denial matches the write-tool path and the command text only: a shell
+  redirect or a `cp` into `.habit-hooks/snooze.json` is not caught.
 - **Known false positive:** planner and reviewer are denied when a mutating git phrase
   appears with whitespace before the verb anywhere in the command text, including inside
   quotes, e.g. `git grep -e "worktree add"`. Quotes are not parsed. Quoted single words
@@ -498,6 +504,8 @@ name the file and the key. Keys of `[profiles.<name>]`:
 | `max_output_tokens` | sent as `max_tokens` on `openai-loop` (under the `max_tokens_param` key) and as `max_tokens` on `anthropic-loop` | provider default; 16000 on `anthropic-loop` |
 | `max_tokens_param` | the body key `max_output_tokens` is sent under on `openai-loop`: `"max_tokens"` or `"max_completion_tokens"`; only `"max_tokens"` on `anthropic-loop` | `"max_tokens"` |
 | `extra_body` | table merged into the request body, e.g. reasoning effort; reserved keys per driver — `openai-loop`: `model`, `messages`, `tools`, `tool_choice`; `anthropic-loop`: those plus `system`, `max_tokens`, `stream`, `temperature`, `top_p`, `top_k` | none |
+| `post_edit` | list of commands run after each successful `write_file`/`edit_file` call, with every literal `{path}` replaced by the written file; the exit code and output (capped to 40 lines) are appended to that tool call's result | `[]` |
+| `prompt_extras` | list of files read before the round whose contents are appended to the system prompt before the runner adapter; `~` is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) | `[]` |
 
 `[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
 `claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for
@@ -537,6 +545,81 @@ key (`claude` when unset or without config) and exits 2 for invalid config or an
 sorted keys — the orchestrator reads it to pass each subagent's `model` — e.g.
 `{"backlog": {"kind": "claude", "model": null, "value": "claude"}, "checker": {"kind": "claude", "model": "haiku", "value": "claude:haiku"}, ...}`;
 it exits 2 for invalid config.
+
+### Post-edit feedback and prompt extras
+
+Two optional profile keys give the external model the after-edit feedback that Claude
+subagents get from dev-baseline's `format_python.py` PostToolUse hook. Without them,
+nothing the external implementer does changes.
+
+`post_edit` is a list of commands run after each *successful* `write_file` /
+`edit_file` call — not after `run_command`, and not after a denied or failed write.
+Every literal `{path}` in a command is replaced by the written file's worktree-relative,
+`/`-separated path, quoted for the platform; a command without `{path}` still runs
+after each write. Each command goes through the same path as `run_command` — the same
+`rules.py` checks with the `external-implementer` role, no shell, the worktree as the
+working directory, `command_timeout_seconds`, and its duration counted in
+`command_seconds` / `slowest_command` — so on Windows a `.cmd`/`.bat` `post_edit`
+command has the same limits as a `run_command` one (see
+[Limits, stated plainly](#limits-stated-plainly)). Per command, appended to that tool
+call's result after a blank line:
+
+```
+post_edit: <command as run> (exit code <n>)
+<output, capped to 40 lines, then ...[<k> more lines] when cut>
+```
+
+or `(denied: <reason>)`, `(error: <message>)` or `(timed out after <s> s and was
+killed)` instead of the exit code. A denial, a missing program, a timeout or a non-zero
+exit is feedback text only — it never fails, blocks or ends the round. A command that
+exits 0 with empty output appends nothing (a clean hook is silent). Because a
+`post_edit` command such as a formatter can change the file after the model wrote it,
+the model's next `edit_file` may find its `old` text no longer present; the feedback
+output tells it.
+
+`prompt_extras` is a list of files read before the round; each file's contents are
+appended to the system prompt as `# Extra instructions: <path as configured>`, in list
+order, **before** the runner adapter section — so an extra file cannot override the
+adapter's rules. `~` is expanded; a relative path resolves against the repository root
+(the parent of `.work/`), not the worktree, so an untracked local file works. A missing,
+unreadable or non-UTF-8 file refuses the round (exit 2, nothing sent, nothing written):
+a typo must not silently drop part of the prompt. A `fallback` profile reuses the
+starting profile's `prompt_extras` (one system prompt per round) but runs its own
+`post_edit`.
+
+Example — run the project's formatter and habit-hooks on every written file (check
+habit-hooks' own documentation for its flags):
+
+```toml
+[profiles.mistral]
+# ... the keys from the table above ...
+post_edit = [
+  "uvx ruff format {path}",
+  "uvx ruff check --fix {path}",
+  "habit-hooks --file {path}",
+]
+```
+
+habit-hooks' exit codes are all returned as feedback, never as a failure of the round:
+0 clean, 1 an enforced finding, 2 the tool itself failed. Caveat: task-flow keeps the
+changes staged and uncommitted in the worktree, so with `[scope] changedOnly = true` a
+plain `habit-hooks` run (without `--file`) covers every file the task has changed so
+far, not only the one just written; `--file` checks one file and ignores snoozes. The
+snooze denial above applies to the external implementer too, so `post_edit` cannot run
+`habit-snooze --snooze` or `--prune`.
+
+Nothing here is installed or vendored, and the round does not depend on these tools: a
+missing program is reported as `error:` feedback, never as a round failure.
+
+To try [ponytail](https://github.com/DietrichGebert/ponytail)'s `AGENTS.md` — downloaded
+by you, not vendored here — with the external implementer, reference it via
+`prompt_extras`:
+
+```toml
+prompt_extras = ["AGENTS.md"]
+```
+
+Its benchmark numbers are the author's own.
 
 ### Choosing Claude models per role
 
@@ -641,6 +724,8 @@ scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
   with `&` cannot be passed to a `.cmd` tool; call the underlying `.exe` directly
   instead.
 - The network access of commands is not blocked.
+- `post_edit` commands run only after the file tools (`write_file` / `edit_file`), never
+  after `run_command`.
 - The code in the worktree, and the task files, are sent to the provider you configured.
 - Commands get only an allowlist of the environment: `PATH`, `PATHEXT`, `SYSTEMROOT`,
   `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,

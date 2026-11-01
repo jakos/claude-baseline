@@ -123,6 +123,48 @@ class ModelsTest(unittest.TestCase):
                 )
                 self.assertRejected(text + "\n" + line + "\n", needle)
 
+    def test_post_edit_and_prompt_extras_load_and_show(self):
+        self.project(
+            BASE
+            + 'post_edit = ["uvx ruff format {path}"]\nprompt_extras = ["AGENTS.md"]\n'
+        )
+        profiles, _roles = models.load(self.repo)
+        profile = profiles["mistral"]
+        self.assertEqual(profile["post_edit"], ["uvx ruff format {path}"])
+        self.assertEqual(profile["prompt_extras"], ["AGENTS.md"])
+        text = models.show_text(profile)
+        self.assertIn('post_edit = ["uvx ruff format {path}"]', text)
+        self.assertIn('prompt_extras = ["AGENTS.md"]', text)
+
+    def test_post_edit_and_prompt_extras_default_to_empty_lists(self):
+        self.project(BASE)
+        profile = models.load(self.repo)[0]["mistral"]
+        self.assertEqual(profile["post_edit"], [])
+        self.assertEqual(profile["prompt_extras"], [])
+
+    def test_post_edit_and_prompt_extras_invalid_values_rejected(self):
+        cases = {
+            'post_edit = "x"': "profiles.mistral.post_edit",
+            'post_edit = [""]': "profiles.mistral.post_edit",
+            "post_edit = [1]": "profiles.mistral.post_edit",
+            'prompt_extras = "a.md"': "profiles.mistral.prompt_extras",
+            'prompt_extras = [""]': "profiles.mistral.prompt_extras",
+        }
+        for line, needle in cases.items():
+            with self.subTest(line=line):
+                self.assertRejected(
+                    BASE + line + "\n", needle, "must be a list of non-empty strings"
+                )
+
+    def test_project_list_replaces_user_list(self):
+        self.user(BASE + 'post_edit = ["a {path}"]\nprompt_extras = ["a.md"]\n')
+        self.project(
+            '[profiles.mistral]\npost_edit = ["b {path}"]\nprompt_extras = ["b.md"]\n'
+        )
+        profile = models.load(self.repo)[0]["mistral"]
+        self.assertEqual(profile["post_edit"], ["b {path}"])
+        self.assertEqual(profile["prompt_extras"], ["b.md"])
+
     def test_required_keys(self):
         self.assertRejected(
             '[profiles.x]\ndriver = "openai-loop"\n', "profiles.x.base_url", "required"

@@ -29,6 +29,8 @@ temperature = 1.0                       # 0..2; omit for the provider's default;
 max_output_tokens = 16384               # sent as max_tokens (openai-loop: under the max_tokens_param key); anthropic-loop sends max_tokens and defaults to 16000 when unset
 max_tokens_param = "max_tokens"         # the body key max_output_tokens is sent under: "max_tokens" or "max_completion_tokens" (default "max_tokens"; only "max_tokens" on anthropic-loop)
 extra_body = {}                         # table merged into the request body; reserved keys are per driver: openai-loop model, messages, tools, tool_choice; anthropic-loop also system, max_tokens, stream, temperature, top_p, top_k (default: none)
+post_edit = []                         # commands run after each successful write_file/edit_file call; every "{path}" is replaced by the written file (worktree-relative, quoted); the exit code and output (max 40 lines) are appended to the tool result (default [])
+prompt_extras = []                     # files whose contents are appended to the system prompt before the runner adapter; "~" is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) (default [])
 
 # A Claude profile on the native Messages API (prompt caching, cache-aware cost).
 # Prices are USD per 1M tokens as of 2026-11-01; check the provider's pricing page.

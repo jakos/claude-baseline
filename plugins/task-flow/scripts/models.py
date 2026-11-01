@@ -55,6 +55,12 @@ required unless billing = "local"):
                               messages, tools, tool_choice; "anthropic-loop":
                               those plus system, max_tokens, stream, temperature,
                               top_p, top_k
+  post_edit                   list of commands run by scripts/implement.py after each
+                              successful write_file/edit_file call, with "{path}"
+                              replaced by the written file (default [])
+  prompt_extras               list of files scripts/implement.py reads before the round
+                              and appends to the system prompt before the runner
+                              adapter (default [])
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
 "claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (implementer
@@ -203,6 +209,11 @@ def _check_fallback(value):
         raise ValueError(f"must be a list of profile names, got {value!r}")
 
 
+def _check_str_list(value):
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise ValueError("must be a list of non-empty strings")
+
+
 def _check_extra_body(value):
     if not isinstance(value, dict):
         raise TypeError(f"must be a table, got {value!r}")
@@ -238,6 +249,8 @@ PROFILE_KEYS = {
         "max_tokens",
     ),
     "extra_body": (_check_extra_body, False, None),
+    "post_edit": (_check_str_list, False, []),
+    "prompt_extras": (_check_str_list, False, []),
 }
 
 

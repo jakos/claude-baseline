@@ -68,6 +68,11 @@ SHELL_CASES = [
     ("Bash", "git log -S 'push'"),
     ("Bash", "kubectl apply --dry-run=client -f m.yaml"),
     ("Bash", "git worktree add p"),
+    ("Bash", "habit-snooze --snooze E501 src/a.py"),
+    ("Bash", "habit-snooze --prune"),
+    ("Bash", "uvx habit-snooze --snooze x"),
+    ("Bash", "git status; habit-snooze --prune"),
+    ("Bash", "habit-snooze --list"),
 ]
 
 # Every write path used in test_guard.py, with the role it is tried with there.
@@ -77,6 +82,10 @@ WRITE_CASES = [
     ("/repo/src/a.py", "implementer"),
     ("/repo/.work/_autopilot/r/backlog.md", "backlog"),
     ("/repo/src/x.py", "backlog"),
+    ("/repo/.habit-hooks/snooze.json", "reviewer"),
+    ("/repo/.work/x/worktree/.habit-hooks/snooze.json", "checker"),
+    ("C:\\repo\\.habit-hooks\\snooze.json", "planner"),
+    ("/repo/.HABIT-HOOKS/Snooze.json", "backlog"),
 ]
 
 
@@ -178,6 +187,53 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(
             rules.check_write(".git/config", "external-implementer", self.root),
             "writing under .git or .work is not allowed (.git/config)",
+        )
+
+    def test_snooze_denied_for_every_role(self):
+        commands = [
+            "habit-snooze --snooze E501 src/a.py",
+            "habit-snooze --prune",
+            "uvx habit-snooze --snooze x",
+            "git status; habit-snooze --prune",
+        ]
+        writes = [
+            "/repo/.habit-hooks/snooze.json",
+            "/repo/.work/x/worktree/.habit-hooks/snooze.json",
+            "C:\\repo\\.habit-hooks\\snooze.json",
+            "/repo/.HABIT-HOOKS/Snooze.json",
+        ]
+        for role in rules.ROLES:
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        rules.check_command(command, role), rules.SNOOZE_COMMAND
+                    )
+        for role in ALL_ROLES:
+            for path in writes:
+                with self.subTest(role=role, path=path):
+                    self.assertEqual(rules.check_write(path, role), rules.SNOOZE_WRITE)
+        for path in (
+            ".habit-hooks/snooze.json",
+            "sub/../.habit-hooks/snooze.json",
+            ".habit-hooks/snooze.json.",
+        ):
+            with self.subTest(role="external-implementer", path=path):
+                self.assertEqual(
+                    rules.check_write(path, "external-implementer", self.root),
+                    rules.SNOOZE_WRITE,
+                )
+
+    def test_snooze_neighbours_allowed(self):
+        for role in rules.ROLES:
+            with self.subTest(role=role, command="habit-snooze --list"):
+                self.assertIsNone(rules.check_command("habit-snooze --list", role))
+            with self.subTest(role=role, command="git log --grep snooze"):
+                self.assertIsNone(rules.check_command("git log --grep snooze", role))
+        self.assertIsNone(rules.check_write(".habit-hooks/config.toml", "implementer"))
+        self.assertIsNone(
+            rules.check_write(
+                ".habit-hooks/config.toml", "external-implementer", self.root
+            )
         )
 
     def test_quoted_phrase_false_positive_still_pinned(self):

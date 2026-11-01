@@ -15,6 +15,8 @@ same rules by one implementation:
 - planner, backlog, checker, reviewer: may write files only under a `.work/` directory.
 - every task-flow agent: no push, no PR, no deploy — nothing leaves the machine.
 - every task-flow agent: no `git commit`; committing is `/task-finish`'s job, after review.
+- every task-flow agent: no snoozing a habit-hooks finding — writing
+  `.habit-hooks/snooze.json` or running `habit-snooze --snooze` / `--prune` is denied.
 - planner, backlog, reviewer: no git command that changes the working tree, index or branches.
 
 Stdlib only, started by `uv run --script`, so it runs on macOS, Linux and Windows.
