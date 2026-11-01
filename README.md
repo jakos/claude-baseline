@@ -146,6 +146,15 @@ artifact in `.work/<task-id>/`. Install it only where you want it:
 It depends on `dev-baseline` and is described in its own
 [README](plugins/task-flow/README.md).
 
+Optional and experimental: the implementer role can run on a per-token, non-Claude model
+through `plugins/task-flow/scripts/implement.py` (so far only the Mistral API has been
+exercised) while Claude still plans, checks and reviews. A `models.toml` turns it on; see
+[External implementer](plugins/task-flow/README.md#external-implementer). This
+repository's own `.claude/task-flow.models.toml` is such a project file and holds no
+secrets, only the name of the key's environment variable. Releases (version, changelog
+entry, commit and tag) are made with `/task-flow:task-release`; see
+[Releasing](plugins/task-flow/README.md#releasing).
+
 ## These are opinions, not truth
 
 Every skill here encodes a way of working. Where a project disagrees, its own `CLAUDE.md`
@@ -229,6 +238,9 @@ Its question is not "is this correct" but "if this were broken, what would tell 
 
 ```
 .claude-plugin/marketplace.json      catalog
+.claude/task-flow.md                 task-flow project rules for this repo: version rule, verification commands
+.claude/task-flow.models.toml        this repo's models.toml: four Mistral profiles, [roles] implementer; no secrets
+.claude/task-flow.release.toml       release targets for /task-flow:task-release
 plugins/dev-baseline/
     .claude-plugin/plugin.json       manifest
     skills/<name>/SKILL.md           four skills
@@ -242,7 +254,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     agents/                          planner, implementer, checker, reviewer, backlog
     skills/                          workflow contract, 4 profiles, 11 commands
     hooks/hooks.json, scripts/guard.py
-    scripts/rules.py               denial rules shared by guard.py and implement.py
+    scripts/rules.py                 denial rules shared by guard.py and implement.py
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps .md, impl-*.json and worktree/
     scripts/autopilot.py             task-autopilot: repo check, token estimate, circuit breaker
