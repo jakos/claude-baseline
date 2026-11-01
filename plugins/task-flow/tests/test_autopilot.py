@@ -387,6 +387,26 @@ class ExternalTest(RunFixture):
         self.assertEqual(with_column, self.out("next"))
         self.assertEqual(with_column, "run b")
 
+    def test_estimate_external_usd_scientific_notation(self):
+        rows = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        cases = {
+            ("1.2e-05", "0.5"): "external spent: 0.50 USD",
+            ("1e-05", "1.2E-05"): "external spent: 0.00 USD",
+            ("0.000012", "0"): "external spent: 0.00 USD",
+        }
+        for usd, expected in cases.items():
+            with self.subTest(usd=usd):
+                self.run_md(rows, usd=list(usd))
+                self.assertEqual(self.out("estimate").splitlines()[-1], expected)
+
+    def test_next_accepts_external_usd_scientific_notation(self):
+        rows = [("a", "-", "10", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, usd=["1.2e-05", "0"])
+        with_column = self.out("next")
+        self.run_md(rows)
+        self.assertEqual(with_column, self.out("next"))
+        self.assertEqual(with_column, "run b")
+
     def test_breaker_burn_rate_external(self):
         self.run_md(
             [("a", "-", str(2 * EXT_MAX + 1), "done"), ("b", "-", "0", "approved")]
@@ -470,7 +490,11 @@ class MalformedTest(RunFixture):
                 result = self.call("estimate")
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertEqual(result.stdout, b"")
-                self.assertTrue(result.stderr)
+                self.assertIn(
+                    "External USD of a must be a non-negative number or 'unknown', "
+                    f"got {bad!r}",
+                    result.stderr.decode("utf-8"),
+                )
         with self.subTest(header="wrong 5th cell"):
             self.run_md(ok, usd=["0", "0"])
             path = self.run_dir / "run.md"
@@ -482,7 +506,10 @@ class MalformedTest(RunFixture):
             )
             result = self.call("estimate")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "the 5th header cell must be 'External USD', got 'Cost'",
+                result.stderr.decode("utf-8"),
+            )
         with self.subTest(header="5 cells, short data row"):
             self.run_md(ok, usd=["0", "0"])
             path = self.run_dir / "run.md"
@@ -494,12 +521,31 @@ class MalformedTest(RunFixture):
             )
             result = self.call("next")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "malformed task row: '| 1 | a | - | 0 |'",
+                result.stderr.decode("utf-8"),
+            )
         with self.subTest(kind="external"):
             self.run_md(ok)
             result = self.call("estimate", None, "--implementer-kind", "external")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "argument --implementer-kind: invalid choice",
+                result.stderr.decode("utf-8"),
+            )
+
+    def test_malformed_external_usd_numbers_exit_2(self):
+        ok = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        for bad in ("-1.2e-05", "1e", "1e-", "inf", "nan", "1e999"):
+            with self.subTest(usd=bad):
+                self.run_md(ok, usd=[bad, "0"])
+                result = self.call("estimate")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(
+                    "External USD of a must be a non-negative number or 'unknown'",
+                    result.stderr.decode("utf-8"),
+                )
 
     def test_missing_run_md_exits_2(self):
         result = self.call("next")

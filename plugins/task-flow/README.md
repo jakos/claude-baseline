@@ -168,8 +168,8 @@ files whether the next task may start. Its four triggers, in both modes:
 - budget (with `--budget`): tokens spent plus the next task's worst case exceeds it.
 
 All four count Claude tokens only; external USD cost is measured and reported, never a
-trigger. A task already in progress always resumes. The breaker is decided by the script but obeyed
-by procedure, not by a hook.
+trigger. A task already in progress always resumes. The breaker is decided by the script
+but obeyed by procedure, not by a hook.
 
 **Estimates are coarse.** Per task: check = 15000 + 3000 x commands, implement = 30000 +
 12000 x steps, review = 30000 + 6000 x criteria, finish = 10000. A round is implement +
@@ -306,8 +306,10 @@ failed round pauses the run (also with `--auto`) and `/task-flow:task-autopilot 
 resumes it. An external round adds nothing to the task's `Tokens used` (that column stays
 Claude subagents only); after each external round that exits 0, 1 or 3 the orchestrator
 adds the round's `cost_usd` from `impl-<n>.json` to the task's `External USD` column in
-`run.md` (exit 2 adds nothing), and the run's History records
-`implementer <profile>: <cost_usd> USD external`. `report.md` reports both currencies:
+`run.md`, in plain decimal notation (`autopilot.py` also accepts scientific notation; 6
+decimal places are enough because `implement.py` rounds `cost_usd` to 6) — exit 2 adds
+nothing — and the run's History records `implementer <profile>: <cost_usd> USD external`.
+`report.md` reports both currencies:
 Claude tokens used and external USD. The burn-rate and budget triggers count Claude tokens
 only, compared against estimates whose implement term is 0 when the implementer is an
 external profile (`autopilot.py estimate|next --implementer-kind profile`).

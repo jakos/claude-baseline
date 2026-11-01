@@ -223,17 +223,19 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 
 `Depends on` is `-` or comma-separated ids of earlier rows. `Tokens used` is the sum of
 `total_tokens` of every subagent run for that task after approval (checker, implementer,
-reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a figure (sticky). The
-optional fifth column `External USD` is written when `models.py roles` reports implementer
-kind `profile` at Gather, and is otherwise absent, so runs without `models.toml` keep
-today's 4-column format; if it is missing when a cost must be recorded, add it to the
-header and every row with `0`. Its values are a decimal USD sum, or `unknown` (sticky)
-when an `impl-<n>.json` that should exist is missing or unreadable. `budget` is Claude
-tokens. `bootstrap`
-names the bootstrap task; it is row 1 and every other row depends on it directly.
-`source` is optional and absent means `backlog`; `tasks` marks a run built from an
-explicit `--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`,
-row 1 depending on `-`, and every later row depending on exactly the previous row.
+reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a
+figure (sticky). The optional fifth column `External USD` is written when `models.py
+roles` reports implementer kind `profile` at Gather, and is otherwise absent, so runs
+without `models.toml` keep today's 4-column format; if it is missing when a cost must
+be recorded, add it to the header and every row with `0`. Its values are a USD sum in
+plain decimal notation, never scientific notation — write `0.000012`, not `1.2e-05` (6
+decimal places are enough, because `implement.py` rounds `cost_usd` to 6; `autopilot.py`
+accepts either notation when reading) — or `unknown` (sticky) when an `impl-<n>.json`
+that should exist is missing or unreadable. `budget` is Claude tokens. `bootstrap` names
+the bootstrap task; it is row 1 and every other row depends on it directly. `source` is
+optional and absent means `backlog`; `tasks` marks a run built from an explicit
+`--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`, row 1
+depending on `-`, and every later row depending on exactly the previous row.
 
 1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
    `.claude/task-flow.md` sets `worktree: no` or `Finish → commit` to anything but `yes`
@@ -324,16 +326,20 @@ row 1 depending on `-`, and every later row depending on exactly the previous ro
      an external implementer round (Phase: implement, step 3d) adds nothing to it. After
      each external implementer round that exits 0, 1 or 3, read
      `.work/<id>/impl-<n>.json` and add its `cost_usd` to the task's `External USD`
-     (exit 2 adds nothing — a stale file from an earlier attempt may exist; if the column
-     is absent, add it to the header and every row with `0` first), and record the
-     History line `implementer <profile>: <cost_usd> USD external`. If an
-     external round ends with exit 1 or 2, set state `paused` (also with `--auto`), show
-     the line and append the History line `paused: external implementer failed (<id>)`;
-     do not run `next`. Otherwise append a History line to `run.md`, then run `next` again.
+     column, in plain decimal notation (6 decimal places are enough because
+     `implement.py` rounds `cost_usd` to 6; `autopilot.py` also accepts scientific
+     notation) (exit 2 adds nothing — a stale file from an earlier attempt may exist; if
+     the column is absent, add it to the header and every row with `0` first), and record
+     the History line `implementer <profile>: <cost_usd> USD external`. If an external
+     round ends with exit 1 or 2, set state `paused` (also with `--auto`), show the line
+     and append the History line `paused: external implementer failed (<id>)`; do not run
+     `next`. Otherwise append a History line to `run.md`, then run `next` again with the
+     same `--implementer-kind`.
    - `wait <id>: <phase>` (semi only): state `paused`, show the task's `summary.md` or
      `BLOCKED:` line, ask: continue past it (its dependents are skipped) / stop. To retry,
      the user runs `/task-flow:task-run <id>` themselves and then resumes the autopilot.
-     Continue: add the id to `continue-past`, run `next` again. Stop: as `stop:`.
+     Continue: add the id to `continue-past`, run `next` again with the same
+     `--implementer-kind`. Stop: as `stop:`.
    - `stop: <reason>`: state `stopped`. `done`: state `done`.
 8. **Report.** On `stopped` or `done` write `report.md`: the stop reason (the `next` line
    verbatim), one row per task (phase, rounds, the implementer profiles used — the
@@ -391,15 +397,15 @@ after a failed external implementer round (exit 1 or 2; a defined rule, with and
 question and the other Preconditions come before a run exists and are preconditions, not
 stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
 cannot finish, burn rate, budget — all four count Claude tokens only) and is evaluated
-only between tasks, never inside a
-task's run; `next` returns `run <id>` for a task already in progress.
+only between tasks, never inside a task's run; `next` returns `run <id>` for a task
+already in progress.
 
 **Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;
 `paused` by `wait` asks the wait question again; `paused` by the History line `paused:
-external implementer failed (<id>)` skips the wait question and runs `autopilot.py next`,
-which returns `run <id>`, so the task's round runs again. State `planning` of a
-`source: tasks` run plans the remaining `new` tasks (step (e) of "Explicit task list");
-nothing is decomposed. Preconditions are not re-run.
+external implementer failed (<id>)` skips the wait question and runs `autopilot.py next
+--implementer-kind <implementer kind>`, which returns `run <id>`, so the task's round runs
+again. State `planning` of a `source: tasks` run plans the remaining `new` tasks (step (e)
+of "Explicit task list"); nothing is decomposed. Preconditions are not re-run.
 
 ## Phase: finish — /task-flow:task-finish
 

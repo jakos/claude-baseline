@@ -33,10 +33,11 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   IMPLEMENT = 0 — an external implementer spends no Claude tokens, its USD cost is
   measured per round (`impl-<n>.json`), not estimated — and `estimate` additionally
   prints an `implementer: external profile; ...` line. The `## Tasks` table may carry an
-  optional fifth column `External USD` (a non-negative decimal or `unknown` per row);
-  when present, `estimate` ends with an `external spent: <sum> USD` line (`at least`
-  when a row is `unknown`), and the column never influences `next`. The `spent:` and
-  `budget:` lines are about Claude tokens only.
+  optional fifth column `External USD` (a non-negative decimal, scientific notation
+  accepted, or `unknown` per row); when present, `estimate` ends with an
+  `external spent: <sum> USD` line (`at least` when a row is `unknown`), and the
+  column never influences `next`. The `spent:` and `budget:` lines are about Claude
+  tokens only.
 - `next <run-dir>`: one line, `run <id>`, `wait <id>: <phase>`, `stop: <reason>` or `done`.
   The circuit breaker. It is evaluated between tasks only: a task already in progress
   always gives `run <id>`. Triggers, first match wins: a task in progress; wrong direction
@@ -63,6 +64,7 @@ Stdlib only, started by `uv run --script`.
 import argparse
 import fnmatch
 import itertools
+import math
 import os
 import re
 import subprocess
@@ -255,8 +257,10 @@ def token_value(value: str, what: str) -> int | None:
 def usd_value(value: str, what: str) -> float | None:
     if value == "unknown":
         return None
-    if re.fullmatch(r"\d+(\.\d+)?", value):
-        return float(value)
+    if re.fullmatch(r"\d+(\.\d+)?([eE][+-]?\d+)?", value):
+        number = float(value)
+        if math.isfinite(number):
+            return number
     raise Refusal(f"{what} must be a non-negative number or 'unknown', got {value!r}")
 
 
