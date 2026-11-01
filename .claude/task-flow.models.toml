@@ -56,3 +56,4 @@ price_output_per_mtok = 1.20
 
 [roles]
 implementer = "mistral-large"
+reviewer = "claude:sonnet"
