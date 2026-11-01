@@ -14,6 +14,7 @@
 ### python, docs, config, generic
 ```
 uv run --script plugins/task-flow/tests/test_autopilot.py
+uv run --script plugins/task-flow/tests/test_gates.py
 uv run --script plugins/task-flow/tests/test_guard.py
 uv run --script plugins/task-flow/tests/test_implement.py
 uv run --script plugins/task-flow/tests/test_launch.py

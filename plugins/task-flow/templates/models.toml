@@ -34,7 +34,7 @@ extra_body = {}                         # table merged into the request body; mo
 #   "claude:opus|sonnet|haiku"  run the Claude subagent on that model, passed as the
 #                             subagent call's model argument
 #   a profile name            only valid for implementer: run scripts/implement.py on it
-#   "script"                  only valid for checker; reserved for a later task-flow version
+#   "script"                  only valid for checker: run scripts/gates.py instead of the checker agent
 # Each key below is set to its agent's frontmatter default, so copying this file
 # changes no model.
 planner = "claude:opus"       # planner agent's frontmatter default: opus
@@ -42,3 +42,6 @@ implementer = "claude:sonnet" # implementer agent's frontmatter default: sonnet
 checker = "claude:haiku"      # checker agent's frontmatter default: haiku
 reviewer = "claude:opus"      # reviewer agent's frontmatter default: opus
 backlog = "claude:opus"       # backlog agent's frontmatter default: opus
+
+[gates]
+command_timeout_seconds = 600           # per verification command run by scripts/gates.py (default 600)

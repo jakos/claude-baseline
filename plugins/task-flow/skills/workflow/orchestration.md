@@ -56,9 +56,9 @@ show its stderr and end the command without changing `status.md` — a precondit
 stop. Pass a role's subagent call the `model` argument when that role's `model` is not
 null, and no `model` when it is null (the agent's frontmatter model then applies). With no
 `models.toml`, every role is `{"kind": "claude", "model": null, "value": "claude"}` and
-nothing changes. `[roles] checker = "script"` is refused as a precondition with the same
-handling as exit 2, with the message: `[roles] checker = "script"` is reserved for a later
-task-flow version — never a silent fallback to the Claude checker.
+nothing changes. A `checker` entry of kind `script` means `scripts/gates.py` runs in
+Phase baseline and Phase check (see those phases): never the checker subagent, and never
+a silent fallback to it either way — kind `claude` always runs `task-flow:checker`.
 
 ## Phase: new
 
@@ -99,9 +99,16 @@ task-flow version — never a silent fallback to the Claude checker.
    fail, `git switch -c task/<id>` in the repository root and record `worktree: none`.
    If the root has uncommitted changes and there is no worktree, stop and ask (a
    precondition, not a stop).
-3. Set round 0, phase `baseline`. Run subagent `task-flow:checker` with round 0 (its model
-   as in "Choosing each role's model"). It runs
-   the plan's verification commands on the untouched base and writes `checks-0.md`.
+3. Set round 0, phase `baseline`. When the `checker` entry of `models.py roles` (as in
+   "Choosing each role's model") has kind `script`: from the repository root, in the
+   background, run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/gates.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round 0`
+   and wait. Exit 0: continue exactly as after the checker subagent — show the table from
+   `checks-0.md`; the History line names `checker: script`. Exit 2: show stderr and end
+   the command without changing `status.md` (a precondition, not a stop; the same command
+   resumes). Otherwise run subagent `task-flow:checker` with round 0 (its model as in
+   "Choosing each role's model"). It runs the plan's verification commands on the
+   untouched base and writes `checks-0.md`.
 4. Failures in `checks-0.md` do not stop the run. They are recorded; continue to round 1.
 
 On re-entry (`/task-flow:task-check` at round 0, or resuming from phase `baseline`) run
@@ -141,7 +148,12 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 
 ## Phase: check (round n)
 
-Phase `checking`. Run subagent `task-flow:checker` (its model as in "Choosing each role's
+Phase `checking`. When the `checker` entry of `models.py roles` has kind `script`, run
+`scripts/gates.py` exactly as in Phase baseline step 3 but with `--round <n>`: exit 0
+continues (show the table from `checks-<n>.md`; the History line names `checker:
+script`), exit 2 shows stderr and ends the command without changing `status.md` (a
+precondition, not a stop; the same command resumes). Otherwise run subagent
+`task-flow:checker` (its model as in "Choosing each role's
 model"). It writes `checks-<n>.md`. When the
 current round is 0 (approved, no round run yet), run **Phase: baseline** instead.
 

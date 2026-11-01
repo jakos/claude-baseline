@@ -14,7 +14,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "autopilot.py"
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPT = SCRIPTS / "autopilot.py"
+sys.path.insert(0, str(SCRIPTS))
+import autopilot
+
 HAS_GIT = shutil.which("git") is not None
 
 
@@ -207,6 +211,21 @@ class EstimateTest(RunFixture):
                 self.assertIn(
                     "| 1 | a | 2 | 3 | 2 | 154000 | 400000 |", self.out("estimate")
                 )
+
+    def test_verification_commands_lists_first_block(self):
+        text = (
+            "# Plan: x\n## Goal\ng\n## Verification commands\n```\n"
+            "cmd one\n\n# a comment\n"
+            'git grep -nE "a|b" -- path\n'
+            "```\n```\ncmd ignored\n```\na trailing paragraph\n## Steps\n1. not a command\n"
+        )
+        self.assertEqual(
+            autopilot.verification_commands(text),
+            ["cmd one", 'git grep -nE "a|b" -- path'],
+        )
+        self.assertEqual(autopilot.verification_commands("# Plan: x\n## Goal\ng\n"), [])
+        # the shared parser counts exactly what plan_counts counts
+        self.assertEqual(autopilot.plan_counts(text)[2], 2)
 
     def test_estimate_without_budget(self):
         self.run_md([("a", "-", "0", "approved")])

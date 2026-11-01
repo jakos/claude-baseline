@@ -241,7 +241,8 @@ Prompts are advice; a hook is a rule. The rules live in `scripts/rules.py`
 (`check_command`, `check_write`) — one implementation used by the hook
 `scripts/guard.py`, which runs before every edit and shell command and applies only to
 task-flow's own agents (it reads `agent_type` from the hook input), and by
-`scripts/implement.py` for the external implementer (role `external-implementer`):
+`scripts/implement.py` for the external implementer (role `external-implementer`) and
+`scripts/gates.py` for the script checker (role `checker`):
 
 - planner, backlog, checker and reviewer can write only under `.work/`;
 - no task-flow agent can push, open a PR, `kubectl`/`oc apply`, `helm install`, `docker
@@ -259,7 +260,8 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
 `uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
 `uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
-`uv run --script plugins/task-flow/tests/test_autopilot.py`, the model config's with
+`uv run --script plugins/task-flow/tests/test_autopilot.py`, the deterministic gates' with
+`uv run --script plugins/task-flow/tests/test_gates.py`, the model config's with
 `uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
 `uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
 `uv run --script plugins/task-flow/tests/test_launch.py` and the release script's with
@@ -403,8 +405,14 @@ name the file and the key. Keys of `[profiles.<name>]`:
 
 `[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
 `claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for
-`implementer` only, `script` for `checker` only. `implement.py` reads only the profiles and
-`[roles] implementer`.
+`implementer` only, `script` for `checker` only (see
+[Deterministic gates](#deterministic-gates-scriptsgatespy)). `implement.py` reads only
+the profiles and `[roles] implementer`.
+
+`[gates]` holds the settings of `scripts/gates.py`, the script checker: only
+`command_timeout_seconds` (number > 0), the per-command timeout of a verification
+command, default 600. It merges user → project key by key like `[roles]`; unknown keys
+are errors.
 
 A minimal profile (the model id is a placeholder; take a real one from `GET /v1/models`):
 
@@ -442,8 +450,9 @@ it exits 2 for invalid config.
 subagent call as its `model` argument and takes precedence over the agent file's frontmatter;
 bare `claude` passes nothing, so the frontmatter default applies; with no `models.toml` at
 all, nothing changes. A misspelled role or value is refused with exit 2, never silently
-ignored. `checker = "script"` is reserved for a later task-flow version and refused until
-then. Caveat: with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on or
+ignored. `checker = "script"` runs `scripts/gates.py` instead of the checker subagent —
+see [Deterministic gates](#deterministic-gates-scriptsgatespy). Caveat: with
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on or
 `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` set, Claude Code ignores the per-call model.
 
 | Role | Frontmatter default |
@@ -593,6 +602,74 @@ version, add `jakos/claude-baseline` again without `#<ref>` and update the plugi
 same way. Do not use `/plugin marketplace remove` for this: removing a marketplace
 uninstalls every plugin installed from it.
 
+## Deterministic gates (scripts/gates.py)
+
+`scripts/gates.py` is a checker with no model in it. With `[roles] checker = "script"`
+in `models.toml`, the baseline and check phases run this script instead of the
+`task-flow:checker` subagent (see
+[orchestration](skills/workflow/orchestration.md)); with any other value or no config,
+the subagent runs exactly as before. It reads the first fenced block under
+`## Verification commands` of the task's `plan.md`, runs each line from the worktree (or
+the repository root), applies `rules.check_command` with the `checker` role, and writes
+`.work/<id>/checks-<n>.md` in the contract's format — the same table, failures and
+not-run sections the checker agent writes.
+
+```toml
+[roles]
+checker = "script"
+```
+
+Run by hand (round 0 is the baseline; a human may grant rounds above 3):
+
+```
+uv run --quiet --script plugins/task-flow/scripts/gates.py \
+    --task-dir .work/<task-id> --worktree <path|none> --round <n> [--timeout-seconds S]
+```
+
+Exit 0 means `checks-<n>.md` was written, whatever the results (failures are data), and
+stdout is one summary line. Exit 2 is a precondition (missing plan, empty command list,
+bad arguments, invalid `models.toml`): the reason goes to stderr, nothing is written.
+
+Each non-blank line of the block that does not start with `#` is one command: one
+program plus its arguments, no shell. Whitespace outside quotes separates arguments;
+`'...'` and `"..."` group their content verbatim and join with adjacent parts
+(`--x="a b"` → `--x=a b`); there are no escapes, so a backslash is literal and Windows
+paths (`C:\tools\x.exe`) work unchanged on every platform. Unquoted `| & ; < > ( ) $ * ?
+` or backticks are refused (they need a shell), and so is a first word of the form
+`NAME=value`. Inside quotes they are ordinary characters, so
+`git grep --untracked -nE "a|b" -- path` runs `git` with the argument `a|b`. A refused
+line is `ERROR` with a `refused:` reason naming the character and is never started.
+
+Order of decisions per line: `rules.check_command(line, "checker")` first (`ERROR`,
+`denied: <reason>`), then the split rule above, then program resolution — a word with a
+path separator resolves against the run directory (on Windows also via `PATHEXT`),
+otherwise `shutil.which`; not found is `Not run`, not FAIL. On Windows a `.cmd`/`.bat`
+program starts through `scripts/launch.py`'s `cmd_command_line`, and a cmd
+metacharacter in its arguments is `ERROR`. Then the command runs: exit 0 is `PASS`,
+non-zero `FAIL`, a timeout `ERROR` (the process tree is killed), an `OSError` at start
+`ERROR`.
+
+The per-command timeout is `--timeout-seconds`, else `[gates] command_timeout_seconds`
+from `models.toml` (merged user → project, default 600):
+
+```toml
+[gates]
+command_timeout_seconds = 600
+```
+
+stdout and stderr of each command go to one temporary file (never a pipe, so a
+surviving grandchild cannot hang the script); the environment is inherited unchanged.
+`FAIL` and timeout `ERROR` get an excerpt in `checks-<n>.md`: the output lines matching
+a fixed pattern set (pytest/unittest failure names, assertion and exception lines, ruff
+diagnostics, compiler-style and `error:`/`fatal:` lines), at most 30 of them plus a
+`[... k more ...]` marker; when nothing matches, the last 30 non-blank lines. A timeout
+excerpt starts with `timed out after <s> s; the process tree was killed`.
+
+Limits, stated plainly: gates.py runs only the plan's commands — no profile defaults,
+so the planner must list every command it wants checked; there is no shell of any kind
+(pipes, redirects, `&&`, variables, globs, `cd`); the matching patterns are heuristics,
+and a tool with unusual output falls back to its last 30 lines.
+
 ## Project configuration
 
 Optional `.claude/task-flow.md` in the target repository — copy
@@ -642,8 +719,8 @@ skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 11 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/launch.py,
-scripts/models.py, scripts/release.py
+scripts/gates.py, scripts/models.py, scripts/release.py
 templates/task-flow.md          project config example
-templates/models.toml           commented models.toml example (profiles, [roles])
+templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
 ```

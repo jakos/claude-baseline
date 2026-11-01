@@ -333,6 +333,58 @@ class ModelsTest(unittest.TestCase):
         profile = next(iter(raw["profiles"].values()))
         self.assertEqual(set(profile), set(models.PROFILE_KEYS))
         self.assertEqual(set(raw["roles"]), set(models.ROLES))
+        self.assertEqual(set(raw["gates"]), set(models.GATES_KEYS))
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+
+    def test_gates_default_timeout(self):
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+        self.assertEqual(
+            models.gates(None), {"command_timeout_seconds": 600}
+        )  # user file only, absent
+        self.user("[gates]\ncommand_timeout_seconds = 300\n")
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 300})
+        self.assertEqual(models.gates(None), {"command_timeout_seconds": 300})
+
+    def test_gates_project_overrides_user(self):
+        self.user("[gates]\ncommand_timeout_seconds = 300\n")
+        self.project("[gates]\ncommand_timeout_seconds = 120\n")
+        self.assertEqual(models.gates(self.repo)["command_timeout_seconds"], 120)
+        # a project file without [gates] keeps the user value
+        self.project('[roles]\nchecker = "script"\n')
+        self.assertEqual(models.gates(self.repo)["command_timeout_seconds"], 300)
+        self.assertEqual(models.load(self.repo)[1], {"checker": "script"})
+
+    def test_gates_invalid_values_rejected(self):
+        cases = [
+            ("[gates]\ncommand_timeout_seconds = 0\n", "gates.command_timeout_seconds"),
+            (
+                "[gates]\ncommand_timeout_seconds = -5\n",
+                "gates.command_timeout_seconds",
+            ),
+            (
+                '[gates]\ncommand_timeout_seconds = "x"\n',
+                "gates.command_timeout_seconds",
+            ),
+            (
+                "[gates]\ncommand_timeout_seconds = true\n",
+                "gates.command_timeout_seconds",
+            ),
+            ("[gates]\ncommand_timeout_seconds = 1.5\nok = 1\n", "gates.ok"),
+            ("[gates]\nbogus = 1\n", "gates.bogus"),
+            ("gates = 5\n", "gates: must be a table"),
+        ]
+        for text, needle in cases:
+            with self.subTest(text=text):
+                path = self.project(text)
+                for call in (
+                    lambda: models.gates(self.repo),
+                    lambda: models.load(self.repo),
+                ):
+                    with self.assertRaises(models.ConfigError) as ctx:
+                        call()
+                    message = str(ctx.exception)
+                    self.assertIn(str(path), message)
+                    self.assertIn(needle, message)
 
     def test_template_roles_match_agent_frontmatter(self):
         raw = tomllib.loads(TEMPLATE.read_text(encoding="utf-8"))

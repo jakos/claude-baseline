@@ -9,9 +9,14 @@ Two optional files, both TOML, read as UTF-8:
 - user:    ~/.claude/task-flow/models.toml
 - project: <repo-root>/.claude/task-flow.models.toml
 
-Merge: profiles by name, then key by key; [roles] key by key; the project file wins.
-Unknown top-level tables and unknown keys are errors, so typos do not pass silently.
-With neither file present there are no profiles and no roles.
+Merge: profiles by name, then key by key; [roles] key by key; [gates] key by key; the
+project file wins. Unknown top-level tables and unknown keys are errors, so typos do
+not pass silently. With neither file present there are no profiles and no roles.
+
+[gates] keys:
+
+  command_timeout_seconds     number > 0, per verification command run by
+                              scripts/gates.py (default 600)
 
 [profiles.<name>] keys (required: driver, base_url, model, billing; api_key_env is
 required unless billing = "local"):
@@ -40,7 +45,7 @@ required unless billing = "local"):
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
 "claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (implementer
-only), "script" (checker only).
+only), "script" (checker only: run scripts/gates.py instead of the checker agent).
 
 CLI:
   models.py show <profile> [--project <repo-root>]
@@ -69,6 +74,8 @@ import tomllib
 DRIVERS = {"openai-loop"}
 BILLINGS = {"subscription", "api", "local"}
 ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
+GATES_KEYS = {"command_timeout_seconds"}
+GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
 RESERVED_BODY_KEYS = {"model", "messages", "tools", "tool_choice"}
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -211,7 +218,7 @@ def _read(path: Path) -> dict:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
-    unknown = sorted(set(data) - {"profiles", "roles"})
+    unknown = sorted(set(data) - {"profiles", "roles", "gates"})
     if unknown:
         raise ConfigError(f"{path}: unknown top-level key(s) {unknown}")
     return data
@@ -246,6 +253,19 @@ def _validate_roles(path: Path, roles) -> dict:
     return roles
 
 
+def _validate_gates(path: Path, gates) -> dict:
+    if not isinstance(gates, dict):
+        raise ConfigError(f"{path}: gates: must be a table")
+    for key, value in gates.items():
+        if key not in GATES_KEYS:
+            raise ConfigError(f"{path}: gates.{key}: unknown key")
+        try:
+            _check_num(0, strict=True)(value)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(f"{path}: gates.{key}: {exc}") from exc
+    return gates
+
+
 def load(project_root: Path | None = None) -> tuple[dict, dict]:
     """Return (profiles, roles): merged, validated, defaults filled in profiles."""
     sources = [user_file()]
@@ -258,6 +278,7 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
         data = _read(path)
         profiles = _validate_profiles(path, data.get("profiles", {}))
         roles = _validate_roles(path, data.get("roles", {}))
+        _validate_gates(path, data.get("gates", {}))
         for name, table in profiles.items():
             raw_profiles.setdefault(name, {}).update(table)
             for key in table:
@@ -323,6 +344,26 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
         if value not in resolved:
             raise ConfigError(f"{path}: roles.{role}: unknown profile {value!r}")
     return resolved, raw_roles
+
+
+def gates(project_root: Path | None = None) -> dict:
+    """The merged [gates] table: {"command_timeout_seconds": <value or 600>}.
+
+    Sources are the user file and, when given, the project file; merged key by key,
+    the project wins, exactly like [roles]. An invalid [gates] table raises ConfigError.
+    """
+    sources = [user_file()]
+    if project_root is not None:
+        sources.append(project_file(project_root))
+    merged: dict = {}
+    for path in sources:
+        data = _read(path)
+        merged.update(_validate_gates(path, data.get("gates", {})))
+    return {
+        "command_timeout_seconds": merged.get(
+            "command_timeout_seconds", GATES_DEFAULT_TIMEOUT
+        )
+    }
 
 
 def api_key(profile: dict) -> str | None:

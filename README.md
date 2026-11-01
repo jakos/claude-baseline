@@ -260,13 +260,14 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/autopilot.py             task-autopilot: repo check, --tasks list check, token estimate, circuit breaker, stacked base
     scripts/implement.py             one implementer round on an OpenAI-compatible model, used when [roles] implementer names a profile
     scripts/launch.py                starts .cmd/.bat tools on Windows through cmd.exe, shared by implement.py
+    scripts/gates.py                 runs plan.md's verification commands without a model, when [roles] checker = "script"
     scripts/models.py                reads, merges and validates models.toml
     scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own
     templates/models.toml            commented models.toml example (profiles, [roles])
     templates/release.toml           commented release config example (targets, version files)
     tests/test_guard.py, tests/test_rules.py, tests/test_task_list.py, tests/test_prune_task.py,
-    tests/test_autopilot.py, tests/test_models.py, tests/test_implement.py, tests/test_launch.py,
-    tests/test_release.py
+    tests/test_autopilot.py, tests/test_gates.py, tests/test_models.py, tests/test_implement.py,
+    tests/test_launch.py, tests/test_release.py
 ```
 
 Validate before pushing:

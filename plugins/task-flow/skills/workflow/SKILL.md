@@ -64,7 +64,12 @@ The planner writes exactly these headings, in this order:
 - **Acceptance criteria**: numbered `AC1`, `AC2`, … Each is testable and ends with
   `Verify:` naming a test, a command, or `manual: <what to look at>`.
 - **Verification commands**: exact commands, one per line in a code block, to run from
-  the worktree root. Project config wins over profile defaults.
+  the worktree root. Project config wins over profile defaults. Each non-blank line that
+  does not start with `#` is one command: one program plus its arguments, no shell.
+  Quotes group (`"a|b"` stays one argument), a backslash is literal (Windows paths work
+  unchanged), and unquoted `| & ; < > ( ) $ * ?` or backticks, or a `NAME=value` first
+  word, are refused as ERROR by `scripts/gates.py`. Every command to check must be in
+  the list: gates.py runs no profile defaults.
 - **Project rules**: the parts of `.claude/task-flow.md` that apply — architecture rules,
   forbidden paths. Copied here so later agents never need to re-read the config.
 - **Risks / open questions**: if any question blocks planning, the first line is
@@ -84,7 +89,8 @@ The planner writes exactly these headings, in this order:
 ```
 
 `Result` is PASS, FAIL, or ERROR (could not run). A command missing from the repo is
-`Not run`, not FAIL.
+`Not run`, not FAIL. The file is written by the checker agent or by `scripts/gates.py`
+(when `[roles] checker = "script"`); the format is the same.
 
 Round 0 uses the same format. It is run on the untouched base, before any implementation.
 

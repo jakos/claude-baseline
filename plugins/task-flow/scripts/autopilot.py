@@ -59,6 +59,10 @@ this script only reads. The optional header line `source: backlog | tasks` (abse
 none`, row 1 depending on `-`, and every later row depending on exactly the previous
 row, and `estimate` appends a `warning:` line when such a run has more than 10 rows.
 Stdlib only, started by `uv run --script`.
+
+It also exposes `verification_commands(plan)`, the shared parser of a plan's first
+`## Verification commands` fenced block, used by `plan_counts` here and by
+`scripts/gates.py`.
 """
 
 import argparse
@@ -264,6 +268,27 @@ def usd_value(value: str, what: str) -> float | None:
     raise Refusal(f"{what} must be a non-negative number or 'unknown', got {value!r}")
 
 
+def verification_commands(plan: str) -> list[str]:
+    """The stripped command lines of the first fenced block under `## Verification commands`.
+
+    Blank lines and lines starting with `#` are skipped; the closing fence of the first
+    block ends the list, so later blocks and trailing text are ignored. These are exactly
+    the lines `plan_counts` counts.
+    """
+    tracker = FenceTracker()
+    seen_block = False
+    commands: list[str] = []
+    for line in sections(plan).get("verification commands", []):
+        if tracker.is_fence(line):
+            if tracker.opening is None:
+                break
+            seen_block = True
+            continue
+        if seen_block and line.strip() and not line.lstrip().startswith("#"):
+            commands.append(line.strip())
+    return commands
+
+
 def plan_counts(plan: str) -> tuple[int, int, int]:
     parts = sections(plan)
     steps = sum(1 for line in parts.get("steps", []) if re.match(r"\d+\.\s", line))
@@ -272,17 +297,7 @@ def plan_counts(plan: str) -> tuple[int, int, int]:
         for line in parts.get("acceptance criteria", [])
         if (m := re.match(r"[\s\-*]*(AC\d+)", line))
     }
-    commands = 0
-    tracker = FenceTracker()
-    seen_block = False
-    for line in parts.get("verification commands", []):
-        if tracker.is_fence(line):
-            if tracker.opening is None:
-                break
-            seen_block = True
-            continue
-        if seen_block and line.strip() and not line.lstrip().startswith("#"):
-            commands += 1
+    commands = len(verification_commands(plan))
     return steps, len(criteria), commands
 
 
