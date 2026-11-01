@@ -16,6 +16,7 @@
 uv run --script plugins/task-flow/tests/test_autopilot.py
 uv run --script plugins/task-flow/tests/test_guard.py
 uv run --script plugins/task-flow/tests/test_implement.py
+uv run --script plugins/task-flow/tests/test_launch.py
 uv run --script plugins/task-flow/tests/test_models.py
 uv run --script plugins/task-flow/tests/test_prune_task.py
 uv run --script plugins/task-flow/tests/test_release.py

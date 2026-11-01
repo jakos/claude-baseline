@@ -50,6 +50,9 @@ as `__pycache__`; nothing is ever committed.
 Limits, stated plainly: commands the model runs are matched as text only (a script can
 still push or commit), they run without a shell (no pipes or redirects), their network
 access is not blocked, and only an allowlisted set of environment variables reaches them.
+On Windows a program that resolves to a `.cmd`/`.bat` file is started through
+`cmd.exe /d /s /c` with one quoted command line (see scripts/launch.py), and such a
+command is rejected if it contains `& | < > ^ % !` or a newline, inside quotes too.
 File tools are confined to the worktree and cannot write under .git or .work. The
 denial rules live in scripts/rules.py, shared with the guard.py hook; this script calls
 them with the external-implementer role.
@@ -73,6 +76,7 @@ from pathlib import Path
 from typing import Self
 
 import models
+from launch import cmd_command_line, cmd_exe, is_cmd_script
 from rules import check_command, check_write
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -121,7 +125,9 @@ read_file, write_file, edit_file, list_files, grep, run_command and blocked.
 - File paths are relative to the worktree or absolute; both must stay inside the worktree.
 - run_command starts ONE program with arguments, without a shell: no pipes, redirects,
   `&&`, `;`, globbing or variable expansion. The working directory is the worktree. Use
-  it to run the plan's verification commands.
+  it to run the plan's verification commands. On Windows, a program that resolves to a
+  `.cmd`/`.bat` file (such as `npm` or `npx`) is started through `cmd.exe`, so such a
+  command must not contain `& | < > ^ % !` or a newline, inside quotes too.
 - When you are done, reply with a short final message and NO tool call. That ends the
   round. List the files you changed in that message.
 """
@@ -811,12 +817,13 @@ class Tools:
                 found = self.find_program(first, env)
                 if not found:
                     raise ToolError(f"error: program not found: {first}")
-                if found.lower().endswith((".cmd", ".bat")):
-                    raise ToolError(
-                        f"error: {first} is a .cmd/.bat script, which cannot be started "
-                        "without a shell"
-                    )
-                argv = subprocess.list2cmdline([found]) + rest
+                if is_cmd_script(found):
+                    try:
+                        argv = cmd_command_line(found, rest, cmd_exe(env))
+                    except ValueError as exc:
+                        raise ToolError(f"error: {exc}") from None
+                else:
+                    argv = subprocess.list2cmdline([found]) + rest
             else:
                 argv = shlex.split(command)
                 found = self.find_program(argv[0], env)

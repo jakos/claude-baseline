@@ -534,6 +534,82 @@ class ImplementTest(unittest.TestCase):
         )
         self.assertIn("exit code: 0", results[0])
 
+    @unittest.skipUnless(os.name == "nt", "cmd.exe exists only on Windows")
+    def test_cmd_script_runs_through_cmd_exe(self):
+        tools_dir = self.worktree / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "hi.cmd").write_text(
+            "@echo off\r\necho hello %~1\r\nexit /b 0\r\n",
+            encoding="utf-8",
+            newline="",
+        )
+        results = self.one_round_of_calls(
+            tool_call("run_command", {"command": r"tools\hi.cmd world"}, "a"),
+        )
+        self.assertIn("exit code: 0", results[0])
+        self.assertIn("hello world", results[0])
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe exists only on Windows")
+    def test_cmd_script_found_via_pathext(self):
+        tools_dir = self.worktree / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "hi.cmd").write_text(
+            "@echo off\r\necho via pathext\r\nexit /b 0\r\n",
+            encoding="utf-8",
+            newline="",
+        )
+        results = self.one_round_of_calls(
+            tool_call("run_command", {"command": r"tools\hi"}, "a"),
+        )
+        self.assertIn("exit code: 0", results[0])
+        self.assertIn("via pathext", results[0])
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe exists only on Windows")
+    def test_cmd_script_exit_code_propagates(self):
+        tools_dir = self.worktree / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "hi.cmd").write_text(
+            "@echo off\r\nexit /b 3\r\n", encoding="utf-8", newline=""
+        )
+        results = self.one_round_of_calls(
+            tool_call("run_command", {"command": r"tools\hi.cmd"}, "a"),
+        )
+        self.assertIn("exit code: 3", results[0])
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe exists only on Windows")
+    def test_cmd_script_metachar_rejected(self):
+        tools_dir = self.worktree / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "mark.cmd").write_text(
+            "@echo off\r\necho x > marker.txt\r\n", encoding="utf-8", newline=""
+        )
+        results = self.one_round_of_calls(
+            tool_call("run_command", {"command": r"tools\mark.cmd a & echo b"}, "a"),
+            tool_call("run_command", {"command": r"tools\mark.cmd %PATH%"}, "b"),
+            tool_call("run_command", {"command": r"tools\mark.cmd a > out.txt"}, "c"),
+            tool_call("run_command", {"command": r"tools\mark.cmd a^b"}, "d"),
+            tool_call("run_command", {"command": r"tools\mark.cmd !x!"}, "e"),
+        )
+        for result, char in zip(results, ("&", "%", ">", "^", "!")):
+            self.assertTrue(result.startswith("error:"), result)
+            self.assertIn(char, result)
+        self.assertFalse((self.worktree / "marker.txt").exists())
+        self.assertFalse((self.worktree / "out.txt").exists())
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe exists only on Windows")
+    def test_cmd_script_denial_rules_first(self):
+        tools_dir = self.worktree / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "git.cmd").write_text(
+            "@echo off\r\nexit /b 0\r\n", encoding="utf-8", newline=""
+        )
+        results = self.one_round_of_calls(
+            tool_call(
+                "run_command", {"command": r"tools\git.cmd push origin main"}, "a"
+            ),
+        )
+        self.assertTrue(results[0].startswith("denied:"), results[0])
+
     def test_child_env_is_allowlisted(self):
         code = (
             "import os;"

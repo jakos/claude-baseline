@@ -261,7 +261,8 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
 `uv run --script plugins/task-flow/tests/test_autopilot.py`, the model config's with
 `uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
-`uv run --script plugins/task-flow/tests/test_implement.py` and the release script's with
+`uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
+`uv run --script plugins/task-flow/tests/test_launch.py` and the release script's with
 `uv run --script plugins/task-flow/tests/test_release.py`.
 
 Limits of the guard, stated plainly (they apply to `implement.py`'s `run_command` too,
@@ -524,9 +525,13 @@ scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
   the worktree exists and `status.md` says `plan-approved: yes`.
 - Commands the model runs are matched as text only. A `python -c` or a script can still
   push or commit; nothing here can see what a program does.
-- There is no shell: no pipes, redirects or `&&` in a command. On Windows, `.cmd` and
-  `.bat` tools (`npm`, `npx`, `mvn.cmd`, `gradlew.bat`) cannot be started for that reason
-  (follow-up task `windows-cmd-shim-commands`).
+- There is no shell: no pipes, redirects or `&&` in a command, for any tool. On Windows,
+  a program that resolves to a `.cmd`/`.bat` file (`npm`, `npx`, `mvn.cmd`,
+  `gradlew.bat`) is started through `cmd.exe /d /s /c` with one quoted command line
+  (`scripts/launch.py`), and such a command is rejected if it contains `& | < > ^ % !`
+  or a newline, inside quotes too — so e.g. `npm run build -- --flag=%X%` or an argument
+  with `&` cannot be passed to a `.cmd` tool; call the underlying `.exe` directly
+  instead.
 - The network access of commands is not blocked.
 - The code in the worktree, and the task files, are sent to the provider you configured.
 - Commands get only an allowlist of the environment: `PATH`, `PATHEXT`, `SYSTEMROOT`,
@@ -636,8 +641,8 @@ skills/workflow/                shared contract (SKILL.md) + orchestration.md fo
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 11 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
-scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/models.py,
-scripts/release.py
+scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/launch.py,
+scripts/models.py, scripts/release.py
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles])
 templates/release.toml          commented release config example (targets, version files)
