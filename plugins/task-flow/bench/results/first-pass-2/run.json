@@ -1,0 +1,40 @@
+{
+  "case_entries": {
+    "autopilot-plan-and-run-tasks": {
+      "base": "0ed235625d41a0d355209016b27187451e7f582e",
+      "case_toml_sha256": "5647a257c6cb25fd06bedc08aed1c97813dccaa94b05165913ac2e386dbd81a4",
+      "plan_sha256": "2d61abe2afee31ad4706395bd3adaa4db5f93ad5123ed2c810cb97a9e71f735e",
+      "result": "80737dd54b1eb880b5bece5c72763855cf62cd93"
+    },
+    "finish-prunes-task-folder": {
+      "base": "1a82fa158fa596218f14996e7cd538d0428f1e4b",
+      "case_toml_sha256": "3b8a4ed812f224cf613df2cbfecc0ec84bbc8fcf74b0eedffd038089882fc32a",
+      "plan_sha256": "a36b6bd3ef4491748f6bc7700c2b4ae1c197ceb60af4917c77349aef07d49767",
+      "result": "cbe7683e9dcd9a6935299e20e62bdd73e86875b9"
+    },
+    "task-list": {
+      "base": "4daf4197b4dc24b4c78a501ab4269be89a6d7c4e",
+      "case_toml_sha256": "5f907840278723adb307ab0662558339d35f19e6d330729314c5e11df0d4a2ef",
+      "plan_sha256": "c83212f523b64d69f34550ab13d261df1af4b5770eb7df496e04501e55ae0d10",
+      "result": "7216e6c09975f164e51686f59eb83a5114beafd5"
+    }
+  },
+  "cases": [
+    "autopilot-plan-and-run-tasks",
+    "finish-prunes-task-folder",
+    "task-list"
+  ],
+  "created": "2026-11-02T08:47:50Z",
+  "fingerprint": "sha256:dbd92482d92322582311aadf791120363e2f61aa46aaa6ed9cae3850543aa91e",
+  "harness_version": 1,
+  "profiles": [
+    "mistral-large",
+    "mistral-small",
+    "glm-flash",
+    "deepseek-flash"
+  ],
+  "repeat": 1,
+  "review": false,
+  "run_id": "first-pass-2",
+  "task_flow_version": "0.12.0"
+}
