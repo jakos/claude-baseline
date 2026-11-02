@@ -901,6 +901,9 @@ class RunTest(BenchFixture):
         report = self.report("r1")
         self.assertIn("## S", report)
         self.assertIn("## All", report)
+        all_section = report.split("## All", 1)[1].split("## Notes", 1)[0]
+        table_lines = [ln for ln in all_section.splitlines() if ln.startswith("|")]
+        self.assertGreater(len(table_lines), 2, "the All table has no profile rows")
         self.assertIn(
             "$0.0048 ($0.0024–$0.0072)", report
         )  # cost per run median (min–max)
@@ -926,7 +929,8 @@ class RunTest(BenchFixture):
         self.assertFalse(row["cost_known"])
         report = self.report("r1")
         self.assertIn("| sub | subscription | 1 | 1 | 1 | 1 |", report)
-        self.assertEqual(report.count("| subscription |"), 2)  # both cost columns
+        # both cost columns, in the S table and again in the All table
+        self.assertEqual(report.count("| subscription |"), 4)
         self.assertIn("cost per token is unknown", report)
         self.assertIn("tokens, rounds, time and acceptance", report)
 
@@ -1531,6 +1535,63 @@ def canned_run(results_dir, run_id, created, profiles, rows):
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
     )
     return run_dir
+
+
+class MergeTest(BenchFixture):
+    ENTRY = {"case_toml_sha256": "a", "plan_sha256": "b", "base": "c", "result": "d"}
+
+    def canned(self, run_id, profiles, rows, entry=None):
+        run_dir = canned_run(self.out, run_id, "2026-01-01T00:00:00Z", profiles, rows)
+        meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        meta["case_entries"] = {"c1": entry or self.ENTRY}
+        write_file(run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+    def merge(self, *sources, into="m1"):
+        return self.bench(
+            "merge", *sources, "--into", into, "--out", str(self.out), "--project", str(self.project)
+        )
+
+    def test_later_run_replaces_its_cell_and_keeps_the_rest(self):
+        self.canned(
+            "a1",
+            ["p1", "p2"],
+            [
+                canned_row("a1", 1, "p1", outcome="failed", hidden="not_run"),
+                canned_row("a1", 2, "p2", cost=0.01),
+            ],
+        )
+        self.canned("a2", ["p1"], [canned_row("a2", 1, "p1", cost=0.02)])
+        done = self.merge("a1", "a2")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        rows = self.rows("m1")
+        self.assertEqual([(r["n"], r["profile"], r["outcome"]) for r in rows],
+                         [(1, "p1", "accepted"), (2, "p2", "accepted")])
+        self.assertEqual([r["source_run"] for r in rows], ["a2", "a1"])
+        self.assertEqual({r["run_id"] for r in rows}, {"m1"})
+        meta = json.loads((self.out / "m1" / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["merged_from"], ["a1", "a2"])
+        self.assertEqual(meta["profiles"], ["p1", "p2"])
+        self.assertEqual({r["fingerprint"] for r in rows}, {meta["fingerprint"]})
+        report = self.report("m1")
+        all_section = report.split("## All", 1)[1].split("## Notes", 1)[0]
+        self.assertIn("| p1 |", all_section)
+
+    def test_refuses_sources_whose_case_changed(self):
+        self.canned("a1", ["p1"], [canned_row("a1", 1, "p1")])
+        self.canned("a2", ["p1"], [canned_row("a2", 1, "p1")], entry={**self.ENTRY, "plan_sha256": "x"})
+        done = self.merge("a1", "a2")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("case c1 differs", done.stderr)
+        self.assertFalse((self.out / "m1").exists())
+
+    def test_refuses_existing_target_and_single_source(self):
+        self.canned("a1", ["p1"], [canned_row("a1", 1, "p1")])
+        self.canned("a2", ["p1"], [canned_row("a2", 1, "p1")])
+        self.assertEqual(self.merge("a1").returncode, 2)
+        self.assertEqual(self.merge("a1", "a2").returncode, 0)
+        again = self.merge("a1", "a2")
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("already exists", again.stderr)
 
 
 class LogTest(BenchFixture):
