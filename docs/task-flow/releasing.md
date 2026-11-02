@@ -4,7 +4,8 @@ Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `be
 
 `/task-flow:task-release` releases one target — a plugin or a project — in one controlled
 procedure, and `scripts/release.py` computes every decision, so the command is a thin
-wrapper around it. The procedure is **Release** in
+wrapper around it. Releases (version, changelog entry, commit and tag) are made with
+`/task-flow:task-release`. The procedure is **Release** in
 [skills/workflow/orchestration.md](../../plugins/task-flow/skills/workflow/orchestration.md): list the targets,
 `check` (every precondition, one JSON report), `verify` (the target's checks, run in the
 background), optionally `apply --dry-run`, then **one approval gate — always asked, there

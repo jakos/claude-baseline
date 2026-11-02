@@ -1,70 +1,30 @@
 # task-flow
 
-Moved to [docs/task-flow/overview.md](../../docs/task-flow/overview.md).
+A multi-agent workflow for tasks and feature requests: the planner writes a plan you
+approve, an implementer works in a git worktree, a checker runs the gates, and an
+independent reviewer judges the result — at most three rounds, every artifact in
+`.work/<task-id>/`.
 
-## Install
-Moved to [docs/task-flow/setup.md](../../docs/task-flow/setup.md#install).
+## Quick reference
 
-## Permissions
-Moved to [docs/task-flow/setup.md](../../docs/task-flow/setup.md#permissions).
+```
+/task-flow:task-run "<request>"
+/task-flow:task-status
+/task-flow:task-finish
+/task-flow:task-autopilot
+/task-flow:task-doctor
+```
 
-## Commands
-Moved to [docs/task-flow/commands.md](../../docs/task-flow/commands.md#commands).
+## Documentation
 
-## Doctor
-Moved to [docs/task-flow/setup.md](../../docs/task-flow/setup.md#doctor).
-
-## Autopilot
-Moved to [docs/task-flow/autopilot.md](../../docs/task-flow/autopilot.md#autopilot).
-
-## Releasing
-Moved to [docs/task-flow/releasing.md](../../docs/task-flow/releasing.md#releasing).
-
-## What enforces what
-Moved to [docs/task-flow/enforcement.md](../../docs/task-flow/enforcement.md#what-enforces-what).
-
-## External implementer
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#external-implementer).
-
-### Routing
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#routing).
-
-### Providers
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#providers).
-
-### Configuration: `models.toml`
-Moved to [docs/task-flow/configuration.md](../../docs/task-flow/configuration.md#configuration-modelstoml).
-
-### Post-edit feedback and prompt extras
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#post-edit-feedback-and-prompt-extras).
-
-### Choosing Claude models per role
-Moved to [docs/task-flow/configuration.md](../../docs/task-flow/configuration.md#choosing-claude-models-per-role).
-
-### What it does and records
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#what-it-does-and-records).
-
-### Limits, stated plainly
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#limits-stated-plainly).
-
-### Rolling back
-Moved to [docs/task-flow/external-implementer.md](../../docs/task-flow/external-implementer.md#rolling-back).
-
-## Deterministic gates (scripts/gates.py)
-Moved to [docs/task-flow/gates.md](../../docs/task-flow/gates.md#deterministic-gates-scriptsgatespy).
-
-## Benchmark
-Moved to [docs/task-flow/benchmark.md](../../docs/task-flow/benchmark.md#benchmark).
-
-## Project configuration
-Moved to [docs/task-flow/configuration.md](../../docs/task-flow/configuration.md#project-configuration).
-
-## Profiles
-Moved to [docs/task-flow/profiles.md](../../docs/task-flow/profiles.md#profiles).
-
-### Adding a profile
-Moved to [docs/task-flow/profiles.md](../../docs/task-flow/profiles.md#adding-a-profile).
-
-## Layout
-Moved to [docs/task-flow/overview.md](../../docs/task-flow/overview.md#layout).
-
+- [Overview](../../docs/task-flow/overview.md)
+- [Setting up task-flow](../../docs/task-flow/setup.md)
+- [Commands](../../docs/task-flow/commands.md)
+- [Autopilot](../../docs/task-flow/autopilot.md)
+- [Configuration](../../docs/task-flow/configuration.md)
+- [External implementer](../../docs/task-flow/external-implementer.md)
+- [Deterministic gates](../../docs/task-flow/gates.md)
+- [What enforces what](../../docs/task-flow/enforcement.md)
+- [Profiles](../../docs/task-flow/profiles.md)
+- [Releasing](../../docs/task-flow/releasing.md)
+- [Benchmark](../../docs/task-flow/benchmark.md)

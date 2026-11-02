@@ -30,7 +30,7 @@ You want `Skills (4)`, `Agents (1)`, `Hooks (2)`. If `claude plugin list` says *
 load**, read the error — that is the only place a broken plugin announces itself.
 
 > Working on the plugin itself? Sessions started inside this repo can load the working tree
-> on top of the released copy — see "Working on this repo" in the README.
+> on top of the released copy — see [Working on this repo](docs/development.md#working-on-this-repo).
 
 ## 1. In the new repo: find the gate before writing anything
 
@@ -169,8 +169,8 @@ $env:MISTRAL_API_KEY = "..."
 POSIX shells: `export MISTRAL_API_KEY=...`.
 
 Profiles, roles, limits and how to switch it off again:
-[External implementer](plugins/task-flow/README.md#external-implementer) and
-[Rolling back](plugins/task-flow/README.md#rolling-back).
+[External implementer](docs/task-flow/external-implementer.md) and
+[Rolling back](docs/task-flow/external-implementer.md#rolling-back).
 
 ## When something seems wrong
 

@@ -1,81 +1,150 @@
 # claude-baseline
 
-Personal baseline of Claude Code skills, agents and guardrails. Not project-specific —
-this is the layer that applies to everything, so every project inherits the same
-conventions and the same review discipline.
+Two Claude Code plugins from one marketplace: `dev-baseline` for everyday skills and
+guardrails, and `task-flow`, the main one — a reviewed multi-agent task workflow.
 
-Domain-specific kits live in their own repositories and are installed alongside this one:
+| Plugin | What it is | Use it when | Install | Docs |
+| --- | --- | --- | --- | --- |
+| `task-flow` | Multi-agent task workflow: plan, your approval, implement, checks, independent review | You want every task planned, gated and reviewed | `/plugin install task-flow@claude-baseline` | [task-flow overview](docs/task-flow/overview.md) |
+| `dev-baseline` | Four skills, a reviewer agent and two hooks for every repo | Every project, installed at user scope | `/plugin install dev-baseline@claude-baseline` | [dev-baseline](docs/dev-baseline.md) |
 
-- `claude-python-service` — structuring and
-  testing Python backend services (DDD layering, FastAPI, pytest with Testcontainers).
-- `claude-home-assistant` — a Home Assistant
-  config as a git repository.
+## task-flow
 
-Python is tooling everywhere, so how to *set up* Python lives here; how to build a *service*
-in it lives in the kit.
+`plugins/task-flow/` turns a request into a reviewed change: the planner writes a plan,
+you approve it, the implementer works in a git worktree, the checker runs the gates, and
+an independent reviewer judges the result — at most three rounds, all artifacts in
+`.work/<task-id>/`. The command list is in [Commands](docs/task-flow/commands.md).
 
-## Install once, globally
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#install-once-globally).
+### Architecture
 
-## What's in it
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#whats-in-it).
+The roles in one Claude Code session exchange nothing but the task files.
 
-### Skills
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#skills).
+<!-- diagram:architecture -->
+```mermaid
+flowchart TD
+  subgraph session["Claude Code session (subscription)"]
+    orch["orchestrator (main session)"]
+    planner["planner"]
+    reviewer["reviewer"]
+  end
+  files[".work/task-id/ task files"]
+  cfg["models.toml [roles]"]
+  sub["Claude subagent implementer"]
+  impl["implement.py"]
+  loop1["openai-loop (Mistral, OpenAI-compatible)"]
+  loop2["anthropic-loop (Claude API)"]
+  cli["agent CLI, e.g. Codex (planned)"]
+  gate["checker subagent or gates.py"]
+  wt["git worktree"]
+  orch -->|"reads and writes"| files
+  planner -->|"writes plan.md"| files
+  reviewer -->|"writes review-n.md"| files
+  cfg -->|"routes the implementer"| sub
+  cfg -->|"routes the implementer"| impl
+  cfg -->|"routes the checker"| gate
+  orch --> sub
+  orch --> impl
+  impl --> loop1
+  impl --> loop2
+  impl -.->|"planned"| cli
+  sub -->|"changes in"| wt
+  impl -->|"changes in"| wt
+  gate -->|"reads"| wt
+  gate -->|"writes checks-n.md"| files
+  classDef planned stroke-dasharray: 5 5
+  class cli planned
+```
+<!-- /diagram:architecture -->
 
-### Agent
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#agent).
+### Task flow
 
-### Hooks
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#hooks).
+A single task runs from your request to the verdict.
 
-### Template
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#template).
+<!-- diagram:task-flow -->
+```mermaid
+flowchart TD
+  plan["plan: the planner writes plan.md"]
+  approve["approval: you; --auto skips it"]
+  base["baseline: checks-0.md"]
+  round["round 1-3: implement, gates, review"]
+  verdict{"verdict"}
+  approved["APPROVED"]
+  finish["/task-flow:task-finish"]
+  changes["CHANGES_REQUESTED"]
+  escalate["no progress or round 3: escalate to you (summary.md)"]
+  blocked["BLOCKED: stop"]
+  paused["failed external round (exit 1 or 2): paused"]
+  plan --> approve
+  approve --> base
+  base --> round
+  round --> verdict
+  verdict -->|"APPROVED"| approved
+  approved --> finish
+  verdict -->|"CHANGES_REQUESTED"| changes
+  changes -->|"next round, at most 3"| round
+  verdict -->|"no progress or round 3"| escalate
+  round -->|"BLOCKED"| blocked
+  round -->|"exit 1 or 2"| paused
+  paused -->|"same command reruns the round; not counted"| round
+```
+<!-- /diagram:task-flow -->
 
-### Evals
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#evals).
+### What makes it different
 
-## Second plugin: task-flow
+- A [planner and an independent reviewer](docs/task-flow/overview.md) that see only files, never the implementer's reasoning.
+- [Your approval gate](docs/task-flow/commands.md) before anything is built — `--auto` skips it.
+- An optional, experimental [external implementer](docs/task-flow/external-implementer.md) on a cheaper per-token model via `models.toml`.
+- [Autopilot](docs/task-flow/autopilot.md) for a whole list of tasks: `/task-flow:task-autopilot`.
+- A [benchmark](docs/task-flow/benchmark.md) that compares implementers on frozen cases.
 
-`plugins/task-flow/` — a multi-agent workflow for tasks and feature requests: planner →
-your approval → implementer → checker → independent reviewer, at most three rounds, every
-artifact in `.work/<task-id>/`. Install it only where you want it:
+## Quick start
+
+Needs Claude Code, git, and [uv](https://docs.astral.sh/uv/) on `PATH`. Install — one prompt per line:
 
 ```
+/plugin marketplace add jakos/claude-baseline --scope user
+/plugin install dev-baseline@claude-baseline
 /plugin install task-flow@claude-baseline
 ```
 
-Then run `/task-flow:task-doctor`: it checks this machine, this session and this
-repository and prints the fix for anything missing.
+Optional external implementer (experimental): set `MISTRAL_API_KEY` in the environment
+Claude Code starts from ([Setting the key](docs/task-flow/setup.md#setting-the-key)),
+copy [`plugins/task-flow/templates/models.toml`](plugins/task-flow/templates/models.toml)
+to `.claude/task-flow.models.toml`, and set a real `model` with
+`[roles] implementer = "mistral"` ([models.toml](docs/task-flow/setup.md#modelstoml-for-the-external-implementer)).
 
-It depends on `dev-baseline` and is described in its own
-[README](plugins/task-flow/README.md).
+Check the setup with `/task-flow:task-doctor` (add `--online` once a key is set), then run
+a first task: `/task-flow:task-run "<request>"`.
 
-Optional and experimental: the implementer role can run on a per-token, non-Claude model
-through `plugins/task-flow/scripts/implement.py` — Mistral or any OpenAI-compatible host,
-or Anthropic through the native Messages API via `scripts/drivers.py` (so far only the
-Mistral API has been exercised) — while Claude still plans, checks and reviews. A
-`models.toml` turns it on; see
-[External implementer](plugins/task-flow/README.md#external-implementer). This
-repository's own `.claude/task-flow.models.toml` is such a project file and holds no
-secrets, only the name of the key's environment variable. Releases (version, changelog
-entry, commit and tag) are made with `/task-flow:task-release`; see
-[Releasing](plugins/task-flow/README.md#releasing).
+Stuck? See [Setting up task-flow](docs/task-flow/setup.md).
 
-## These are opinions, not truth
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#these-are-opinions-not-truth).
+## Benchmark
 
-## Companions worth installing
-Moved to [docs/dev-baseline.md](docs/dev-baseline.md#companions-worth-installing).
+The latest published comparison of implementers, written by `bench.py publish`:
 
-## Working on this repo
-Moved to [docs/development.md](docs/development.md#working-on-this-repo).
+<!-- bench:latest:start -->
+No benchmark has been published yet. See [Benchmark](docs/task-flow/benchmark.md) for how to run one.
+<!-- bench:latest:end -->
 
-## Reviewing this repo itself
-Moved to [docs/development.md](docs/development.md#reviewing-this-repo-itself).
+Older results: [benchmark history](docs/task-flow/benchmark.md).
 
-## Layout
-Moved to [docs/development.md](docs/development.md#layout).
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [task-flow overview](docs/task-flow/overview.md)
+- [Setting up task-flow](docs/task-flow/setup.md)
+- [Commands](docs/task-flow/commands.md)
+- [Autopilot](docs/task-flow/autopilot.md)
+- [Configuration](docs/task-flow/configuration.md)
+- [External implementer](docs/task-flow/external-implementer.md)
+- [Benchmark](docs/task-flow/benchmark.md)
+- [GETTING-STARTED.md](GETTING-STARTED.md)
+- [Developing claude-baseline](docs/development.md)
+
+## dev-baseline
+
+Four skills, a reviewer agent and two hooks, installed at user scope so it loads in every
+project — see [dev-baseline](docs/dev-baseline.md) and [GETTING-STARTED.md](GETTING-STARTED.md).
 
 ## License
 

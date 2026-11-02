@@ -2,6 +2,22 @@
 
 Paths such as `skills/…`, `agents/…`, `hooks/…`, `scripts/…`, `templates/…` and `evals/…` are inside `plugins/dev-baseline/`.
 
+Personal baseline of Claude Code skills, agents and guardrails. Not project-specific —
+this is the layer that applies to everything, so every project inherits the same
+conventions and the same review discipline.
+
+## Related kits
+
+Domain-specific kits live in their own repositories and are installed alongside this one:
+
+- `claude-python-service` — structuring and
+  testing Python backend services (DDD layering, FastAPI, pytest with Testcontainers).
+- `claude-home-assistant` — a Home Assistant
+  config as a git repository.
+
+Python is tooling everywhere, so how to *set up* Python lives here; how to build a *service*
+in it lives in the kit.
+
 ## Install once, globally
 
 Because this applies to all your work, install it at **user scope** so it loads in every

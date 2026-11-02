@@ -21,6 +21,7 @@ and KEPT. The diagram helpers (mermaid_blocks, diagram_block, diagram_nodes) pin
 diagram_block to copy the diagrams onto the front page.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -50,6 +51,25 @@ PAGES = [
 SCOPE = SOURCES + ["GETTING-STARTED.md"] + PAGES
 PLUGIN_README = "plugins/task-flow/README.md"
 BENCH_README = "plugins/task-flow/bench/README.md"
+
+# Added by the task readme-front-page, which turned the root README into a short front
+# page and retired the "Moved to ..." stubs in both READMEs.
+FRONT_PAGE = "README.md"
+# readme-front-page: line caps for the two READMEs; the front-page cap excludes the lines
+# strictly between the bench:latest markers, because publish.py controls those.
+FRONT_PAGE_MAX_LINES = 150
+PLUGIN_README_MAX_LINES = 40
+# readme-front-page: the bench:latest marker pair of the front page; must equal
+# README_START / README_END in plugins/task-flow/bench/publish.py.
+BENCH_LATEST = ("<!-- bench:latest:start -->", "<!-- bench:latest:end -->")
+# readme-front-page: the two files whose MOVES rows no longer need a stub in place.
+STUBS_RETIRED = (FRONT_PAGE, PLUGIN_README)
+# readme-front-page: command prefix -> documentation URL of the external tool, for every
+# non-task-flow slash command and code-block command line of the front-page quick start.
+QUICK_START_TOOLS = {
+    "/plugin marketplace add": "https://code.claude.com/docs/en/plugins/host-marketplace",
+    "/plugin install": "https://code.claude.com/docs/en/plugins",
+}
 
 # (source, heading text, target page) — every heading the split moved.
 MOVES = [
@@ -114,11 +134,22 @@ MOVES = [
     ),
 ]
 # (source, heading text) — every heading that stays in its source file.
+# readme-front-page retired both README stub files: for them KEPT lists exactly the new
+# front page's / plugin README's own headings; MOVES stays the record of the split.
 KEPT = [
     ("README.md", "claude-baseline"),
-    ("README.md", "Second plugin: task-flow"),
+    ("README.md", "task-flow"),
+    ("README.md", "Architecture"),
+    ("README.md", "Task flow"),
+    ("README.md", "What makes it different"),
+    ("README.md", "Quick start"),
+    ("README.md", "Benchmark"),
+    ("README.md", "Documentation"),
+    ("README.md", "dev-baseline"),
     ("README.md", "License"),
     (PLUGIN_README, "task-flow"),
+    (PLUGIN_README, "Quick reference"),
+    (PLUGIN_README, "Documentation"),
     (BENCH_README, "Benchmark harness (`bench.py`)"),
     (BENCH_README, "Cases"),
     (BENCH_README, "Hidden-test rules"),
@@ -144,7 +175,7 @@ BLOCKS_BEFORE = {
 }
 BLOCKS_AFTER = {
     "README.md": 1,
-    PLUGIN_README: 0,
+    PLUGIN_README: 1,
     BENCH_README: 8,
     "docs/README.md": 0,
     "docs/dev-baseline.md": 6,
@@ -167,6 +198,11 @@ BLOCKS_AFTER = {
 # shells, one models.toml example).
 BLOCKS_ADDED = {
     "docs/task-flow/setup.md": 5,
+    # Added by the task readme-front-page: the front page keeps one fenced block (the
+    # quick-start install block, delta 0 against the post-split count), and the plugin
+    # README gains its five-line quick-reference block.
+    "README.md": 0,
+    PLUGIN_README: 1,
 }
 # The pages that hold the `<!-- diagram:<name> -->` marker pairs; readme-front-page
 # copies the blocks between them onto the front page.
@@ -448,6 +484,10 @@ class DocsTest(unittest.TestCase):
 
     def test_old_place_has_stub(self):
         for source, heading, target in MOVES:
+            if source in STUBS_RETIRED:
+                # readme-front-page retired the stubs in both READMEs; their MOVES rows
+                # stay as the record of where the sections went.
+                continue
             raw_lines = self.read(source).splitlines()
             found = [
                 i for i, _level, h in heading_spans(self.read(source)) if h == heading
@@ -463,20 +503,22 @@ class DocsTest(unittest.TestCase):
             resolved = ((ROOT / source).parent / path).resolve()
             self.assertEqual(resolved, (ROOT / target).resolve(), stub)
             self.assertEqual(anchor, slug(heading), stub)
-        # the plugin README intro is a stub under `# task-flow`
-        raw_lines = self.read(PLUGIN_README).splitlines()
-        title = next(i for i, line in enumerate(raw_lines) if line == "# task-flow")
-        j = title + 1
-        while j < len(raw_lines) and not raw_lines[j].strip():
-            j += 1
-        stub = raw_lines[j]
-        self.assertTrue(stub.startswith("Moved to ["), stub)
-        path = links(stub)[0].partition("#")[0]
-        self.assertEqual(
-            ((ROOT / PLUGIN_README).parent / path).resolve(),
-            (ROOT / "docs/task-flow/overview.md").resolve(),
-            stub,
-        )
+        # the plugin README intro is a stub under `# task-flow` (retired by
+        # readme-front-page, so only checked while the stubs exist)
+        if PLUGIN_README not in STUBS_RETIRED:
+            raw_lines = self.read(PLUGIN_README).splitlines()
+            title = next(i for i, line in enumerate(raw_lines) if line == "# task-flow")
+            j = title + 1
+            while j < len(raw_lines) and not raw_lines[j].strip():
+                j += 1
+            stub = raw_lines[j]
+            self.assertTrue(stub.startswith("Moved to ["), stub)
+            path = links(stub)[0].partition("#")[0]
+            self.assertEqual(
+                ((ROOT / PLUGIN_README).parent / path).resolve(),
+                (ROOT / "docs/task-flow/overview.md").resolve(),
+                stub,
+            )
 
     # --- AC5: relative links resolve ---------------------------------------------------
 
@@ -647,7 +689,9 @@ class DocsTest(unittest.TestCase):
     # --- AC3: every Mermaid block follows the conventions -------------------------------
 
     def test_diagrams_follow_conventions(self):
-        for page in PAGES:
+        # readme-front-page copies the two source diagrams onto the front page, so its
+        # Mermaid blocks are checked too.
+        for page in PAGES + [FRONT_PAGE]:
             for block in mermaid_blocks(self.read(page)):
                 lines = block.splitlines()
                 self.assertIn(
@@ -783,6 +827,222 @@ class DocsTest(unittest.TestCase):
                         self.assertTrue(
                             target.is_dir(), f"{rel}: {token} is not a directory"
                         )
+
+    # --- readme-front-page: the front page's diagrams -----------------------------------
+
+    def test_front_page_diagrams_match_sources(self):
+        text = self.read(FRONT_PAGE)
+        for name, source in DIAGRAM_SOURCES.items():
+            for marker in (f"<!-- diagram:{name} -->", f"<!-- /diagram:{name} -->"):
+                found = [line for line in text.splitlines() if line.strip() == marker]
+                self.assertEqual(
+                    found, [marker], f"{marker} must occur once in {FRONT_PAGE}"
+                )
+            self.assertEqual(
+                diagram_block(text, name),
+                diagram_block(self.read(source), name),
+                f"front-page diagram {name!r} differs from {source}",
+            )
+
+    def test_front_page_diagram_drift_detected(self):
+        text = self.read(FRONT_PAGE)
+        for name, source in DIAGRAM_SOURCES.items():
+            block = diagram_block(text, name)
+            mutated_block = block[0].upper() + block[1:]  # one character changed
+            self.assertNotEqual(mutated_block, block)
+            mutated = text.replace(block, mutated_block, 1)
+            self.assertNotEqual(
+                diagram_block(mutated, name),
+                diagram_block(self.read(source), name),
+                f"a one-character drift in the {name!r} copy must fail the comparison",
+            )
+
+    # --- readme-front-page: the bench:latest block ---------------------------------------
+
+    def _bench_marker_lines(self, text):
+        lines = text.splitlines()
+        starts = [i for i, line in enumerate(lines) if line.strip() == BENCH_LATEST[0]]
+        ends = [i for i, line in enumerate(lines) if line.strip() == BENCH_LATEST[1]]
+        return lines, starts, ends
+
+    def test_front_page_bench_block(self):
+        text = self.read(FRONT_PAGE)
+        lines, starts, ends = self._bench_marker_lines(text)
+        self.assertEqual(len(starts), 1, BENCH_LATEST[0])
+        self.assertEqual(len(ends), 1, BENCH_LATEST[1])
+        self.assertLess(starts[0], ends[0])
+        region = "\n".join(lines[starts[0] + 1 : ends[0]])
+        if (ROOT / "docs/task-flow/benchmark/latest.md").is_file():
+            self.assertIn("benchmark/latest.svg", region)
+        else:
+            self.assertIn("No benchmark has been published yet", region)
+            self.assertIn("docs/task-flow/benchmark.md", links(region))
+
+    def test_front_page_accepted_by_publish(self):
+        publish_path = ROOT / "plugins/task-flow/bench/publish.py"
+        if not publish_path.is_file():
+            self.skipTest("plugins/task-flow/bench/publish.py is absent")
+        text = self.read(FRONT_PAGE)
+        src = publish_path.read_text(encoding="utf-8")
+
+        def literal(name):
+            m = re.search(rf'^{name} = "([^"]+)"', src, re.MULTILINE)
+            self.assertIsNotNone(m, f"{name} not found in publish.py")
+            return m.group(1)
+
+        self.assertEqual((literal("README_START"), literal("README_END")), BENCH_LATEST)
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("publish", publish_path)
+        publish = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(publish)
+        out = publish.replace_block(text, *BENCH_LATEST, "dummy body")
+
+        def outside(t):
+            ls = t.splitlines(keepends=True)
+            s = next(i for i, line in enumerate(ls) if line.strip() == BENCH_LATEST[0])
+            e = next(i for i, line in enumerate(ls) if line.strip() == BENCH_LATEST[1])
+            return "".join(ls[: s + 1]), "".join(ls[e:])
+
+        self.assertEqual(
+            outside(out),
+            outside(text),
+            "replace_block changed text outside the markers",
+        )
+
+    # --- readme-front-page: the quick start ----------------------------------------------
+
+    def test_quick_start_commands_exist(self):
+        text = self.read(FRONT_PAGE)
+        quick = section_of(text, "Quick start")
+        open_text = outside_fences(quick)
+        for m in re.finditer(r"/task-flow:([a-z][a-z0-9-]*)", open_text):
+            skill = ROOT / "plugins" / "task-flow" / "skills" / m.group(1) / "SKILL.md"
+            self.assertTrue(skill.is_file(), f"quick start: missing {skill}")
+        # readme-front-page: a slash command starts a token, so a "/" inside a URL
+        # (https://…) or a path (docs/…) is not a command.
+        for m in re.finditer(
+            r"(?<![\w/:])/[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?", open_text
+        ):
+            command = m.group(0)
+            if command.startswith("/task-flow:"):
+                continue
+            line_start = open_text.rfind("\n", 0, m.start()) + 1
+            self.assertTrue(
+                any(open_text[line_start:].startswith(p) for p in QUICK_START_TOOLS),
+                f"quick start: slash command {command!r} has no QUICK_START_TOOLS prefix",
+            )
+        for _info, body in fenced_blocks(quick):
+            for line in body.splitlines():
+                if not line.strip() or line.startswith("/task-flow:"):
+                    continue
+                self.assertTrue(
+                    any(line.startswith(p) for p in QUICK_START_TOOLS),
+                    f"quick start code block: {line!r} has no QUICK_START_TOOLS prefix",
+                )
+        marketplace = json.loads(
+            (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+        )
+        plugin_names = {p["name"] for p in marketplace["plugins"]}
+        for m in re.finditer(r"([a-z][a-z0-9-]*)@([a-z][a-z0-9-]*)", quick):
+            plugin, market = m.groups()
+            self.assertIn(
+                plugin, plugin_names, f"quick start: unknown plugin {plugin!r}"
+            )
+            self.assertEqual(
+                market, marketplace["name"], "quick start: wrong marketplace"
+            )
+        for m in re.finditer(r"`([^`\n]*)`", open_text):
+            for token in m.group(1).split():
+                if token.startswith(("plugins/", ".claude/", "docs/")):
+                    self.assertTrue(
+                        (ROOT / token).exists(), f"quick start: {token} does not exist"
+                    )
+        self.assertIn("/task-flow:task-run", quick)
+        if (
+            ROOT / "plugins" / "task-flow" / "skills" / "task-doctor" / "SKILL.md"
+        ).is_file():
+            self.assertIn("/task-flow:task-doctor", quick)
+
+    # --- readme-front-page: length limits ------------------------------------------------
+
+    def test_readme_length_limits(self):
+        text = self.read(FRONT_PAGE)
+        lines, starts, ends = self._bench_marker_lines(text)
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(ends), 1)
+        counted = len(lines) - (
+            ends[0] - starts[0] - 1
+        )  # lines strictly between markers
+        self.assertLessEqual(counted, FRONT_PAGE_MAX_LINES, f"{FRONT_PAGE} is too long")
+        self.assertLessEqual(
+            len(self.read(PLUGIN_README).splitlines()),
+            PLUGIN_README_MAX_LINES,
+            f"{PLUGIN_README} is too long",
+        )
+
+    # --- readme-front-page: front-page structure -----------------------------------------
+
+    def test_front_page_structure(self):
+        text = self.read(FRONT_PAGE)
+        heads = [h for level, h in headings(text) if level in (2, 3)]
+        self.assertEqual(
+            heads,
+            [
+                "task-flow",
+                "Architecture",
+                "Task flow",
+                "What makes it different",
+                "Quick start",
+                "Benchmark",
+                "Documentation",
+                "dev-baseline",
+                "License",
+            ],
+        )
+        different = section_of(text, "What makes it different")
+        bullets = [
+            line for line in different.splitlines() if line.lstrip().startswith("- ")
+        ]
+        self.assertEqual(
+            len(bullets), 5, "What makes it different must have five bullets"
+        )
+        table = [line for line in text.splitlines() if line.lstrip().startswith("|")]
+        self.assertTrue(
+            any("`task-flow`" in line for line in table), "no task-flow row"
+        )
+        self.assertTrue(
+            any("`dev-baseline`" in line for line in table), "no dev-baseline row"
+        )
+
+    # --- readme-front-page: the plugin README --------------------------------------------
+
+    def test_plugin_readme_overview(self):
+        text = self.read(PLUGIN_README)
+        reference = section_of(text, "Quick reference")
+        blocks = fenced_blocks(reference)
+        self.assertEqual(
+            len(blocks), 1, "Quick reference must have exactly one code block"
+        )
+        command_lines = blocks[0][1].splitlines()
+        self.assertEqual(
+            len(command_lines), 5, "the quick reference has exactly five lines"
+        )
+        for line in command_lines:
+            m = re.match(r"/task-flow:([a-z][a-z0-9-]*)", line)
+            self.assertIsNotNone(m, f"not a /task-flow: command: {line!r}")
+            skill = ROOT / "plugins" / "task-flow" / "skills" / m.group(1) / "SKILL.md"
+            self.assertTrue(skill.is_file(), f"plugin README: missing {skill}")
+        documentation = section_of(text, "Documentation")
+        targets = links(documentation)
+        self.assertTrue(targets, "plugin README: Documentation has no links")
+        for target in targets:
+            self.assertTrue(
+                target.startswith("../../docs/task-flow/"),
+                f"plugin README link {target!r} does not point into docs/task-flow/",
+            )
+            resolved = ((ROOT / PLUGIN_README).parent / target).resolve()
+            self.assertTrue(resolved.is_file(), f"plugin README: broken link {target}")
 
 
 if __name__ == "__main__":

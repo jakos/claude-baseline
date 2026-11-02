@@ -13,6 +13,12 @@ switch it off again, see [Rolling back](#rolling-back). It follows the same cont
 `agents/implementer.md` (that file's body is its system prompt, plus the Conventions of
 the plan's profiles).
 
+Optional and experimental: the implementer role can run on a per-token, non-Claude model
+through `plugins/task-flow/scripts/implement.py` — Mistral or any OpenAI-compatible host,
+or Anthropic through the native Messages API via `scripts/drivers.py` (so far only the
+Mistral API has been exercised) — while Claude still plans, checks and reviews. A
+`models.toml` turns it on.
+
 ## Billing modes
 
 What `billing` changes at run time: who pays, and what a failure does. Only the effects

@@ -33,6 +33,9 @@ What does **not** work, both tried:
   The same goes for `extraKnownMarketplaces` in a project's settings: it looks
   project-scoped and rewrites the same global file.
 
+This repository's own `.claude/task-flow.models.toml` is such a project file and holds no
+secrets, only the name of the key's environment variable.
+
 ## Reviewing this repo itself
 
 `@baseline-reviewer` — a project-scoped agent in `.claude/agents/`, so it exists only here
