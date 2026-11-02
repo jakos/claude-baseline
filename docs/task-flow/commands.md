@@ -2,6 +2,45 @@
 
 Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `bench/…` are inside `plugins/task-flow/`.
 
+## One task, start to finish
+
+One `/task-flow:task-run` from the request to the verdict: you approve the plan, the
+baseline check runs on the untouched base, then rounds 1–3 loop implement → gates →
+review until APPROVED, escalation or a stop.
+
+<!-- diagram:task-flow -->
+```mermaid
+flowchart TD
+  plan["plan: the planner writes plan.md"]
+  approve["approval: you; --auto skips it"]
+  base["baseline: checks-0.md"]
+  round["round 1-3: implement, gates, review"]
+  verdict{"verdict"}
+  approved["APPROVED"]
+  finish["/task-flow:task-finish"]
+  changes["CHANGES_REQUESTED"]
+  escalate["no progress or round 3: escalate to you (summary.md)"]
+  blocked["BLOCKED: stop"]
+  paused["failed external round (exit 1 or 2): paused"]
+  plan --> approve
+  approve --> base
+  base --> round
+  round --> verdict
+  verdict -->|"APPROVED"| approved
+  approved --> finish
+  verdict -->|"CHANGES_REQUESTED"| changes
+  changes -->|"next round, at most 3"| round
+  verdict -->|"no progress or round 3"| escalate
+  round -->|"BLOCKED"| blocked
+  round -->|"exit 1 or 2"| paused
+  paused -->|"same command reruns the round; not counted"| round
+```
+<!-- /diagram:task-flow -->
+
+The diagram cannot carry: the round cap and the no-progress rule are compared
+mechanically on the failing sets of two consecutive rounds; a failed external round
+leaves the phase `implementing`, so the same command runs it again.
+
 Plugin commands are namespaced, so each is `/task-flow:<name>`:
 
 | Command | What it does |

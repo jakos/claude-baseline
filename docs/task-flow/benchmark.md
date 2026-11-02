@@ -29,6 +29,42 @@ It spends model budget (and with `--review`, Claude limits too), so it is never 
 the gates — only its test is. See [bench/README.md](../../plugins/task-flow/bench/README.md) for the case
 format, all commands and flags, the run layout, isolation and safety, and the limits.
 
+## How a benchmark run works
+
+One `bench.py run` measures what an implementer profile costs per accepted task: each
+frozen case × profile × repeat drives up to three rounds of `scripts/implement.py`
+judged by `scripts/gates.py` in a scratch repository, then the case's hidden tests.
+
+```mermaid
+flowchart TD
+  cases["frozen cases: bench/cases/"]
+  profs["profiles from models.toml"]
+  reps["repeats"]
+  comb["case x profile x repeat"]
+  scratch["scratch repository exported from the base"]
+  rounds["up to 3 rounds: implement.py, gates.py judges"]
+  hidden["hidden tests from the case's result commit"]
+  results["results.jsonl"]
+  report["report.md"]
+  pub["save and publish"]
+  decision["decision: you set [roles] implementer"]
+  cases --> comb
+  profs --> comb
+  reps --> comb
+  comb --> scratch
+  scratch --> rounds
+  rounds --> hidden
+  hidden --> results
+  results --> report
+  report --> pub
+  pub --> decision
+```
+
+The diagram cannot carry: the scratch repository is exported from the case's base
+commit and has no history, so the implementer can never read the hidden tests from git;
+the decision at the end is yours — `[roles] implementer` in `models.toml` picks what the
+next real task uses.
+
 ## Re-running, adding a model and publishing
 
 Re-run when something measured changes — a new model, a new price or a new profile, or

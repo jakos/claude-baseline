@@ -14,7 +14,11 @@ every mapped heading occurs exactly once on its target page, every source headin
 mapped or kept, every stub links to its page, every relative link and anchor resolves,
 and the fenced code blocks are conserved. A later task that adds or removes a
 (non-Mermaid) code block under docs/ or in a README updates BLOCKS_AFTER in the same
-change; one that moves a heading updates MOVES and KEPT.
+change and names its own BLOCKS_ADDED entry (or increases an existing one) —
+docs-with-diagrams did that for the setup guide; one that moves a heading updates MOVES
+and KEPT. The diagram helpers (mermaid_blocks, diagram_block, diagram_nodes) pin the
+`<!-- diagram:... -->` markers and the Mermaid syntax subset; readme-front-page reuses
+diagram_block to copy the diagrams onto the front page.
 """
 
 import re
@@ -146,7 +150,7 @@ BLOCKS_AFTER = {
     "docs/dev-baseline.md": 6,
     "docs/development.md": 3,
     "docs/task-flow/overview.md": 2,
-    "docs/task-flow/setup.md": 3,
+    "docs/task-flow/setup.md": 8,
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 0,
     "docs/task-flow/configuration.md": 2,
@@ -157,6 +161,47 @@ BLOCKS_AFTER = {
     "docs/task-flow/releasing.md": 1,
     "docs/task-flow/benchmark.md": 2,
 }
+# Non-Mermaid fenced blocks added by later tasks, per file, on top of BLOCKS_BEFORE;
+# the conservation check in test_fenced_block_counts adds them. Added by the task
+# docs-with-diagrams: the five setup-guide blocks (two plugin-dir shells, two key-setting
+# shells, one models.toml example).
+BLOCKS_ADDED = {
+    "docs/task-flow/setup.md": 5,
+}
+# The pages that hold the `<!-- diagram:<name> -->` marker pairs; readme-front-page
+# copies the blocks between them onto the front page.
+DIAGRAM_SOURCES = {
+    "architecture": "docs/task-flow/overview.md",
+    "task-flow": "docs/task-flow/commands.md",
+}
+# Minimum count of Mermaid blocks per page (docs-with-diagrams drew six diagrams).
+MERMAID_MIN = {
+    "docs/task-flow/overview.md": 1,
+    "docs/task-flow/commands.md": 1,
+    "docs/task-flow/external-implementer.md": 3,
+    "docs/task-flow/benchmark.md": 1,
+}
+MAX_NODES = 12
+# The setup guide's section headings, in order.
+SETUP_HEADINGS = [
+    "What you need",
+    "Install",
+    "Starting Claude Code with the plugin directories",
+    "Permissions",
+    "Keep ANTHROPIC_API_KEY out of the Claude Code session",
+    "Mistral account and API key",
+    "Setting the key",
+    "models.toml for the external implementer",
+    "Doctor",
+    "First smoke test",
+    "Running a task and an autopilot run with the external implementer",
+    "What to look at in /usage",
+    "Troubleshooting",
+]
+# Repository paths that exist only at run time; the path check skips them. Each entry
+# needs its reason as a comment. None so far: every path named in the docs exists in the
+# repository.
+RUNTIME_PATHS = set()
 
 FENCE = re.compile(r"\s*(`{3,}|~{3,})\s*([^`\s]*)")
 HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*$")
@@ -236,6 +281,122 @@ def count_blocks(text):
         elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
             fence = None
     return count
+
+
+def fenced_blocks(text):
+    """[(info, body)] of the fenced blocks outside other fences, mermaid included."""
+    blocks = []
+    fence = None
+    info = ""
+    body = []
+    for line in text.splitlines():
+        m = FENCE.match(line)
+        if fence is None:
+            if m:
+                fence = (m.group(1)[0], len(m.group(1)))
+                info = m.group(2)
+                body = []
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+            blocks.append((info, "\n".join(body)))
+            fence = None
+        else:
+            body.append(line)
+    return blocks
+
+
+def outside_fences(text):
+    """The text with fenced blocks blanked but inline code kept."""
+    out = []
+    fence = None
+    for line in text.splitlines():
+        m = FENCE.match(line)
+        if fence is None:
+            if m:
+                fence = (m.group(1)[0], len(m.group(1)))
+                out.append("")
+                continue
+            out.append(line)
+        else:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            out.append("")
+    return "\n".join(out)
+
+
+def mermaid_blocks(text):
+    """Bodies of the fenced blocks whose info string is `mermaid`, in file order."""
+    return [body for info, body in fenced_blocks(text) if info == "mermaid"]
+
+
+def diagram_block(text, name):
+    """The Mermaid body between the `<!-- diagram:<name> -->` and
+    `<!-- /diagram:<name> -->` markers.
+
+    Raises ValueError unless each marker occurs exactly once, alone on its line, start
+    before end, with exactly one Mermaid block and only blank lines between them.
+    readme-front-page reuses this helper to copy the diagrams onto the front page.
+    """
+    start = f"<!-- diagram:{name} -->"
+    end = f"<!-- /diagram:{name} -->"
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.strip() == start]
+    ends = [i for i, line in enumerate(lines) if line.strip() == end]
+    if len(starts) != 1 or len(ends) != 1:
+        raise ValueError(f"diagram {name!r}: each marker must occur exactly once")
+    if starts[0] >= ends[0]:
+        raise ValueError(f"diagram {name!r}: the start marker must precede the end")
+    region = lines[starts[0] + 1 : ends[0]]
+    nonblank = [i for i, line in enumerate(region) if line.strip()]
+    if not nonblank:
+        raise ValueError(f"diagram {name!r}: no block between the markers")
+    first, last = nonblank[0], nonblank[-1]
+    open_m = FENCE.match(region[first])
+    if not open_m or open_m.group(2) != "mermaid":
+        raise ValueError(
+            f"diagram {name!r}: the block between the markers is not Mermaid"
+        )
+    close_m = FENCE.match(region[last])
+    if (
+        not close_m
+        or close_m.group(1)[0] != open_m.group(1)[0]
+        or len(close_m.group(1)) < len(open_m.group(1))
+        or close_m.group(2)
+    ):
+        raise ValueError(f"diagram {name!r}: the Mermaid block is not closed")
+    fences = [i for i, line in enumerate(region) if FENCE.match(line)]
+    if fences != [first, last]:
+        raise ValueError(f"diagram {name!r}: only blank lines around one Mermaid block")
+    blocks = mermaid_blocks("\n".join(region))
+    if len(blocks) != 1:
+        raise ValueError(
+            f"diagram {name!r}: exactly one Mermaid block between the markers"
+        )
+    return blocks[0]
+
+
+def diagram_nodes(block):
+    """The node ids of a Mermaid block: quoted strings and %% comments stripped, the
+    flowchart/subgraph/end/classDef/class lines skipped, and every id that is directly
+    followed by `[`, `(` or `{` collected."""
+    ids = set()
+    for line in block.splitlines():
+        code = re.sub(r'"[^"]*"', "", line.split("%%", 1)[0])
+        if re.match(r"^(flowchart|subgraph|end|classDef|class)\b", code.strip()):
+            continue
+        ids.update(re.findall(r"([A-Za-z][A-Za-z0-9_]*)(?=[\[\(\{])", code))
+    return ids
+
+
+def section_of(text, heading_text):
+    """The body of the one section whose heading is `heading_text`, up to the next one."""
+    spans = heading_spans(text)
+    starts = [i for i, _level, h in spans if h == heading_text]
+    if len(starts) != 1:
+        raise AssertionError(f"heading {heading_text!r} occurs {len(starts)} times")
+    lines = text.splitlines()
+    later = [i for i, _level, _h in spans if i > starts[0]]
+    end = min(later) if later else len(lines)
+    return "\n".join(lines[starts[0] + 1 : end])
 
 
 class DocsTest(unittest.TestCase):
@@ -358,7 +519,10 @@ class DocsTest(unittest.TestCase):
             self.assertEqual(
                 count_blocks(self.read(rel)), BLOCKS_AFTER[rel], f"block count {rel}"
             )
-        self.assertEqual(sum(BLOCKS_AFTER.values()), sum(BLOCKS_BEFORE.values()))
+        self.assertEqual(
+            sum(BLOCKS_AFTER.values()),
+            sum(BLOCKS_BEFORE.values()) + sum(BLOCKS_ADDED.values()),
+        )
 
     # --- AC8: helpers ------------------------------------------------------------------
 
@@ -427,6 +591,198 @@ class DocsTest(unittest.TestCase):
             self.assertIsNone(
                 SECRET.search(text), f"{page}: matches a secret-looking string"
             )
+
+    # --- AC1: diagram markers wrap exactly one Mermaid block ---------------------------
+
+    def test_diagram_markers_wrap_one_mermaid_block(self):
+        for name, source in DIAGRAM_SOURCES.items():
+            text = self.read(source)
+            for marker in (f"<!-- diagram:{name} -->", f"<!-- /diagram:{name} -->"):
+                found = [
+                    line
+                    for page in PAGES
+                    for line in self.read(page).splitlines()
+                    if line.strip() == marker
+                ]
+                self.assertEqual(found, [marker], f"{marker} must occur once in docs/")
+            body = diagram_block(text, name)
+            self.assertIn(body, mermaid_blocks(text))
+            self.assertTrue(body.lstrip().startswith("flowchart"))
+
+    def test_diagram_block_rejects_bad_markers(self):
+        good = (
+            '<!-- diagram:x -->\n```mermaid\nflowchart TD\n  a["b"]\n```\n'
+            "<!-- /diagram:x -->\n"
+        )
+        self.assertEqual(diagram_block(good, "x"), 'flowchart TD\n  a["b"]')
+        duplicated = (
+            "<!-- diagram:x -->\n<!-- diagram:x -->\n```mermaid\nflowchart TD\n```\n"
+            "<!-- /diagram:x -->\n"
+        )
+        with self.assertRaises(ValueError):
+            diagram_block(duplicated, "x")
+        missing_end = "<!-- diagram:x -->\n```mermaid\nflowchart TD\n```\n"
+        with self.assertRaises(ValueError):
+            diagram_block(missing_end, "x")
+        two_blocks = (
+            "<!-- diagram:x -->\n```mermaid\nflowchart TD\n```\n```mermaid\n"
+            "flowchart LR\n```\n<!-- /diagram:x -->\n"
+        )
+        with self.assertRaises(ValueError):
+            diagram_block(two_blocks, "x")
+        not_mermaid = "<!-- diagram:x -->\n```toml\n[roles]\n```\n<!-- /diagram:x -->\n"
+        with self.assertRaises(ValueError):
+            diagram_block(not_mermaid, "x")
+
+    # --- AC2: the required diagrams exist -----------------------------------------------
+
+    def test_required_diagrams_present(self):
+        for page, minimum in MERMAID_MIN.items():
+            self.assertGreaterEqual(
+                len(mermaid_blocks(self.read(page))),
+                minimum,
+                f"{page}: too few diagrams",
+            )
+
+    # --- AC3: every Mermaid block follows the conventions -------------------------------
+
+    def test_diagrams_follow_conventions(self):
+        for page in PAGES:
+            for block in mermaid_blocks(self.read(page)):
+                lines = block.splitlines()
+                self.assertIn(
+                    lines[0].strip(),
+                    ("flowchart TD", "flowchart LR"),
+                    f"{page}: first line",
+                )
+                self.assertLessEqual(
+                    len(diagram_nodes(block)), MAX_NODES, f"{page}: too many nodes"
+                )
+                for line in lines:
+                    if "%%{init" in line:
+                        self.fail(f"{page}: init directive in {line!r}")
+                    code = line.split("%%", 1)[0]
+                    self.assertIsNone(
+                        re.search(r"\bstyle\b|linkStyle|\bclick\b", code),
+                        f"{page}: forbidden directive in {line!r}",
+                    )
+                    for label in re.findall(r'"[^"]*"', code):
+                        self.assertNotRegex(label, "[<>]", f"{page}: {label!r}")
+                    remainder = re.sub(
+                        r'\(\["|\["|\{"', "", re.sub(r'"[^"]*"', '""', code)
+                    )
+                    self.assertIsNone(
+                        re.search(r"[\[{(]", remainder),
+                        f"{page}: unquoted label in {line!r}",
+                    )
+                if "planned" in block:
+                    self.assertIn("classDef planned", block, page)
+                    self.assertIn("stroke-dasharray", block, page)
+
+    def test_diagram_nodes_counts_ids_not_labels(self):
+        block = 'flowchart TD\n  a["x (y)"] --> b{"z"}\n  b -.-> c(["w"])'
+        self.assertEqual(diagram_nodes(block), {"a", "b", "c"})
+
+    # --- AC5: the setup guide covers its topics ------------------------------------------
+
+    def test_setup_guide_covers_required_topics(self):
+        page = "docs/task-flow/setup.md"
+        text = self.read(page)
+        page_headings = [h for _level, h in headings(text)]
+        self.assertEqual(
+            [h for h in page_headings if h in SETUP_HEADINGS], SETUP_HEADINGS
+        )
+        ps_blocks = [
+            body
+            for info, body in fenced_blocks(text)
+            if info == "powershell" and "CLAUDE_CODE_PLUGIN_DIRS" in body
+        ]
+        self.assertTrue(ps_blocks, "no powershell block with CLAUDE_CODE_PLUGIN_DIRS")
+        self.assertTrue(
+            any(
+                "dev-baseline" in b and "task-flow" in b and ";" in b for b in ps_blocks
+            ),
+            "the two plugin directories must be ; separated in the powershell block",
+        )
+        keep_out = section_of(
+            text, "Keep ANTHROPIC_API_KEY out of the Claude Code session"
+        )
+        self.assertIn("ANTHROPIC_API_KEY", keep_out)
+        for needle in (
+            "$env:MISTRAL_API_KEY",
+            "export MISTRAL_API_KEY",
+            ".claude/task-flow.models.toml",
+            "/task-flow:task-doctor",
+            "/usage",
+        ):
+            self.assertIn(needle, text, f"{page}: missing {needle!r}")
+        troubleshooting = section_of(text, "Troubleshooting")
+        table = [
+            line
+            for line in troubleshooting.splitlines()
+            if line.lstrip().startswith("|")
+        ]
+        separator = re.compile(r"^\|[\s\-|:]+\|$")
+        body_rows = [line for line in table if not separator.match(line.strip())][
+            1:
+        ]  # the first row is the header
+        self.assertGreaterEqual(
+            len(body_rows), 4, "the troubleshooting table needs 4 rows"
+        )
+        joined = "\n".join(body_rows)
+        for needle in ("MISTRAL_API_KEY", "600", "__pycache__", "refused"):
+            self.assertIn(needle, joined, f"troubleshooting table: missing {needle!r}")
+
+    # --- AC6: every slash command in the link scope has its skill ------------------------
+
+    def test_slash_commands_exist(self):
+        for rel in SCOPE:
+            for m in re.finditer(
+                r"/task-flow:([a-z][a-z0-9-]*)", outside_fences(self.read(rel))
+            ):
+                skill = (
+                    ROOT / "plugins" / "task-flow" / "skills" / m.group(1) / "SKILL.md"
+                )
+                self.assertTrue(skill.is_file(), f"{rel}: missing {skill}")
+
+    # --- AC7: every repository path in a code span under docs/ exists -------------------
+
+    def test_repo_paths_exist(self):
+        plugin_prefixes = (
+            "scripts/",
+            "tests/",
+            "bench/",
+            "skills/",
+            "agents/",
+            "templates/",
+        )
+        for page in sorted((ROOT / "docs").rglob("*.md")):
+            rel = page.relative_to(ROOT).as_posix()
+            text = outside_fences(page.read_text(encoding="utf-8"))
+            # R6: bare prefixes resolve inside the plugin the page declares as its base
+            # ("... are inside `plugins/<dir>/`"), plugins/task-flow/ by default.
+            base_m = re.search(r"are inside `(plugins/[a-z-]+)/`", text)
+            plugin_base = base_m.group(1) if base_m else "plugins/task-flow"
+            for m in re.finditer(r"`([^`\n]*)`", text):
+                for token in m.group(1).split():
+                    if (
+                        any(c in token for c in "<*…")
+                        or "..." in token
+                        or token.startswith("~")
+                        or token in RUNTIME_PATHS
+                    ):
+                        continue
+                    if token.startswith(("plugins/", ".claude/")):
+                        target = ROOT / token
+                    elif token.startswith(plugin_prefixes):
+                        target = ROOT / plugin_base / token
+                    else:
+                        continue
+                    self.assertTrue(target.exists(), f"{rel}: {token} does not exist")
+                    if token.endswith("/"):
+                        self.assertTrue(
+                            target.is_dir(), f"{rel}: {token} is not a directory"
+                        )
 
 
 if __name__ == "__main__":

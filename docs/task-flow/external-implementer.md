@@ -13,6 +13,109 @@ switch it off again, see [Rolling back](#rolling-back). It follows the same cont
 `agents/implementer.md` (that file's body is its system prompt, plus the Conventions of
 the plan's profiles).
 
+## Billing modes
+
+What `billing` changes at run time: who pays, and what a failure does. Only the effects
+the code has today are drawn — cost comes from the `price_*` keys in every mode, and
+`max_cost_usd` caps the whole run.
+
+```mermaid
+flowchart TD
+  subgraph subg["billing = subscription"]
+    claude["Claude roles and the Claude subagent"]
+    usage["at the plan limit Claude Code stops; check /usage"]
+    breaker["autopilot circuit breaker counts Claude tokens"]
+    claude --> usage
+    claude --> breaker
+  end
+  subgraph apig["billing = api"]
+    key["API key in the runner environment"]
+    retry["429 or 5xx: retries, then the fallback profiles"]
+    cap["max_cost_usd reached"]
+    key --> retry
+    key --> cap
+  end
+  subgraph loc["billing = local"]
+    nokey["no key; cost from price_* (0)"]
+    lretry["timeout or unreachable server: retries, then fallback"]
+    nokey --> lretry
+  end
+  exit1["exit 1: the round failed; it pauses or reruns"]
+  retry --> exit1
+  cap --> exit1
+  lretry --> exit1
+```
+
+The diagram cannot carry: the bench labels a `subscription` profile `subscription` in
+its cost columns and draws no cost bar for it.
+
+## Two cascades
+
+Where escalation exists today: only to you, the human. Escalation to a stronger model is
+not built.
+
+```mermaid
+flowchart TD
+  subgraph avail["availability cascade"]
+    prof["profile"]
+    retries["retries: 408, 429, 5xx, timeouts, connection errors"]
+    fb["fallback profiles, in order; a disabled one is skipped"]
+    unavail["all unavailable: exit 1"]
+    paused["paused: the same command reruns the round"]
+    prof --> retries
+    retries --> fb
+    fb --> unavail
+    unavail --> paused
+  end
+  subgraph qual["quality cascade"]
+    review["review: CHANGES_REQUESTED"]
+    next["next round on the same implementer"]
+    esc["round 3 or no progress: escalate to you"]
+    strong["stronger model (planned)"]
+    review --> next
+    next --> esc
+    review -.->|"planned"| strong
+  end
+  classDef planned stroke-dasharray: 5 5
+  class strong planned
+```
+
+The diagram cannot carry: after the retries of one profile the next `fallback` profile
+is tried within the same round; exit 1 or 2 leaves the phase `implementing`.
+
+## Local model (proof of concept)
+
+This is untested: no local server has been exercised (see
+[Limits, stated plainly](#limits-stated-plainly)). A profile for one would be
+`[profiles.local]` with `driver = "openai-loop"`, `base_url = "http://<host>:<port>/v1"`
+(your placeholders, written here in prose, not in a diagram label), the served `model`
+id, `billing = "local"` — which needs no `api_key_env` — and `enabled = false` until you
+opt in. The second machine runs an external local OpenAI-compatible server, e.g.
+llama.cpp's `llama-server` with a model file (an external tool, not part of this
+repository), behind an inbound firewall rule for the port (external: a Windows firewall
+cmdlet). Before the first round, check the server from the development machine:
+`/task-flow:task-doctor --online` sends one `GET <base_url>/models` per enabled profile
+in use, which for a local profile needs no key; if the server is llama.cpp, its
+`/health` endpoint is the equivalent external check.
+
+```mermaid
+flowchart TD
+  dev["dev machine: Claude Code and implement.py"]
+  prof["profile with billing = local"]
+  lan["LAN"]
+  win["second Windows machine"]
+  fw["inbound firewall rule for the port"]
+  srv["local OpenAI-compatible server and model file"]
+  health["health check: task-doctor --online"]
+  dev --> prof
+  dev --> lan
+  lan --> win
+  win --> fw
+  win --> srv
+  health -->|"GET base_url/models"| srv
+  dev -->|"before the first round"| health
+```
+
 ## Routing
 
 With `[roles] implementer = "<profile>"` in `models.toml`, `task-run`, `task-implement` and

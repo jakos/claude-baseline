@@ -2,6 +2,53 @@
 
 Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `bench/…` are inside `plugins/task-flow/`.
 
+## Architecture
+
+The roles in one Claude Code session exchange nothing but the task files in
+`.work/task-id/`; `models.toml` routes the implementer and the checker, and every
+implementer writes in the git worktree.
+
+<!-- diagram:architecture -->
+```mermaid
+flowchart TD
+  subgraph session["Claude Code session (subscription)"]
+    orch["orchestrator (main session)"]
+    planner["planner"]
+    reviewer["reviewer"]
+  end
+  files[".work/task-id/ task files"]
+  cfg["models.toml [roles]"]
+  sub["Claude subagent implementer"]
+  impl["implement.py"]
+  loop1["openai-loop (Mistral, OpenAI-compatible)"]
+  loop2["anthropic-loop (Claude API)"]
+  cli["agent CLI, e.g. Codex (planned)"]
+  gate["checker subagent or gates.py"]
+  wt["git worktree"]
+  orch -->|"reads and writes"| files
+  planner -->|"writes plan.md"| files
+  reviewer -->|"writes review-n.md"| files
+  cfg -->|"routes the implementer"| sub
+  cfg -->|"routes the implementer"| impl
+  cfg -->|"routes the checker"| gate
+  orch --> sub
+  orch --> impl
+  impl --> loop1
+  impl --> loop2
+  impl -.->|"planned"| cli
+  sub -->|"changes in"| wt
+  impl -->|"changes in"| wt
+  gate -->|"reads"| wt
+  gate -->|"writes checks-n.md"| files
+  classDef planned stroke-dasharray: 5 5
+  class cli planned
+```
+<!-- /diagram:architecture -->
+
+The diagram cannot carry: the API key of an external profile lives only in the runner's
+environment, never in `models.toml`; with `checker = "script"` the gate is
+`scripts/gates.py`, not the checker subagent; no agent-CLI driver is built yet.
+
 A multi-agent workflow for tasks and feature requests:
 
 ```
@@ -27,6 +74,8 @@ implementer role to a non-Claude model; see
 Each role is a separate subagent with a fresh context. They share nothing but files in
 `.work/<task-id>/`, so the reviewer sees the plan, the diff and the check results — never
 the implementer's reasoning.
+
+Installing and first-running the plugin is covered in [Setting up task-flow](setup.md).
 
 ## Layout
 
