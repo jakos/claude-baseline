@@ -53,7 +53,8 @@ max_cost_usd = 1.50
 price_input_per_mtok = 0.30
 price_cached_input_per_mtok = 0.007
 price_output_per_mtok = 1.20
+fallback = ["mistral-large"]
 
 [roles]
-implementer = "mistral-large"
+implementer = "deepseek-flash"
 reviewer = "claude:sonnet"
