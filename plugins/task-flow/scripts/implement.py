@@ -2,11 +2,14 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""Run ONE task-flow implementer round with an OpenAI-compatible chat model.
+"""Run ONE task-flow implementer round with an external model.
 
 The same contract as agents/implementer.md, for a model that is not a Claude subagent
-(the Mistral API, any OpenAI-compatible host, a local llama.cpp server). The script
-sends the implementer's instructions and the task files to the model, lets it work in the
+(the Mistral API, any OpenAI-compatible host, a local llama.cpp server, or Anthropic
+through the native Messages API). The provider-specific wire format lives in
+scripts/drivers.py (one driver per models.toml `driver`); this script keeps the retry,
+timeout, fallback, tool and staging logic. The script sends the implementer's
+instructions and the task files to the model, lets it work in the
 task's worktree through a small set of tools, then stages the result and logs it.
 
 Usage:
@@ -37,7 +40,9 @@ Progress goes to stderr. stdout gets exactly one line and the exit code says how
 
 Files written: <task-dir>/impl-<round>.json (metrics, after exit 0, 1 or 3; besides the
 keys documented in the plugin README it carries model_seconds, retry_wait_seconds,
-command_seconds, slowest_request and slowest_command, and every fallback_chain entry a
+command_seconds, slowest_request, slowest_command, cache_tokens (prompt-cache read and
+write tokens summed over all profiles; "tokens" itself stays input/cached/output) and
+every fallback_chain entry a
 retries list) and <task-dir>/impl-<round>.progress.jsonl (one compact JSON line per counted
 turn, appended as the round runs, so an interrupted round still shows its turns; it is
 scratch and is deleted at /task-finish, which keeps only impl-*.json); status.md is
@@ -50,9 +55,27 @@ as `__pycache__`; nothing is ever committed.
 Limits, stated plainly: commands the model runs are matched as text only (a script can
 still push or commit), they run without a shell (no pipes or redirects), their network
 access is not blocked, and only an allowlisted set of environment variables reaches them.
+On Windows a program that resolves to a `.cmd`/`.bat` file is started through
+`cmd.exe /d /s /c` with one quoted command line (see scripts/launch.py), and such a
+command is rejected if it contains `& | < > ^ % !` or a newline, inside quotes too.
 File tools are confined to the worktree and cannot write under .git or .work. The
 denial rules live in scripts/rules.py, shared with the guard.py hook; this script calls
 them with the external-implementer role.
+
+Two optional profile keys add feedback around the file tools. `post_edit` (a list of
+commands) runs after each *successful* `write_file`/`edit_file` call — not after
+`run_command` and not after a denied or failed write — with every literal `{path}`
+replaced by the written file's worktree-relative path, quoted for the platform. Each
+command runs through the same path as `run_command` (the same rules, no shell, the
+worktree as cwd, `command_timeout_seconds`, its duration counted in `command_seconds`),
+and its exit code and output (capped to 40 lines) are appended to that tool call's
+result; a denial, a missing program, a timeout or a non-zero exit is feedback text
+only and never fails, blocks or ends the round. `prompt_extras` (a list of files,
+`~` expanded, relative paths resolved against the repository root) is read in
+`prepare()` — a missing, unreadable or non-UTF-8 file refuses the round (exit 2,
+nothing sent) — and its contents are appended to the system prompt before the runner
+adapter section, so an extra file cannot override the adapter's rules. Without the
+two keys nothing changes.
 """
 
 import argparse
@@ -72,11 +95,14 @@ import urllib.request
 from pathlib import Path
 from typing import Self
 
+import drivers
 import models
+from launch import cmd_command_line, cmd_exe, is_cmd_script
 from rules import check_command, check_write
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_CAP = 20000
+POST_EDIT_MAX_LINES = 40
 GREP_MAX_MATCHES = 200
 LIST_MAX_ENTRIES = 500
 READ_DEFAULT_LIMIT = 2000
@@ -121,7 +147,9 @@ read_file, write_file, edit_file, list_files, grep, run_command and blocked.
 - File paths are relative to the worktree or absolute; both must stay inside the worktree.
 - run_command starts ONE program with arguments, without a shell: no pipes, redirects,
   `&&`, `;`, globbing or variable expansion. The working directory is the worktree. Use
-  it to run the plan's verification commands.
+  it to run the plan's verification commands. On Windows, a program that resolves to a
+  `.cmd`/`.bat` file (such as `npm` or `npx`) is started through `cmd.exe`, so such a
+  command must not contain `& | < > ^ % !` or a newline, inside quotes too.
 - When you are done, reply with a short final message and NO tool call. That ends the
   round. List the files you changed in that message.
 """
@@ -431,6 +459,7 @@ class Context:
         self.profile_name: str
         self.profiles: dict
         self.files: dict
+        self.extras: list
         self.heartbeat: float
         self.verbose: bool
         self.progress_path: Path
@@ -529,10 +558,32 @@ def prepare(args) -> Context:
             f"profile {name!r}: environment variable {profile['api_key_env']} is not set"
         )
     ctx.profile_name = name
+    ctx.extras = load_extras(ctx.repo_root, profile)
     ctx.heartbeat = args.heartbeat
     ctx.verbose = args.verbose
     ctx.progress_path = ctx.task_dir / f"impl-{ctx.round}.progress.jsonl"
     return ctx
+
+
+def load_extras(repo_root: Path, profile: dict) -> list:
+    """Read the profile's prompt_extras files: [(configured path, text)] in order.
+
+    `~` is expanded; a relative path resolves against the repository root (the
+    parent of the .work folder), not the worktree, so an untracked local file works.
+    A missing, unreadable or non-UTF-8 file refuses the round: a typo must not
+    silently drop part of the prompt.
+    """
+    extras = []
+    for configured in profile["prompt_extras"]:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            path = repo_root / path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise Refusal(f"prompt_extras: cannot read {configured}: {exc}") from exc
+        extras.append((configured, text))
+    return extras
 
 
 # ---------------------------------------------------------------------------- prompt
@@ -574,7 +625,7 @@ def conventions(profile: str) -> str | None:
     return (rest[: nxt.start()] if nxt else rest).strip()
 
 
-def build_system(plan_text: str) -> str:
+def build_system(plan_text: str, extras: list) -> str:
     parts = [implementer_body()]
     for name in plan_profiles(plan_text):
         section = conventions(name)
@@ -584,6 +635,8 @@ def build_system(plan_text: str) -> str:
             )
             continue
         parts.append(f"# Profile `{name}`\n\n{section}")
+    for configured, text in extras:
+        parts.append(f"# Extra instructions: {configured}\n\n{text}")
     parts.append(ADAPTER.strip())
     return "\n\n".join(parts)
 
@@ -615,6 +668,13 @@ def child_env() -> dict:
     return env
 
 
+def quote_path(path: str) -> str:
+    """Quote a worktree-relative, /-separated path for a command line on this platform."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([path])
+    return shlex.quote(path)
+
+
 class Tools:
     def __init__(
         self,
@@ -623,12 +683,14 @@ class Tools:
         touched: set[str],
         heartbeat: float = 0.0,
         on_command=None,
+        post_edit=(),
     ):
         self.root = worktree.resolve()
         self.command_timeout = command_timeout
         self.touched = touched
         self.heartbeat = heartbeat
         self.on_command = on_command
+        self.post_edit = list(post_edit)
         self.turn = 0
         self.last_command: float | None = None
 
@@ -697,7 +759,9 @@ class Tools:
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         self.touched.add(self.rel(path))
-        return f"wrote {len(content)} characters to {self.rel(path)}"
+        return self._with_post_edit(
+            f"wrote {len(content)} characters to {self.rel(path)}", self.rel(path)
+        )
 
     def edit_file(self, args):
         path = self.resolve(args.get("path"), write=True)
@@ -721,7 +785,50 @@ class Tools:
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(text.replace(old, new, 1))
         self.touched.add(self.rel(path))
-        return f"edited {self.rel(path)}"
+        return self._with_post_edit(f"edited {self.rel(path)}", self.rel(path))
+
+    def _with_post_edit(self, result: str, rel_path: str) -> str:
+        """Append the post_edit feedback of a successful write to its result."""
+        if not self.post_edit:
+            return result
+        feedback = self._run_post_edit(rel_path)
+        if feedback:
+            return f"{result}\n\n{feedback}"
+        return result
+
+    def _run_post_edit(self, rel_path: str) -> str:
+        """Run every post_edit command for the written file; return the feedback text.
+
+        Each command runs like run_command with every literal `{path}` replaced by
+        the written file's quoted worktree-relative path. Per command the feedback is
+        `post_edit: <command as run> (<outcome>)`, then its output capped to
+        POST_EDIT_MAX_LINES lines with a `...[<k> more lines]` marker. A denial, a
+        missing program, a timeout or a non-zero exit is feedback only; a command
+        that exits 0 with empty output appends nothing.
+        """
+        blocks = []
+        for command in self.post_edit:
+            as_run = command.replace("{path}", quote_path(rel_path))
+            try:
+                head, output, _timed_out = self._execute(as_run)
+            except ToolError as exc:
+                blocks.append(f"post_edit: {as_run} ({exc})")
+                continue
+            if head == "exit code: 0" and not output.strip():
+                continue
+            outcome = (
+                f"exit code {head[len('exit code: ') :]}"
+                if head.startswith("exit code: ")
+                else head
+            )
+            lines = output.splitlines()
+            if len(lines) > POST_EDIT_MAX_LINES:
+                shown = "\n".join(lines[:POST_EDIT_MAX_LINES])
+                body = f"{shown}\n...[{len(lines) - POST_EDIT_MAX_LINES} more lines]"
+            else:
+                body = output
+            blocks.append(f"post_edit: {as_run} ({outcome})\n{body}")
+        return "\n\n".join(blocks)
 
     def list_files(self, args):
         base = self.resolve(args.get("path", "."))
@@ -794,6 +901,18 @@ class Tools:
         command = self.text_arg(args, "command").strip()
         if not command:
             raise ToolError("error: command is empty")
+        head, output, _timed_out = self._execute(command)
+        return f"{head}\n{output}"
+
+    def _execute(self, command: str) -> tuple[str, str, bool]:
+        """Run one command without a shell in the worktree, like run_command does.
+
+        Returns (head, output, timed_out), where head is `exit code: <n>` or
+        `timed out after <s> s and was killed`. Raises ToolError for a denial, an
+        unparsable command, a missing program or a failed start. The duration is
+        recorded through on_command and last_command, so a post_edit command counts
+        in command_seconds / slowest_command exactly like a run_command call.
+        """
         reason = check_command(command, "external-implementer")
         if reason is not None:
             raise ToolError(f"denied: {reason}")
@@ -811,12 +930,13 @@ class Tools:
                 found = self.find_program(first, env)
                 if not found:
                     raise ToolError(f"error: program not found: {first}")
-                if found.lower().endswith((".cmd", ".bat")):
-                    raise ToolError(
-                        f"error: {first} is a .cmd/.bat script, which cannot be started "
-                        "without a shell"
-                    )
-                argv = subprocess.list2cmdline([found]) + rest
+                if is_cmd_script(found):
+                    try:
+                        argv = cmd_command_line(found, rest, cmd_exe(env))
+                    except ValueError as exc:
+                        raise ToolError(f"error: {exc}") from None
+                else:
+                    argv = subprocess.list2cmdline([found]) + rest
             else:
                 argv = shlex.split(command)
                 found = self.find_program(argv[0], env)
@@ -857,7 +977,7 @@ class Tools:
             if timed_out
             else f"exit code: {proc.returncode}"
         )
-        return f"{head}\n{text}"
+        return head, text, timed_out
 
     def execute(self, name: str, args) -> tuple[str, str | None]:
         """Run a tool; returns (result text, blocked reason or None)."""
@@ -908,7 +1028,8 @@ def is_timeout(exc: BaseException) -> bool:
 def post(
     profile: dict, key: str | None, body: dict, attempts: list | None = None
 ) -> dict:
-    """POST one chat completion; retry retryable failures per the profile.
+    """POST one request to the profile's driver endpoint; retry retryable failures
+    per the profile.
 
     When `attempts` is a list, every attempt is recorded in it as
     {"seconds", "outcome", "wait"}: "outcome" is "ok" or the retry reason ("HTTP <code>",
@@ -916,11 +1037,10 @@ def post(
     followed the attempt (0.0 for the last one). The list is filled also when Unavailable
     or Fatal is raised.
     """
-    url = profile["base_url"].rstrip("/") + "/chat/completions"
+    driver = drivers.get(profile["driver"])
+    url = driver.url(profile)
     data = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
+    headers = driver.headers(key)
     retries = profile["retries"]
     last = "no attempt made"
     for attempt in range(retries + 1):
@@ -992,16 +1112,12 @@ def post(
     raise Unavailable(f"{last} after {retries + 1} attempts")
 
 
-def as_int(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 class Session:
     def __init__(self, ctx: Context, started: float):
         self.ctx = ctx
         self.round_started = started
         self.start = ctx.profiles[ctx.profile_name]
-        self.system = build_system(ctx.files[ctx.task_dir / "plan.md"])
+        self.system = build_system(ctx.files[ctx.task_dir / "plan.md"], ctx.extras)
         self.user = build_user(ctx)
         self.usage: dict[str, dict] = {}
         self.chain: list[dict] = []
@@ -1019,9 +1135,14 @@ class Session:
         total = 0.0
         for name, tokens in self.usage.items():
             p = self.ctx.profiles[name]
+            write_price = p["price_cache_write_per_mtok"]
+            if write_price is None:
+                write_price = p["price_input_per_mtok"]
             total += (
-                (tokens["input"] - tokens["cached"]) * p["price_input_per_mtok"]
+                (tokens["input"] - tokens["cached"] - tokens["cache_write"])
+                * p["price_input_per_mtok"]
                 + tokens["cached"] * p["price_cached_input_per_mtok"]
+                + tokens["cache_write"] * write_price
                 + tokens["output"] * p["price_output_per_mtok"]
             ) / 1e6
         return total
@@ -1033,6 +1154,14 @@ class Session:
                 total[field] += tokens[field]
         return total
 
+    def cache_tokens(self) -> dict:
+        """Prompt-cache read and write tokens summed over all profiles."""
+        total = {"read": 0, "write": 0}
+        for tokens in self.usage.values():
+            total["read"] += tokens["cached"]
+            total["write"] += tokens["cache_write"]
+        return total
+
     def settings(self) -> dict:
         p = self.ctx.profiles[self.active]
         return {
@@ -1041,37 +1170,28 @@ class Session:
             "extra_body": p["extra_body"],
         }
 
-    def body(self, profile: dict, messages: list) -> dict:
-        body = {
-            "model": profile["model"],
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto",
-        }
-        if profile["temperature"] is not None:
-            body["temperature"] = profile["temperature"]
-        if profile["max_output_tokens"] is not None:
-            body["max_tokens"] = profile["max_output_tokens"]
-        body.update(profile["extra_body"] or {})
-        return body
+    def body(self, profile: dict, conversation: list) -> dict:
+        """The request body for this profile's driver (see scripts/drivers.py)."""
+        return drivers.get(profile["driver"]).body(
+            profile, self.system, conversation, TOOLS
+        )
 
-    def account(self, name: str, usage) -> dict:
+    def account(self, name: str, payload) -> dict:
         """Add one response's usage to the profile's totals; return this call's tokens."""
-        usage = usage if isinstance(usage, dict) else {}
-        entry = self.usage.setdefault(name, {"input": 0, "cached": 0, "output": 0})
-        prompt = as_int(usage.get("prompt_tokens"))
-        details = usage.get("prompt_tokens_details")
-        cached = (
-            as_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+        profile = self.ctx.profiles[name]
+        usage = drivers.get(profile["driver"]).usage(payload)
+        entry = self.usage.setdefault(
+            name, {"input": 0, "cached": 0, "cache_write": 0, "output": 0}
         )
         turn = {
-            "input": prompt,
-            "cached": min(cached, prompt),
-            "output": as_int(usage.get("completion_tokens")),
+            "input": usage["input"],
+            "cached": usage["cached"],
+            "output": usage["output"],
         }
         entry["input"] += turn["input"]
         entry["cached"] += turn["cached"]
         entry["output"] += turn["output"]
+        entry["cache_write"] += usage["cache_write"]
         return turn
 
     def note_attempts(self, name: str, attempts: list, turn: int) -> None:
@@ -1176,6 +1296,7 @@ class Session:
             self.touched,
             heartbeat=self.ctx.heartbeat,
             on_command=self.record_command,
+            post_edit=profile["post_edit"],
         )
         user = self.user
         if interrupted:
@@ -1184,10 +1305,8 @@ class Session:
                 f"({interrupted[1]}). The worktree may already hold partial changes; "
                 "inspect it before continuing and do not redo finished work."
             )
-        messages = [
-            {"role": "system", "content": self.system},
-            {"role": "user", "content": user},
-        ]
+        driver = drivers.get(profile["driver"])
+        conversation = driver.start(self.system, user)
         key = models.api_key(profile)
         cap = self.start["max_cost_usd"]
         turns = 0
@@ -1209,7 +1328,7 @@ class Session:
                 try:
                     with Heartbeat(self.ctx.heartbeat, f"waiting for {name}"):
                         payload = post(
-                            profile, key, self.body(profile, messages), attempts
+                            profile, key, self.body(profile, conversation), attempts
                         )
                 except Unavailable as exc:
                     self.note_attempts(name, attempts, self.turns + 1)
@@ -1223,9 +1342,7 @@ class Session:
                 turns += 1
                 self.turns += 1
                 tools.turn = self.turns
-                turn_tokens = self.account(
-                    name, payload.get("usage") if isinstance(payload, dict) else None
-                )
+                turn_tokens = self.account(name, payload)
                 if cap is not None and self.cost() > cap:
                     return (
                         "failed",
@@ -1243,45 +1360,32 @@ class Session:
                         ),
                     )
                 try:
-                    message = payload["choices"][0]["message"]
-                    calls = message.get("tool_calls") or []
-                    content = message.get("content")
-                except (KeyError, IndexError, TypeError, AttributeError):
-                    return "failed", f"{name}: malformed response from the model"
-                if self.ctx.verbose and isinstance(content, str) and content.strip():
-                    log(f"turn {self.turns} text: {one_line(content, 500)}")
+                    reply = driver.read(payload)
+                except drivers.Malformed as exc:
+                    return "failed", f"{name}: {exc}"
+                if reply.refused:
+                    return (
+                        "failed",
+                        f"{name}: the model refused the request (stop_reason refusal)",
+                    )
+                if (
+                    self.ctx.verbose
+                    and isinstance(reply.text, str)
+                    and reply.text.strip()
+                ):
+                    log(f"turn {self.turns} text: {one_line(reply.text, 500)}")
                 prefix = (
                     f"turn {self.turns} ({request_seconds:.1f} s, "
                     f"{fmt_tokens(turn_tokens['input'])} in / "
                     f"{fmt_tokens(turn_tokens['output'])} out, "
                     f"${self.cost():.4f} total)"
                 )
-                if not calls:
+                if not reply.calls:
                     log(f"{prefix}: final message")
                     return "ok", "finished"
-                assistant = {"role": "assistant", "content": content, "tool_calls": []}
                 results = []
-                for call in calls:
-                    try:
-                        call_id = str(call["id"])
-                        function = call["function"]
-                        tool_name = function["name"]
-                        raw = function.get("arguments") or "{}"
-                    except (KeyError, TypeError):
-                        return "failed", f"{name}: malformed tool call from the model"
+                for call_id, tool_name, raw in reply.calls:
                     turn_tools.append(tool_name)
-                    assistant["tool_calls"].append(
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "arguments": raw
-                                if isinstance(raw, str)
-                                else json.dumps(raw),
-                            },
-                        }
-                    )
                     try:
                         arguments = json.loads(raw) if isinstance(raw, str) else raw
                     except ValueError:
@@ -1298,11 +1402,8 @@ class Session:
                         log(f"{prefix}: {tool_name} -> {one_line(result, 80)}")
                     if blocked is not None:
                         return "blocked", blocked
-                    results.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": result}
-                    )
-                messages.append(assistant)
-                messages.extend(results)
+                    results.append((call_id, result))
+                driver.append(conversation, reply, results)
             finally:
                 if counted:
                     self.write_progress(
@@ -1350,6 +1451,7 @@ def write_metrics(
         "model": profile["model"],
         "turns": session.turns,
         "tokens": session.tokens(),
+        "cache_tokens": session.cache_tokens(),
         "cost_usd": round(session.cost(), 6),
         "duration_seconds": round(time.monotonic() - started, 3),
         "status": status,
@@ -1378,6 +1480,11 @@ def main(argv=None) -> int:
     except GitError as exc:
         print(f"refused: {one_line(exc)}")
         return 2
+
+    start = ctx.profiles[ctx.profile_name]
+    watched = {n: ctx.profiles[n] for n in [ctx.profile_name, *start["fallback"]]}
+    for line in models.warnings(watched):
+        log(f"warning: {line}")
 
     started = time.monotonic()
     try:

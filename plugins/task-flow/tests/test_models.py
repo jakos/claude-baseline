@@ -123,6 +123,48 @@ class ModelsTest(unittest.TestCase):
                 )
                 self.assertRejected(text + "\n" + line + "\n", needle)
 
+    def test_post_edit_and_prompt_extras_load_and_show(self):
+        self.project(
+            BASE
+            + 'post_edit = ["uvx ruff format {path}"]\nprompt_extras = ["AGENTS.md"]\n'
+        )
+        profiles, _roles = models.load(self.repo)
+        profile = profiles["mistral"]
+        self.assertEqual(profile["post_edit"], ["uvx ruff format {path}"])
+        self.assertEqual(profile["prompt_extras"], ["AGENTS.md"])
+        text = models.show_text(profile)
+        self.assertIn('post_edit = ["uvx ruff format {path}"]', text)
+        self.assertIn('prompt_extras = ["AGENTS.md"]', text)
+
+    def test_post_edit_and_prompt_extras_default_to_empty_lists(self):
+        self.project(BASE)
+        profile = models.load(self.repo)[0]["mistral"]
+        self.assertEqual(profile["post_edit"], [])
+        self.assertEqual(profile["prompt_extras"], [])
+
+    def test_post_edit_and_prompt_extras_invalid_values_rejected(self):
+        cases = {
+            'post_edit = "x"': "profiles.mistral.post_edit",
+            'post_edit = [""]': "profiles.mistral.post_edit",
+            "post_edit = [1]": "profiles.mistral.post_edit",
+            'prompt_extras = "a.md"': "profiles.mistral.prompt_extras",
+            'prompt_extras = [""]': "profiles.mistral.prompt_extras",
+        }
+        for line, needle in cases.items():
+            with self.subTest(line=line):
+                self.assertRejected(
+                    BASE + line + "\n", needle, "must be a list of non-empty strings"
+                )
+
+    def test_project_list_replaces_user_list(self):
+        self.user(BASE + 'post_edit = ["a {path}"]\nprompt_extras = ["a.md"]\n')
+        self.project(
+            '[profiles.mistral]\npost_edit = ["b {path}"]\nprompt_extras = ["b.md"]\n'
+        )
+        profile = models.load(self.repo)[0]["mistral"]
+        self.assertEqual(profile["post_edit"], ["b {path}"])
+        self.assertEqual(profile["prompt_extras"], ["b.md"])
+
     def test_required_keys(self):
         self.assertRejected(
             '[profiles.x]\ndriver = "openai-loop"\n', "profiles.x.base_url", "required"
@@ -333,6 +375,58 @@ class ModelsTest(unittest.TestCase):
         profile = next(iter(raw["profiles"].values()))
         self.assertEqual(set(profile), set(models.PROFILE_KEYS))
         self.assertEqual(set(raw["roles"]), set(models.ROLES))
+        self.assertEqual(set(raw["gates"]), set(models.GATES_KEYS))
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+
+    def test_gates_default_timeout(self):
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+        self.assertEqual(
+            models.gates(None), {"command_timeout_seconds": 600}
+        )  # user file only, absent
+        self.user("[gates]\ncommand_timeout_seconds = 300\n")
+        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 300})
+        self.assertEqual(models.gates(None), {"command_timeout_seconds": 300})
+
+    def test_gates_project_overrides_user(self):
+        self.user("[gates]\ncommand_timeout_seconds = 300\n")
+        self.project("[gates]\ncommand_timeout_seconds = 120\n")
+        self.assertEqual(models.gates(self.repo)["command_timeout_seconds"], 120)
+        # a project file without [gates] keeps the user value
+        self.project('[roles]\nchecker = "script"\n')
+        self.assertEqual(models.gates(self.repo)["command_timeout_seconds"], 300)
+        self.assertEqual(models.load(self.repo)[1], {"checker": "script"})
+
+    def test_gates_invalid_values_rejected(self):
+        cases = [
+            ("[gates]\ncommand_timeout_seconds = 0\n", "gates.command_timeout_seconds"),
+            (
+                "[gates]\ncommand_timeout_seconds = -5\n",
+                "gates.command_timeout_seconds",
+            ),
+            (
+                '[gates]\ncommand_timeout_seconds = "x"\n',
+                "gates.command_timeout_seconds",
+            ),
+            (
+                "[gates]\ncommand_timeout_seconds = true\n",
+                "gates.command_timeout_seconds",
+            ),
+            ("[gates]\ncommand_timeout_seconds = 1.5\nok = 1\n", "gates.ok"),
+            ("[gates]\nbogus = 1\n", "gates.bogus"),
+            ("gates = 5\n", "gates: must be a table"),
+        ]
+        for text, needle in cases:
+            with self.subTest(text=text):
+                path = self.project(text)
+                for call in (
+                    lambda: models.gates(self.repo),
+                    lambda: models.load(self.repo),
+                ):
+                    with self.assertRaises(models.ConfigError) as ctx:
+                        call()
+                    message = str(ctx.exception)
+                    self.assertIn(str(path), message)
+                    self.assertIn(needle, message)
 
     def test_template_roles_match_agent_frontmatter(self):
         raw = tomllib.loads(TEMPLATE.read_text(encoding="utf-8"))
@@ -344,6 +438,137 @@ class ModelsTest(unittest.TestCase):
             )
             frontmatter_model = model_line.split(":", 1)[1].strip()
             self.assertEqual(value, f"claude:{frontmatter_model}", role)
+
+    # ------------------------------------------------------------- anthropic-loop
+
+    ANTHROPIC = """
+[profiles.claude]
+driver = "anthropic-loop"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-haiku-5-5"
+api_key_env = "TASK_FLOW_ANTHROPIC_KEY"
+billing = "api"
+"""
+
+    def test_anthropic_driver_accepted(self):
+        self.project(self.ANTHROPIC)
+        profiles, _roles = models.load(self.repo)
+        profile = profiles["claude"]
+        self.assertEqual(profile["driver"], "anthropic-loop")
+        self.assertEqual(profile["max_tokens_param"], "max_tokens")
+        self.assertIsNone(profile["price_cache_write_per_mtok"])
+        self.assertIsNone(profile["temperature"])
+
+    def test_anthropic_rejects_temperature(self):
+        self.assertRejected(
+            self.ANTHROPIC + "temperature = 0.7\n", "profiles.claude.temperature"
+        )
+
+    def test_extra_body_reserved_keys_per_driver(self):
+        for key in ("system", "max_tokens", "stream", "temperature", "top_p", "top_k"):
+            with self.subTest(key=key):
+                self.assertRejected(
+                    self.ANTHROPIC + f"extra_body = {{ {key} = 1 }}\n",
+                    "profiles.claude.extra_body",
+                    "reserved",
+                )
+        # system and max_tokens are still accepted on openai-loop
+        self.project(BASE + 'extra_body = { system = "x", max_tokens = 5 }\n')
+        profiles, _roles = models.load(self.repo)
+        self.assertEqual(
+            profiles["mistral"]["extra_body"], {"system": "x", "max_tokens": 5}
+        )
+        # a project-file extra_body is checked against a driver set in the user file
+        self.user(
+            BASE.replace('driver = "openai-loop"', 'driver = "anthropic-loop"').replace(
+                "api.mistral.ai", "api.anthropic.com"
+            )
+        )
+        self.project('[profiles.mistral]\nextra_body = { system = "x" }\n')
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.load(self.repo)
+        message = str(ctx.exception)
+        self.assertIn("profiles.mistral.extra_body", message)
+        self.assertIn("reserved", message)
+
+    def test_max_tokens_param_validated(self):
+        self.assertRejected(BASE + 'max_tokens_param = "tokens"\n', "max_tokens_param")
+        # max_completion_tokens is valid on openai-loop ...
+        self.project(BASE + 'max_tokens_param = "max_completion_tokens"\n')
+        profiles, _roles = models.load(self.repo)
+        self.assertEqual(
+            profiles["mistral"]["max_tokens_param"], "max_completion_tokens"
+        )
+        # ... but rejected on anthropic-loop, whose default is max_tokens
+        self.assertRejected(
+            self.ANTHROPIC + 'max_tokens_param = "max_completion_tokens"\n',
+            "profiles.claude.max_tokens_param",
+        )
+        self.project(self.ANTHROPIC)
+        self.assertEqual(
+            models.load(self.repo)[0]["claude"]["max_tokens_param"], "max_tokens"
+        )
+
+    def test_price_cache_write_key(self):
+        self.assertRejected(
+            BASE + "price_cache_write_per_mtok = -1\n", "price_cache_write_per_mtok"
+        )
+        self.project(BASE + "price_cache_write_per_mtok = 0.125\n")
+        profiles, _roles = models.load(self.repo)
+        self.assertEqual(profiles["mistral"]["price_cache_write_per_mtok"], 0.125)
+        self.project(BASE)
+        self.assertIsNone(
+            models.load(self.repo)[0]["mistral"]["price_cache_write_per_mtok"]
+        )
+
+    def test_warnings_for_anthropic_api_key_env(self):
+        self.project(self.ANTHROPIC + BASE)
+        profiles, _roles = models.load(self.repo)
+        self.assertEqual(models.warnings(profiles), [])
+        self.project(
+            self.ANTHROPIC.replace(
+                'api_key_env = "TASK_FLOW_ANTHROPIC_KEY"',
+                'api_key_env = "ANTHROPIC_API_KEY"',
+            )
+            + BASE
+        )
+        profiles, _roles = models.load(self.repo)
+        lines = models.warnings(profiles)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("profiles.claude", lines[0])
+        self.assertIn("ANTHROPIC_API_KEY", lines[0])
+        self.assertIn("subscription", lines[0])
+
+    def test_show_warns_on_anthropic_api_key_env(self):
+        self.project(
+            self.ANTHROPIC.replace(
+                'api_key_env = "TASK_FLOW_ANTHROPIC_KEY"',
+                'api_key_env = "ANTHROPIC_API_KEY"',
+            )
+        )
+        env = {k: v for k, v in os.environ.items() if k != "MISTRAL_API_KEY"}
+        env["HOME"] = env["USERPROFILE"] = str(self.home)
+        env["ANTHROPIC_API_KEY"] = "sk-ant-very-secret"
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "show", "claude"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            cwd=self.repo,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("ANTHROPIC_API_KEY", done.stderr)
+        self.assertIn("subscription", done.stderr)
+        self.assertIn("api_key: set", done.stdout)
+        self.assertNotIn("sk-ant-very-secret", done.stdout + done.stderr)
+        # a profile with another variable name gives no warning
+        self.project(self.ANTHROPIC)
+        quiet = self.run_show("claude")
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertEqual(quiet.stderr, "")
 
 
 if __name__ == "__main__":

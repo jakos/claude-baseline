@@ -14,15 +14,22 @@
 ### python, docs, config, generic
 ```
 uv run --script plugins/task-flow/tests/test_autopilot.py
+uv run --script plugins/task-flow/tests/test_bench.py
+uv run --script plugins/task-flow/tests/test_bench_publish.py
+uv run --script plugins/task-flow/tests/test_docs.py
+uv run --script plugins/task-flow/tests/test_doctor.py
+uv run --script plugins/task-flow/tests/test_drivers.py
+uv run --script plugins/task-flow/tests/test_gates.py
 uv run --script plugins/task-flow/tests/test_guard.py
 uv run --script plugins/task-flow/tests/test_implement.py
+uv run --script plugins/task-flow/tests/test_launch.py
 uv run --script plugins/task-flow/tests/test_models.py
 uv run --script plugins/task-flow/tests/test_prune_task.py
 uv run --script plugins/task-flow/tests/test_release.py
 uv run --script plugins/task-flow/tests/test_rules.py
 uv run --script plugins/task-flow/tests/test_task_list.py
-uvx ruff check plugins/task-flow/scripts plugins/task-flow/tests
-uvx ruff format --check plugins/task-flow/scripts plugins/task-flow/tests
+uvx ruff check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
+uvx ruff format --check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
 claude plugin validate .
 ```
 

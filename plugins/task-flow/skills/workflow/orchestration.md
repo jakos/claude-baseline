@@ -56,9 +56,9 @@ show its stderr and end the command without changing `status.md` — a precondit
 stop. Pass a role's subagent call the `model` argument when that role's `model` is not
 null, and no `model` when it is null (the agent's frontmatter model then applies). With no
 `models.toml`, every role is `{"kind": "claude", "model": null, "value": "claude"}` and
-nothing changes. `[roles] checker = "script"` is refused as a precondition with the same
-handling as exit 2, with the message: `[roles] checker = "script"` is reserved for a later
-task-flow version — never a silent fallback to the Claude checker.
+nothing changes. A `checker` entry of kind `script` means `scripts/gates.py` runs in
+Phase baseline and Phase check (see those phases): never the checker subagent, and never
+a silent fallback to it either way — kind `claude` always runs `task-flow:checker`.
 
 ## Phase: new
 
@@ -99,9 +99,16 @@ task-flow version — never a silent fallback to the Claude checker.
    fail, `git switch -c task/<id>` in the repository root and record `worktree: none`.
    If the root has uncommitted changes and there is no worktree, stop and ask (a
    precondition, not a stop).
-3. Set round 0, phase `baseline`. Run subagent `task-flow:checker` with round 0 (its model
-   as in "Choosing each role's model"). It runs
-   the plan's verification commands on the untouched base and writes `checks-0.md`.
+3. Set round 0, phase `baseline`. When the `checker` entry of `models.py roles` (as in
+   "Choosing each role's model") has kind `script`: from the repository root, in the
+   background, run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/gates.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round 0`
+   and wait. Exit 0: continue exactly as after the checker subagent — show the table from
+   `checks-0.md`; the History line names `checker: script`. Exit 2: show stderr and end
+   the command without changing `status.md` (a precondition, not a stop; the same command
+   resumes). Otherwise run subagent `task-flow:checker` with round 0 (its model as in
+   "Choosing each role's model"). It runs the plan's verification commands on the
+   untouched base and writes `checks-0.md`.
 4. Failures in `checks-0.md` do not stop the run. They are recorded; continue to round 1.
 
 On re-entry (`/task-flow:task-check` at round 0, or resuming from phase `baseline`) run
@@ -141,7 +148,12 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 
 ## Phase: check (round n)
 
-Phase `checking`. Run subagent `task-flow:checker` (its model as in "Choosing each role's
+Phase `checking`. When the `checker` entry of `models.py roles` has kind `script`, run
+`scripts/gates.py` exactly as in Phase baseline step 3 but with `--round <n>`: exit 0
+continues (show the table from `checks-<n>.md`; the History line names `checker:
+script`), exit 2 shows stderr and ends the command without changing `status.md` (a
+precondition, not a stop; the same command resumes). Otherwise run subagent
+`task-flow:checker` (its model as in "Choosing each role's
 model"). It writes `checks-<n>.md`. When the
 current round is 0 (approved, no round run yet), run **Phase: baseline** instead.
 
@@ -210,6 +222,7 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 - planning-tokens: <integer> | unknown
 - continue-past: none | <task-id>, <task-id>
 - bootstrap: none | <task-id>
+- source: backlog | tasks
 - state: gathering | planning | ready | running | paused | stopped | done
 ## Tasks
 | # | Task | Depends on | Tokens used | External USD |
@@ -222,14 +235,19 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 
 `Depends on` is `-` or comma-separated ids of earlier rows. `Tokens used` is the sum of
 `total_tokens` of every subagent run for that task after approval (checker, implementer,
-reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a figure (sticky). The
-optional fifth column `External USD` is written when `models.py roles` reports implementer
-kind `profile` at Gather, and is otherwise absent, so runs without `models.toml` keep
-today's 4-column format; if it is missing when a cost must be recorded, add it to the
-header and every row with `0`. Its values are a decimal USD sum, or `unknown` (sticky)
-when an `impl-<n>.json` that should exist is missing or unreadable. `budget` is Claude
-tokens. `bootstrap`
-names the bootstrap task; it is row 1 and every other row depends on it directly.
+reviewer; Claude subagent runs only), an integer, or `unknown` once any result lacked a
+figure (sticky). The optional fifth column `External USD` is written when `models.py
+roles` reports implementer kind `profile` at Gather, and is otherwise absent, so runs
+without `models.toml` keep today's 4-column format; if it is missing when a cost must
+be recorded, add it to the header and every row with `0`. Its values are a USD sum in
+plain decimal notation, never scientific notation — write `0.000012`, not `1.2e-05` (6
+decimal places are enough, because `implement.py` rounds `cost_usd` to 6; `autopilot.py`
+accepts either notation when reading) — or `unknown` (sticky) when an `impl-<n>.json`
+that should exist is missing or unreadable. `budget` is Claude tokens. `bootstrap` names
+the bootstrap task; it is row 1 and every other row depends on it directly. `source` is
+optional and absent means `backlog`; `tasks` marks a run built from an explicit
+`--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`, row 1
+depending on `-`, and every later row depending on exactly the previous row.
 
 1. **Preconditions** (new run only, before anything is written). Refuse, saying why, when
    `.claude/task-flow.md` sets `worktree: no` or `Finish → commit` to anything but `yes`
@@ -308,8 +326,10 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
    and obey it exactly; never pick another task or stop on your own judgment.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
-     `status.md` `base:` to `task/<id>` of the last `done` task of this run in table order,
-     or the run's base if none; then follow The loop for that task from its current phase.
+     `status.md` `base:` to the output of
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" base .work/_autopilot/<run-id> <id>`
+     (that is `task/<id>` of the last `done` row of this run in table order, or the run's
+     base if none); then follow The loop for that task from its current phase.
      Every within-task stop (BLOCKED, APPROVED, no progress, round cap) and "never stop
      early" apply unchanged and end only that task. On `review-approved` follow Phase:
      finish steps 1–4, 6 and 7, and replace step 5 with: no push, no PR, keep the worktree,
@@ -318,16 +338,20 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
      an external implementer round (Phase: implement, step 3d) adds nothing to it. After
      each external implementer round that exits 0, 1 or 3, read
      `.work/<id>/impl-<n>.json` and add its `cost_usd` to the task's `External USD`
-     (exit 2 adds nothing — a stale file from an earlier attempt may exist; if the column
-     is absent, add it to the header and every row with `0` first), and record the
-     History line `implementer <profile>: <cost_usd> USD external`. If an
-     external round ends with exit 1 or 2, set state `paused` (also with `--auto`), show
-     the line and append the History line `paused: external implementer failed (<id>)`;
-     do not run `next`. Otherwise append a History line to `run.md`, then run `next` again.
+     column, in plain decimal notation (6 decimal places are enough because
+     `implement.py` rounds `cost_usd` to 6; `autopilot.py` also accepts scientific
+     notation) (exit 2 adds nothing — a stale file from an earlier attempt may exist; if
+     the column is absent, add it to the header and every row with `0` first), and record
+     the History line `implementer <profile>: <cost_usd> USD external`. If an external
+     round ends with exit 1 or 2, set state `paused` (also with `--auto`), show the line
+     and append the History line `paused: external implementer failed (<id>)`; do not run
+     `next`. Otherwise append a History line to `run.md`, then run `next` again with the
+     same `--implementer-kind`.
    - `wait <id>: <phase>` (semi only): state `paused`, show the task's `summary.md` or
      `BLOCKED:` line, ask: continue past it (its dependents are skipped) / stop. To retry,
      the user runs `/task-flow:task-run <id>` themselves and then resumes the autopilot.
-     Continue: add the id to `continue-past`, run `next` again. Stop: as `stop:`.
+     Continue: add the id to `continue-past`, run `next` again with the same
+     `--implementer-kind`. Stop: as `stop:`.
    - `stop: <reason>`: state `stopped`. `done`: state `done`.
 8. **Report.** On `stopped` or `done` write `report.md`: the stop reason (the `next` line
    verbatim), one row per task (phase, rounds, the implementer profiles used — the
@@ -340,6 +364,44 @@ names the bootstrap task; it is row 1 and every other row depends on it directly
    and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
    worktree removal. Show it.
 
+### Explicit task list (`--tasks`)
+
+`/task-flow:task-autopilot --tasks <id>[,<id>...]` runs tasks that already exist in
+`.work/` as a stacked series in the given order, instead of decomposing requirements; a
+run without `--tasks` is unchanged. For such a run, steps 2–4 (Gather, Decompose,
+Create and plan) are replaced by:
+
+(a) **Preconditions** as in step 1, except: `--tasks` together with requirement text or
+`--from-repo` is refused; `commits: no` or `thin: yes` is refused (no initial-commit
+question) with the hint to bootstrap the repository first — a decomposed autopilot run
+or a bootstrap task of its own — then run `--tasks` again.
+(b) Resolve the roles with `models.py roles` (exit 2: as in step 5) and run
+`uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" stack . <ids> --implementer-kind <implementer kind>`
+from the repository root. Exit 2: show the message and end the command before anything
+is written (a precondition, not a stop). Exit 0: its output is the `## Tasks` table.
+(c) Run id and `run.md` as in Gather, with state `planning`, `bootstrap: none`,
+`source: tasks` and base = the current branch, and the `stack` output as `## Tasks`
+(with the `External USD` column when the implementer's kind is `profile`, as in
+Gather). Write `requirements.md`: the id list as given, and the `inspect` output under
+`## Repository`. No `backlog.md`. Ensure `.work/.gitignore` as in Phase: new.
+(d) Set each listed task's `status.md` `base:` to the run's base (all of them are `new`,
+`planned` or `approved`).
+(e) Plan every `new` task in table order with Phase: plan steps 1–3 without the approval
+gate, collecting `BLOCKED: yes` questions in one message, appending the answers to each
+`task.md` and re-planning those; `planned` and `approved` tasks keep their plan. Add
+every planner's `total_tokens` to `planning-tokens` (`unknown` if any is missing).
+State `planning`, then `ready`.
+(f) **Overview, Start gate, Loop and Report** as in steps 5–8, with: no bootstrap task is
+marked; the `warning:` line of `autopilot.py estimate` (more than 10 tasks) is shown
+verbatim; Edit re-plans only that task — changing the list means cancel and start
+again; Start approves the tasks that are not `approved` yet with
+`yes (user, <date>, autopilot <run-id>)` (or `yes (--auto, <date>, autopilot <run-id>)`),
+while tasks already `approved` keep their `plan-approved` line.
+(g) Failure handling is the unchanged `next`: because every row depends on the previous
+one, `--full` skips every task after a failed one (`stop: cannot finish: ...`), and in
+`--semi` choosing "continue past it" also ends in `stop: cannot finish`. Documented,
+not special-cased.
+
 **Stops of an autopilot run:** the start gate (skipped by `--auto`), backlog or planner
 `BLOCKED` before the loop, `wait` (semi), `stop:` (circuit breaker), `done`, and the pause
 after a failed external implementer round (exit 1 or 2; a defined rule, with and without
@@ -347,13 +409,15 @@ after a failed external implementer round (exit 1 or 2; a defined rule, with and
 question and the other Preconditions come before a run exists and are preconditions, not
 stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
 cannot finish, burn rate, budget — all four count Claude tokens only) and is evaluated
-only between tasks, never inside a
-task's run; `next` returns `run <id>` for a task already in progress.
+only between tasks, never inside a task's run; `next` returns `run <id>` for a task
+already in progress.
 
 **Resuming:** `/task-flow:task-autopilot <run-id>` continues from the `run.md` state;
 `paused` by `wait` asks the wait question again; `paused` by the History line `paused:
-external implementer failed (<id>)` skips the wait question and runs `autopilot.py next`,
-which returns `run <id>`, so the task's round runs again. Preconditions are not re-run.
+external implementer failed (<id>)` skips the wait question and runs `autopilot.py next
+--implementer-kind <implementer kind>`, which returns `run <id>`, so the task's round runs
+again. State `planning` of a `source: tasks` run plans the remaining `new` tasks (step (e)
+of "Explicit task list"); nothing is decomposed. Preconditions are not re-run.
 
 ## Phase: finish — /task-flow:task-finish
 
@@ -413,3 +477,20 @@ live in `.claude/task-flow.release.toml` (override with `--config <path>`).
 7. **Push question — separate, default no.** Yes: `git push origin <branch>`, then
    `git push origin refs/tags/<tag>` — never `--tags`, never `--force`, never tag deletion
    or moving a tag. No: print both commands for later.
+
+## Doctor — /task-flow:task-doctor
+
+1. From the repository root, run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" $ARGUMENTS`.
+2. Show stdout verbatim — do not re-run the script, and do not summarise, re-sort, add or
+   drop rows. Exit 1 means the FAIL rows are the result, not an error of the command;
+   exit 2 is a usage error: show stderr and end.
+3. Change nothing and offer no fixes beyond the printed ones: the doctor is read-only
+   (there is no `--fix`), and it never prints a secret — key values are redacted.
+4. If the command cannot start because `uv` is not found, print the uv installer
+   one-liners for PowerShell
+   (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`)
+   and POSIX (`curl -LsSf https://astral.sh/uv/install.sh | sh`) and "restart Claude Code".
+5. `--online` adds one authenticated request per profile in use,
+   `GET <base_url>/models` — the provider's model list, which costs no tokens — and says
+   whether the configured `model` is among the listed ids.

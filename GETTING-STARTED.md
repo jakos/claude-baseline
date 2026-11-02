@@ -30,7 +30,7 @@ You want `Skills (4)`, `Agents (1)`, `Hooks (2)`. If `claude plugin list` says *
 load**, read the error — that is the only place a broken plugin announces itself.
 
 > Working on the plugin itself? Sessions started inside this repo can load the working tree
-> on top of the released copy — see "Working on this repo" in the README.
+> on top of the released copy — see [Working on this repo](docs/development.md#working-on-this-repo).
 
 ## 1. In the new repo: find the gate before writing anything
 
@@ -142,7 +142,9 @@ the repos where you want it:
 /plugin install task-flow@claude-baseline
 ```
 
-It is described in its [README](plugins/task-flow/README.md).
+It is described in its [README](plugins/task-flow/README.md). Run
+`/task-flow:task-doctor` (with `--online` once a key is set); it lists what is missing
+and how to fix it.
 
 **External implementer (experimental).** task-flow can hand the implementer role to a
 per-token, non-Claude model (so far only the Mistral API has been exercised) while Claude
@@ -167,8 +169,8 @@ $env:MISTRAL_API_KEY = "..."
 POSIX shells: `export MISTRAL_API_KEY=...`.
 
 Profiles, roles, limits and how to switch it off again:
-[External implementer](plugins/task-flow/README.md#external-implementer) and
-[Rolling back](plugins/task-flow/README.md#rolling-back).
+[External implementer](docs/task-flow/external-implementer.md) and
+[Rolling back](docs/task-flow/external-implementer.md#rolling-back).
 
 ## When something seems wrong
 
@@ -179,6 +181,7 @@ Profiles, roles, limits and how to switch it off again:
 | Skill never fires | Its description doesn't match how you phrased the request |
 | A pushed change didn't arrive | `version` in `plugin.json` wasn't bumped — updates are gated on it |
 | Plugin missing entirely | `claude plugin list` — a load failure shows only there |
+| task-flow setup problem: `uv`, permissions, `models.toml`, key or model id | Run `/task-flow:task-doctor` (or `--online`) — every WARN and FAIL comes with its fix |
 
 Everything in this plugin fails quietly. Nothing errors, output still appears, and it
 looks exactly like working. When in doubt, check `claude plugin details dev-baseline`.

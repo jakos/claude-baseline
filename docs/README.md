@@ -1,0 +1,15 @@
+# Documentation
+
+- [dev-baseline](dev-baseline.md)
+- [Developing claude-baseline](development.md)
+- [task-flow overview](task-flow/overview.md)
+- [Setting up task-flow](task-flow/setup.md)
+- [Commands](task-flow/commands.md)
+- [Autopilot](task-flow/autopilot.md)
+- [Configuration](task-flow/configuration.md)
+- [External implementer](task-flow/external-implementer.md)
+- [Deterministic gates](task-flow/gates.md)
+- [What enforces what](task-flow/enforcement.md)
+- [Profiles](task-flow/profiles.md)
+- [Releasing](task-flow/releasing.md)
+- [Benchmark](task-flow/benchmark.md)

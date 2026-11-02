@@ -1,0 +1,8 @@
+id = "autopilot-plan-and-run-tasks"
+size = "L"
+repo = "../../../../.."
+base = "0ed235625d41a0d355209016b27187451e7f582e"
+result = "80737dd54b1eb880b5bece5c72763855cf62cd93"
+plan = "plan.md"
+hidden_tests = ["plugins/task-flow/tests/test_autopilot.py", "plugins/task-flow/tests/test_guard.py"]
+commands = ["uv run --script plugins/task-flow/tests/test_autopilot.py EstimateTest.test_estimate_formula EstimateTest.test_estimate_totals_and_budget_fits EstimateTest.test_estimate_budget_does_not_fit EstimateTest.test_estimate_without_budget EstimateTest.test_estimate_unknown_tokens_says_at_least NextTest.test_next_runs_first_pending NextTest.test_next_resumes_in_progress_before_any_breaker NextTest.test_next_done_when_all_finished NextTest.test_next_semi_waits_on_failure NextTest.test_next_semi_continue_past NextTest.test_next_full_skips_dependents_of_failed NextTest.test_breaker_wrong_direction NextTest.test_breaker_cannot_finish NextTest.test_breaker_burn_rate NextTest.test_unknown_tokens_never_trip_burn_rate NextTest.test_breaker_budget NextTest.test_failed_bootstrap_skips_every_task MalformedTest.test_malformed_run_exits_2 MalformedTest.test_rejects_dir_outside_autopilot InspectTest.test_inspect_no_commit InspectTest.test_inspect_thin_empty_commit InspectTest.test_inspect_thin_minimal_claude_md InspectTest.test_inspect_not_thin_with_code InspectTest.test_inspect_not_thin_long_claude_md InspectTest.test_inspect_ignores_work_and_untracked InspectTest.test_inspect_rejects_non_repo", "uv run --script plugins/task-flow/tests/test_guard.py"]

@@ -134,6 +134,33 @@ class GuardTest(unittest.TestCase):
             "allow",
         )
 
+    def test_snooze_denied_for_every_role(self):
+        commands = [
+            "habit-snooze --snooze E501 src/a.py",
+            "habit-snooze --prune",
+            "uvx habit-snooze --snooze x",
+            "git status; habit-snooze --prune",
+        ]
+        for role in ALL_ROLES:
+            for command in commands:
+                for tool in ("Bash", "PowerShell"):
+                    with self.subTest(role=role, tool=tool, command=command):
+                        self.assertEqual(shell(role, command, tool), "deny", command)
+            for tool in ("Write", "Edit"):
+                with self.subTest(role=role, tool=tool):
+                    self.assertEqual(
+                        decide(
+                            f"task-flow:{role}",
+                            tool,
+                            {
+                                "file_path": (
+                                    "/repo/.work/x/worktree/.habit-hooks/snooze.json"
+                                )
+                            },
+                        ),
+                        "deny",
+                    )
+
     def test_implementer_may_mutate(self):
         self.check(("implementer",), ["git add .", "git worktree add p"], "allow")
 

@@ -1,6 +1,6 @@
 ---
 name: task-check
-description: Run the automated checks for the current task-flow round with the checker agent.
+description: Run the automated checks for the current task-flow round with the checker agent, or scripts/gates.py when `[roles] checker = "script"`.
 argument-hint: "[task-id]"
 disable-model-invocation: true
 ---

@@ -14,7 +14,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "autopilot.py"
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPT = SCRIPTS / "autopilot.py"
+sys.path.insert(0, str(SCRIPTS))
+import autopilot
+
 HAS_GIT = shutil.which("git") is not None
 
 
@@ -56,10 +60,12 @@ class RunFixture(unittest.TestCase):
         bootstrap="none",
         omit=(),
         usd=None,
+        source=None,
     ):
         """rows: (id, depends, tokens, phase) tuples; also creates the task folders.
 
         usd: None for the 4-column table, or a list of 5th-cell strings, one per row.
+        source: None omits the `source:` header line, otherwise its value.
         """
         header = {
             "mode": mode,
@@ -68,8 +74,10 @@ class RunFixture(unittest.TestCase):
             "planning-tokens": planning,
             "continue-past": cont,
             "bootstrap": bootstrap,
-            "state": "running",
         }
+        if source is not None:
+            header["source"] = source
+        header["state"] = "running"
         lines = ["# Autopilot: r1"]
         lines += [f"- {k}: {v}" for k, v in header.items() if k not in omit]
         if usd is None:
@@ -203,6 +211,21 @@ class EstimateTest(RunFixture):
                 self.assertIn(
                     "| 1 | a | 2 | 3 | 2 | 154000 | 400000 |", self.out("estimate")
                 )
+
+    def test_verification_commands_lists_first_block(self):
+        text = (
+            "# Plan: x\n## Goal\ng\n## Verification commands\n```\n"
+            "cmd one\n\n# a comment\n"
+            'git grep -nE "a|b" -- path\n'
+            "```\n```\ncmd ignored\n```\na trailing paragraph\n## Steps\n1. not a command\n"
+        )
+        self.assertEqual(
+            autopilot.verification_commands(text),
+            ["cmd one", 'git grep -nE "a|b" -- path'],
+        )
+        self.assertEqual(autopilot.verification_commands("# Plan: x\n## Goal\ng\n"), [])
+        # the shared parser counts exactly what plan_counts counts
+        self.assertEqual(autopilot.plan_counts(text)[2], 2)
 
     def test_estimate_without_budget(self):
         self.run_md([("a", "-", "0", "approved")])
@@ -383,6 +406,26 @@ class ExternalTest(RunFixture):
         self.assertEqual(with_column, self.out("next"))
         self.assertEqual(with_column, "run b")
 
+    def test_estimate_external_usd_scientific_notation(self):
+        rows = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        cases = {
+            ("1.2e-05", "0.5"): "external spent: 0.50 USD",
+            ("1e-05", "1.2E-05"): "external spent: 0.00 USD",
+            ("0.000012", "0"): "external spent: 0.00 USD",
+        }
+        for usd, expected in cases.items():
+            with self.subTest(usd=usd):
+                self.run_md(rows, usd=list(usd))
+                self.assertEqual(self.out("estimate").splitlines()[-1], expected)
+
+    def test_next_accepts_external_usd_scientific_notation(self):
+        rows = [("a", "-", "10", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, usd=["1.2e-05", "0"])
+        with_column = self.out("next")
+        self.run_md(rows)
+        self.assertEqual(with_column, self.out("next"))
+        self.assertEqual(with_column, "run b")
+
     def test_breaker_burn_rate_external(self):
         self.run_md(
             [("a", "-", str(2 * EXT_MAX + 1), "done"), ("b", "-", "0", "approved")]
@@ -466,7 +509,11 @@ class MalformedTest(RunFixture):
                 result = self.call("estimate")
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertEqual(result.stdout, b"")
-                self.assertTrue(result.stderr)
+                self.assertIn(
+                    "External USD of a must be a non-negative number or 'unknown', "
+                    f"got {bad!r}",
+                    result.stderr.decode("utf-8"),
+                )
         with self.subTest(header="wrong 5th cell"):
             self.run_md(ok, usd=["0", "0"])
             path = self.run_dir / "run.md"
@@ -478,7 +525,10 @@ class MalformedTest(RunFixture):
             )
             result = self.call("estimate")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "the 5th header cell must be 'External USD', got 'Cost'",
+                result.stderr.decode("utf-8"),
+            )
         with self.subTest(header="5 cells, short data row"):
             self.run_md(ok, usd=["0", "0"])
             path = self.run_dir / "run.md"
@@ -490,12 +540,31 @@ class MalformedTest(RunFixture):
             )
             result = self.call("next")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "malformed task row: '| 1 | a | - | 0 |'",
+                result.stderr.decode("utf-8"),
+            )
         with self.subTest(kind="external"):
             self.run_md(ok)
             result = self.call("estimate", None, "--implementer-kind", "external")
             self.assertEqual((result.returncode, result.stdout), (2, b""))
-            self.assertTrue(result.stderr)
+            self.assertIn(
+                "argument --implementer-kind: invalid choice",
+                result.stderr.decode("utf-8"),
+            )
+
+    def test_malformed_external_usd_numbers_exit_2(self):
+        ok = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        for bad in ("-1.2e-05", "1e", "1e-", "inf", "nan", "1e999"):
+            with self.subTest(usd=bad):
+                self.run_md(ok, usd=[bad, "0"])
+                result = self.call("estimate")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(
+                    "External USD of a must be a non-negative number or 'unknown'",
+                    result.stderr.decode("utf-8"),
+                )
 
     def test_missing_run_md_exits_2(self):
         result = self.call("next")
@@ -646,6 +715,327 @@ class InspectTest(unittest.TestCase):
         (self.repo / "sub").mkdir()
         result = self.inspect(self.repo / "sub")
         self.assertEqual((result.returncode, result.stdout), (2, b""))
+
+
+@unittest.skipUnless(HAS_GIT, "git is not on PATH")
+class StackTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name)
+        self.git("init", "-q")
+        self.git("config", "user.name", "t")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "commit.gpgsign", "false")
+        self.work = self.repo / ".work"
+        self.work.mkdir()
+
+    def git(self, *args):
+        subprocess.run(
+            ["git", "-C", str(self.repo), *args], check=True, capture_output=True
+        )
+
+    def task(self, task_id, phase, plan_text=None):
+        directory = self.work / task_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "status.md").write_text(
+            f"# Status: {task_id}\n- phase: {phase}\n## History\n", encoding="utf-8"
+        )
+        if plan_text is not None:
+            (directory / "plan.md").write_text(plan_text, encoding="utf-8")
+
+    def stack(self, ids, *extra, root=None):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "stack", str(root or self.repo), ids, *extra],
+            capture_output=True,
+            check=False,
+        )
+
+    def assert_refused(self, result, needle=None):
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertEqual(result.stdout, b"")
+        self.assertTrue(result.stderr)
+        if needle is not None:
+            self.assertIn(needle, result.stderr.decode("utf-8", "replace"))
+
+    def test_stack_prints_table(self):
+        self.task("a", "new")
+        self.task("b", "planned", plan())
+        self.task("c", "approved", plan())
+        result = self.stack("a,b,c")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.decode("utf-8").replace("\r\n", "\n"),
+            "| # | Task | Depends on | Tokens used |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 1 | a | - | 0 |\n"
+            "| 2 | b | a | 0 |\n"
+            "| 3 | c | b | 0 |\n",
+        )
+
+    def test_stack_strips_whitespace_around_ids(self):
+        self.task("a", "new")
+        self.task("b", "new")
+        result = self.stack(" a , b ")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("| 2 | b | a | 0 |", result.stdout.decode("utf-8"))
+
+    def test_stack_profile_adds_usd_column(self):
+        self.task("a", "new")
+        self.task("b", "planned", plan())
+        result = self.stack("a,b", "--implementer-kind", "profile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.decode("utf-8").replace("\r\n", "\n"),
+            "| # | Task | Depends on | Tokens used | External USD |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 1 | a | - | 0 | 0 |\n"
+            "| 2 | b | a | 0 | 0 |\n",
+        )
+
+    def test_stack_refuses_unknown_id(self):
+        self.task("a", "new")
+        self.assert_refused(self.stack("a,zzz"), "zzz")
+
+    def test_stack_refuses_done(self):
+        self.task("a", "done")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_escalated(self):
+        self.task("a", "escalated")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_blocked(self):
+        self.task("a", "blocked")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_in_progress(self):
+        self.task("a", "implementing")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_duplicate(self):
+        self.task("a", "new")
+        self.assert_refused(self.stack("a,a"), "a")
+
+    def test_stack_refuses_empty_element(self):
+        self.task("a", "new")
+        self.task("b", "new")
+        self.assert_refused(self.stack("a,,b"))
+
+    def test_stack_refuses_empty_list(self):
+        self.assert_refused(self.stack(""))
+
+    def test_stack_refuses_path_separator(self):
+        self.assert_refused(self.stack("a/b"), "a/b")
+        self.assert_refused(self.stack("a\\b"), "a\\b")
+
+    def test_stack_refuses_hidden_or_underscore_id(self):
+        self.assert_refused(self.stack("_autopilot"), "_autopilot")
+        self.assert_refused(self.stack(".hidden"), ".hidden")
+
+    def test_stack_refuses_planned_without_plan(self):
+        self.task("a", "planned")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_worktree(self):
+        self.task("a", "new")
+        (self.work / "a" / "worktree").mkdir()
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_existing_branch(self):
+        self.task("a", "new")
+        self.git("commit", "-q", "--allow-empty", "-m", "c")
+        self.git("branch", "task/a")
+        self.assert_refused(self.stack("a"), "a")
+
+    def test_stack_refuses_non_git_root(self):
+        with tempfile.TemporaryDirectory() as plain:
+            work = Path(plain) / ".work" / "a"
+            work.mkdir(parents=True)
+            (work / "status.md").write_text(
+                "# Status: a\n- phase: new\n", encoding="utf-8"
+            )
+            result = self.stack("a", root=plain)
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"git", result.stderr)
+
+
+class StackedRunTest(RunFixture):
+    @staticmethod
+    def chain(count):
+        rows = [("t1", "-", "0", "approved")]
+        rows += [(f"t{i}", f"t{i - 1}", "0", "approved") for i in range(2, count + 1)]
+        return rows
+
+    def assert_both_refuse(self):
+        for command in ("estimate", "next"):
+            with self.subTest(command=command):
+                result = self.call(command)
+                self.assertEqual((result.returncode, result.stdout), (2, b""))
+                self.assertTrue(result.stderr)
+
+    def test_accepts_strict_chain(self):
+        self.run_md(
+            [("a", "-", "0", "approved"), ("b", "a", "0", "approved")],
+            source="tasks",
+        )
+        self.assertIn("| 1 | a |", self.out("estimate"))
+        self.assertEqual(self.out("next"), "run a")
+
+    def test_refuses_row1_with_dependency(self):
+        self.run_md(
+            [("a", "b", "0", "approved"), ("b", "-", "0", "approved")],
+            source="tasks",
+        )
+        self.assert_both_refuse()
+
+    def test_refuses_later_row_not_exactly_previous(self):
+        cases = [
+            [("a", "-", "0", "approved"), ("b", "-", "0", "approved")],
+            [
+                ("a", "-", "0", "approved"),
+                ("b", "a", "0", "approved"),
+                ("c", "a", "0", "approved"),
+            ],
+            [
+                ("a", "-", "0", "approved"),
+                ("b", "a", "0", "approved"),
+                ("c", "a, b", "0", "approved"),
+            ],
+        ]
+        for rows in cases:
+            with self.subTest(rows=rows):
+                self.run_md(rows, source="tasks")
+                self.assert_both_refuse()
+
+    def test_refuses_bootstrap(self):
+        self.run_md(
+            [("a", "-", "0", "approved"), ("b", "a", "0", "approved")],
+            source="tasks",
+            bootstrap="a",
+        )
+        self.assert_both_refuse()
+
+    def test_refuses_unknown_source(self):
+        self.run_md([("a", "-", "0", "approved")], source="weird")
+        self.assert_both_refuse()
+
+    def test_backlog_run_without_source_needs_no_chain(self):
+        self.run_md([("a", "-", "0", "approved"), ("b", "-", "0", "approved")])
+        self.assertEqual(self.out("next"), "run a")
+
+    def test_estimate_warns_above_ten_tasks(self):
+        self.run_md(self.chain(11), source="tasks")
+        self.assertEqual(
+            self.out("estimate").splitlines()[-1],
+            "warning: 11 tasks; more than the 10 a decomposed backlog allows — "
+            "check the totals against your usage limit (/usage)",
+        )
+
+    def test_estimate_no_warning_at_ten_tasks(self):
+        self.run_md(self.chain(10), source="tasks")
+        self.assertNotIn("warning:", self.out("estimate"))
+
+    def test_estimate_no_warning_for_backlog_run_with_eleven_rows(self):
+        rows = [(f"t{i}", "-", "0", "approved") for i in range(1, 12)]
+        self.run_md(rows)
+        self.assertNotIn("warning:", self.out("estimate"))
+
+    def test_next_runs_rows_in_order(self):
+        self.run_md(
+            [("a", "-", "0", "approved"), ("b", "a", "0", "approved")],
+            source="tasks",
+        )
+        self.assertEqual(self.out("next"), "run a")
+        self.run_md(
+            [("a", "-", "10", "done"), ("b", "a", "0", "approved")],
+            source="tasks",
+        )
+        self.assertEqual(self.out("next"), "run b")
+
+    def test_next_full_skips_everything_after_failure(self):
+        rows = [
+            ("a", "-", "10", "done"),
+            ("b", "a", "10", "escalated"),
+            ("c", "b", "0", "approved"),
+            ("d", "c", "0", "approved"),
+        ]
+        self.run_md(rows, mode="full", source="tasks")
+        self.assertEqual(
+            self.out("next"), "stop: cannot finish: c, d depend on failed b"
+        )
+
+    def test_next_semi_waits_then_cannot_finish(self):
+        rows = [
+            ("a", "-", "10", "done"),
+            ("b", "a", "10", "escalated"),
+            ("c", "b", "0", "approved"),
+        ]
+        self.run_md(rows, mode="semi", source="tasks")
+        self.assertEqual(self.out("next"), "wait b: escalated")
+        self.run_md(rows, mode="semi", source="tasks", cont="b")
+        self.assertEqual(self.out("next"), "stop: cannot finish: c depend on failed b")
+
+
+class BaseTest(RunFixture):
+    def call_base(self, task_id):
+        return self.call("base", self.run_dir, task_id)
+
+    def out_base(self, task_id):
+        result = self.call_base(task_id)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode("utf-8").strip()
+
+    def test_base_is_run_base_when_nothing_done(self):
+        self.run_md([("a", "-", "0", "approved"), ("b", "a", "0", "approved")])
+        self.assertEqual(self.out_base("a"), "main")
+        self.assertEqual(self.out_base("b"), "main")
+
+    def test_base_is_last_done_branch(self):
+        self.run_md(
+            [
+                ("a", "-", "10", "done"),
+                ("b", "a", "0", "approved"),
+                ("c", "b", "0", "approved"),
+            ]
+        )
+        self.assertEqual(self.out_base("b"), "task/a")
+        self.assertEqual(self.out_base("c"), "task/a")
+
+    def test_base_is_last_done_in_table_order(self):
+        self.run_md(
+            [
+                ("a", "-", "10", "done"),
+                ("b", "a", "10", "done"),
+                ("c", "b", "0", "approved"),
+            ]
+        )
+        self.assertEqual(self.out_base("c"), "task/b")
+
+    def test_base_refuses_id_not_in_table(self):
+        self.run_md([("a", "-", "0", "approved")])
+        result = self.call_base("zzz")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"zzz", result.stderr)
+
+    def test_base_refuses_started_task(self):
+        self.run_md([("a", "-", "0", "implementing"), ("b", "a", "0", "approved")])
+        result = self.call_base("a")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertTrue(result.stderr)
+
+    def test_base_refuses_worktree(self):
+        self.run_md([("a", "-", "0", "approved")])
+        (self.root / ".work" / "a" / "worktree").mkdir()
+        result = self.call_base("a")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertTrue(result.stderr)
+
+    def test_base_refuses_missing_base_header(self):
+        self.run_md([("a", "-", "0", "approved")], omit=("base",))
+        result = self.call_base("a")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertTrue(result.stderr)
 
 
 if __name__ == "__main__":

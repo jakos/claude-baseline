@@ -7,8 +7,8 @@
 [profiles.mistral]
 # One example profile with every key. The model id is a placeholder; take a real
 # one from GET /v1/models.
-driver = "openai-loop"                  # "openai-loop" (required)
-base_url = "https://api.mistral.ai/v1"  # http(s) URL; "/chat/completions" is appended (required)
+driver = "openai-loop"                  # "openai-loop" or "anthropic-loop" (required)
+base_url = "https://api.mistral.ai/v1"  # http(s) URL; "/chat/completions" is appended on openai-loop, "/messages" on anthropic-loop (required)
 model = "<model id from GET /v1/models>"  # model id string (required)
 api_key_env = "MISTRAL_API_KEY"         # NAME of the env var holding the key; required unless billing = "local"
 billing = "api"                         # "subscription", "api" or "local" (required)
@@ -18,15 +18,47 @@ max_context = 200000                    # fail when a response reports more prom
 price_input_per_mtok = 0.0              # USD per 1M input tokens, for the cost figure (default 0)
 price_cached_input_per_mtok = 0.0       # USD per 1M cached input tokens (default 0)
 price_output_per_mtok = 0.0             # USD per 1M output tokens (default 0)
+price_cache_write_per_mtok = 0.0        # USD per 1M prompt-cache-write tokens, anthropic-loop only (default: price_input_per_mtok)
 fallback = []                           # other profiles to try, in order, when this one stays unavailable (default [])
 enabled = true                          # false disables the profile (default true)
 retries = 3                             # retries per request on 408, 429, 5xx, timeouts and connection errors (default 3)
 retry_base_seconds = 2                  # exponential backoff base, seconds (default 2)
 request_timeout_seconds = 300           # per request (default 300)
 command_timeout_seconds = 600           # per run_command call (default 600)
-temperature = 1.0                       # 0..2; omit for the provider's default
-max_output_tokens = 16384               # sent as max_tokens; omit for the provider's default
-extra_body = {}                         # table merged into the request body; model, messages, tools, tool_choice are reserved (default: none)
+temperature = 1.0                       # 0..2; omit for the provider's default; NOT allowed on anthropic-loop
+max_output_tokens = 16384               # sent as max_tokens (openai-loop: under the max_tokens_param key); anthropic-loop sends max_tokens and defaults to 16000 when unset
+max_tokens_param = "max_tokens"         # the body key max_output_tokens is sent under: "max_tokens" or "max_completion_tokens" (default "max_tokens"; only "max_tokens" on anthropic-loop)
+extra_body = {}                         # table merged into the request body; reserved keys are per driver: openai-loop model, messages, tools, tool_choice; anthropic-loop also system, max_tokens, stream, temperature, top_p, top_k (default: none)
+post_edit = []                         # commands run after each successful write_file/edit_file call; every "{path}" is replaced by the written file (worktree-relative, quoted); the exit code and output (max 40 lines) are appended to the tool result (default [])
+prompt_extras = []                     # files whose contents are appended to the system prompt before the runner adapter; "~" is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) (default [])
+
+# A Claude profile on the native Messages API (prompt caching, cache-aware cost).
+# Prices are USD per 1M tokens as of 2026-11-01; check the provider's pricing page.
+# Never use ANTHROPIC_API_KEY here: in a Claude Code session that variable makes
+# Claude Code itself bill by API token instead of the subscription.
+# [profiles.claude-haiku]
+# driver = "anthropic-loop"
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-haiku-5-5"
+# api_key_env = "TASK_FLOW_ANTHROPIC_KEY"
+# billing = "api"
+# max_turns = 60
+# max_cost_usd = 10.0
+# max_context = 100000                    # Haiku 5.5 costs more above 100k prompt tokens per request; this fails the round instead of limiting it
+# price_input_per_mtok = 0.10
+# price_cached_input_per_mtok = 0.01
+# price_output_per_mtok = 0.50
+# price_cache_write_per_mtok = 0.125     # cache write, 5-minute TTL = 1.25x the input price
+# fallback = []
+# enabled = true
+# retries = 3
+# retry_base_seconds = 2
+# request_timeout_seconds = 300
+# command_timeout_seconds = 600
+# # no temperature: the pinned API version rejects it on every model
+# max_output_tokens = 16000
+# max_tokens_param = "max_tokens"
+# extra_body = {}
 
 [roles]
 # One key per task-flow role. Each value is one of:
@@ -34,7 +66,7 @@ extra_body = {}                         # table merged into the request body; mo
 #   "claude:opus|sonnet|haiku"  run the Claude subagent on that model, passed as the
 #                             subagent call's model argument
 #   a profile name            only valid for implementer: run scripts/implement.py on it
-#   "script"                  only valid for checker; reserved for a later task-flow version
+#   "script"                  only valid for checker: run scripts/gates.py instead of the checker agent
 # Each key below is set to its agent's frontmatter default, so copying this file
 # changes no model.
 planner = "claude:opus"       # planner agent's frontmatter default: opus
@@ -42,3 +74,6 @@ implementer = "claude:sonnet" # implementer agent's frontmatter default: sonnet
 checker = "claude:haiku"      # checker agent's frontmatter default: haiku
 reviewer = "claude:opus"      # reviewer agent's frontmatter default: opus
 backlog = "claude:opus"       # backlog agent's frontmatter default: opus
+
+[gates]
+command_timeout_seconds = 600           # per verification command run by scripts/gates.py (default 600)

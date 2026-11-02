@@ -1,0 +1,8 @@
+id = "task-list"
+size = "S"
+repo = "../../../../.."
+base = "4daf4197b4dc24b4c78a501ab4269be89a6d7c4e"
+result = "7216e6c09975f164e51686f59eb83a5114beafd5"
+plan = "plan.md"
+hidden_tests = ["plugins/task-flow/tests/test_task_list.py"]
+commands = ["uv run --script plugins/task-flow/tests/test_task_list.py TaskListTest.test_hides_done_by_default TaskListTest.test_all_includes_done TaskListTest.test_reports_hidden_done_count TaskListTest.test_orders_by_phase_group TaskListTest.test_ties_broken_by_oldest_history_first TaskListTest.test_ties_broken_by_id_last TaskListTest.test_last_history_line_ignores_log_section TaskListTest.test_missing_or_bad_timestamp_sorts_last_in_group TaskListTest.test_unknown_or_missing_phase_sorts_before_done TaskListTest.test_no_work_dir_prints_message TaskListTest.test_escapes_pipe_in_history TaskListTest.test_utf8_em_dash_survives_pipe TaskListTest.test_unknown_argument_exits_2"]
