@@ -31,7 +31,8 @@ Design decisions, briefly:
 - D9 a run is identified by its run id and a suite fingerprint, so `run --extend`
   can add a profile later; run.json records the inputs.
 - D10 report.md is deterministic for a given results.jsonl.
-- D11 CLI: list, run, report, save, plus the suite tools: add-case, check-case, log.
+- D11 CLI: list, run, report, save, publish, plus the suite tools: add-case, check-case,
+  log.
 - E1 hidden tests are selected by name: a case's `commands` may pass `Class.method`
   selectors to the test program, and a test method is selected exactly when its name
   occurs in the case's plan. A whole file is used only when every test in it is named
@@ -214,6 +215,22 @@ def rmtree_force(path: Path) -> None:
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def task_flow_version() -> str:
+    """The plugin's version from .claude-plugin/plugin.json ("" when unreadable).
+
+    Recorded in run.json when a run is created (not part of the fingerprint), so a
+    published page can name the task-flow version that ran.
+    """
+    try:
+        data = json.loads(
+            (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return ""
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version else ""
 
 
 def median(values: list) -> float:
@@ -2125,6 +2142,9 @@ def cmd_run(args) -> int:
             "profiles": names,
             "fingerprint": fp,
         }
+        version = task_flow_version()
+        if version:
+            meta["task_flow_version"] = version
         run_dir.mkdir(parents=True)
         write_text(
             run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + "\n"
@@ -2192,6 +2212,31 @@ def cmd_save(args) -> int:
     return 0
 
 
+def cmd_publish(args) -> int:
+    project = resolve_project(getattr(args, "project", None))
+    results_dir = (
+        Path(args.results_dir).resolve() if args.results_dir else DEFAULT_RESULTS_DIR
+    )
+    docs_dir = (
+        Path(args.docs_dir).resolve()
+        if args.docs_dir
+        else project / "docs" / "task-flow"
+    )
+    readme = Path(args.readme).resolve() if args.readme else project / "README.md"
+    sys.path.insert(0, str(BENCH_DIR))
+    import publish
+
+    try:
+        parts = publish.publish(results_dir, docs_dir, readme, run_id=args.run)
+    except (publish.PublishError, publish.MarkerError) as exc:
+        print(f"bench: {exc}", file=sys.stderr)
+        return 2
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    print("; ".join(parts))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="bench.py",
@@ -2233,6 +2278,18 @@ def main(argv=None) -> int:
         action="store_true",
         help="overwrite an existing <results-dir>/<run-id>/ (needed after run --extend)",
     )
+
+    publish_p = sub.add_parser(
+        "publish",
+        help="publish a saved run as the benchmark docs pages and the README block",
+    )
+    publish_p.add_argument(
+        "--run", default=None, help="run id (default: the newest saved run)"
+    )
+    publish_p.add_argument("--results-dir", default=None)
+    publish_p.add_argument("--docs-dir", default=None)
+    publish_p.add_argument("--readme", default=None)
+    publish_p.add_argument("--project", default=None)
 
     check_p = sub.add_parser(
         "check-case",
@@ -2323,6 +2380,8 @@ def main(argv=None) -> int:
             return cmd_report(args)
         if args.command == "save":
             return cmd_save(args)
+        if args.command == "publish":
+            return cmd_publish(args)
         parser.error(f"unknown command {args.command!r}")
     except BenchError as exc:
         print(f"bench: {exc}", file=sys.stderr)

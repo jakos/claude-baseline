@@ -904,7 +904,11 @@ The suite has three frozen cases built from finished tasks of this repository �
 pair, `bench.py check-case <id>` calibrates a case (its hidden tests must pass on the
 result tree and fail on the base tree), and `bench.py log` regenerates the committed
 results log `bench/results/log.md` from the saved runs (`save` refreshes it too, and
-`save --replace` re-saves an extended run).
+`save --replace` re-saves an extended run). `bench.py publish` turns a saved run into
+the committed benchmark pages — `docs/task-flow/benchmark/latest.md` with its SVG
+chart, the history under `docs/task-flow/benchmark/history/`, the index
+`docs/task-flow/benchmark.md` and the `bench:latest` block in the root `README.md` —
+deterministically, from the saved run alone.
 
 It spends model budget (and with `--review`, Claude limits too), so it is never run by
 the gates — only its test is. See [bench/README.md](bench/README.md) for the case
@@ -961,8 +965,9 @@ hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
-bench/bench.py, bench/README.md  benchmark harness: implementer profiles on frozen cases,
-                                cost per accepted task (see Benchmark)
+bench/bench.py, bench/publish.py, bench/README.md  benchmark harness and publisher:
+                                implementer profiles on frozen cases, cost per accepted
+                                task, and the published benchmark pages (see Benchmark)
 bench/cases/<id>/               frozen benchmark cases: case.toml, plan.md, NOTES.md
 bench/results/log.md            generated results log over the saved runs (bench.py log)
 templates/task-flow.md          project config example
@@ -972,4 +977,5 @@ tests/test_drivers.py, tests/test_doctor.py
                                 offline suites for scripts/drivers.py and scripts/doctor.py
                                 (the other test_*.py suites cover the other scripts)
 tests/test_bench.py             offline suite for bench/bench.py
+tests/test_bench_publish.py     offline suite for bench/publish.py
 ```
