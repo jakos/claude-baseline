@@ -8,8 +8,14 @@
 
 <!-- One gate for every profile: this list replaces the defaults of python, docs,
      config and generic alike. It matches the checks of [targets.task-flow] in
-     .claude/task-flow.release.toml. There is no shell glob: a new
-     plugins/task-flow/tests/test_*.py file is added here and there by hand. -->
+     .claude/task-flow.release.toml entry by entry, in order, and scripts/verify.py
+     refuses to run when the two lists disagree or when a discovered
+     plugins/task-flow/tests/test_*.py is missing, duplicated or stale here and there —
+     CI (.github/workflows/ci.yml, see docs/development.md) runs that script, so this
+     list and the release list are one shared list, not two. There is no shell glob: a
+     new plugins/task-flow/tests/test_*.py file is added here and there by hand. The
+     Ruff commands pin the exact version (0.17.3) whose settings the committed ruff.toml
+     records, so a clean runner matches a local run. -->
 
 ### python, docs, config, generic
 ```
@@ -28,8 +34,9 @@ uv run --script plugins/task-flow/tests/test_prune_task.py
 uv run --script plugins/task-flow/tests/test_release.py
 uv run --script plugins/task-flow/tests/test_rules.py
 uv run --script plugins/task-flow/tests/test_task_list.py
-uvx ruff check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
-uvx ruff format --check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
+uv run --script plugins/task-flow/tests/test_ci.py
+uvx ruff==0.17.3 check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
+uvx ruff==0.17.3 format --check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
 claude plugin validate .
 ```
 

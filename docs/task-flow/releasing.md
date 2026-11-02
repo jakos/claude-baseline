@@ -53,4 +53,9 @@ without its own question.
 
 The checks list has no shell glob: each `plugins/task-flow/tests/test_*.py` is one
 `["uv", "run", "--script", <file>]` entry in `.claude/task-flow.release.toml`, so a new test
-file must be added there by hand.
+file must be added there by hand. That list is also what CI runs: `.github/workflows/ci.yml`
+executes `scripts/verify.py` on a Linux and a Windows runner, which reads this
+`[targets.task-flow].checks` list together with the `## Verification commands` block of
+`.claude/task-flow.md` and refuses to run when the two differ or when a discovered test
+is missing, duplicated or stale — so keep both lists identical when you add an entry (see
+[Deterministic gates](gates.md#the-same-list-in-ci-scriptsverifypy)).

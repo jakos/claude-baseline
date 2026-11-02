@@ -3,7 +3,13 @@
 # the location. Parsed strictly with tomllib: unknown keys anywhere are an error (exit 2).
 # No secrets here. The checks are argument lists, so there is no shell quoting; each
 # plugins/task-flow/tests/test_*.py file is one entry, because there is no shell glob —
-# add a new test file here by hand.
+# add a new test file here by hand. This [targets.task-flow].checks list matches the
+# Verification commands block of .claude/task-flow.md entry by entry, in order:
+# scripts/verify.py refuses to run when the two lists disagree or when a discovered
+# test_*.py is missing, duplicated or stale in them, and CI (.github/workflows/ci.yml)
+# runs that script, so this list and the project gate list are one shared list. The
+# Ruff entries pin the exact version (0.17.3) whose settings the committed ruff.toml
+# records, so a clean runner matches a local run.
 
 [targets.task-flow]
 tag = "task-flow-{version}"
@@ -26,8 +32,9 @@ checks = [
   ["uv", "run", "--script", "plugins/task-flow/tests/test_release.py"],
   ["uv", "run", "--script", "plugins/task-flow/tests/test_rules.py"],
   ["uv", "run", "--script", "plugins/task-flow/tests/test_task_list.py"],
-  ["uvx", "ruff", "check", "plugins/task-flow/scripts", "plugins/task-flow/tests", "plugins/task-flow/bench"],
-  ["uvx", "ruff", "format", "--check", "plugins/task-flow/scripts", "plugins/task-flow/tests", "plugins/task-flow/bench"],
+  ["uv", "run", "--script", "plugins/task-flow/tests/test_ci.py"],
+  ["uvx", "ruff==0.17.3", "check", "plugins/task-flow/scripts", "plugins/task-flow/tests", "plugins/task-flow/bench"],
+  ["uvx", "ruff==0.17.3", "format", "--check", "plugins/task-flow/scripts", "plugins/task-flow/tests", "plugins/task-flow/bench"],
   ["claude", "plugin", "validate", "."],
 ]
 [[targets.task-flow.version_files]]
