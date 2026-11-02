@@ -110,7 +110,7 @@ flowchart TD
   round["round 1-3: implement, gates, review"]
   verdict{"verdict"}
   approved["APPROVED"]
-  finish["/task-flow:task-finish: SDLC status refresh, summary, commit"]
+  finish["/task-flow:task-finish: status refresh, record, summary, commit"]
   changes["CHANGES_REQUESTED"]
   escalate["no progress or round 3: escalate to you (summary.md)"]
   blocked["BLOCKED: stop"]

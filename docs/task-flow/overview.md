@@ -62,7 +62,7 @@ A multi-agent workflow for tasks and feature requests:
        reviewer (opus) judges each criterion     → review-n.md
        APPROVED → stop   CHANGES_REQUESTED → next round
        same introduced failures as the round before (no progress), or round 3 → escalate to you
-  → /task-flow:task-finish commits, asks before push or PR, then prunes the task folder to its .md files and impl-*.json metrics
+  → /task-flow:task-finish: optional status refresh and task record, summary, commit, asks before push or PR, then prunes the task folder to its .md files and impl-*.json metrics
 ```
 
 The models in the diagram are the defaults from each agent file's frontmatter. An
@@ -89,6 +89,22 @@ a no-op and nothing changes; `/task-flow:task-finish` runs its `finish` command 
 task that declares `SDLC criteria closed by this task:` in its `task.md` has its
 criteria marked and the pages re-rendered before its commit.
 
+## Task records (opt-in)
+
+A repository can also record every finished task in git itself: with
+`.claude/task-flow.records.toml` (`[records] enabled = true` — this repository opts
+in; [`templates/records.toml`](../../plugins/task-flow/templates/records.toml) ships
+disabled), `/task-flow:task-finish` runs `scripts/task_record.py` after the summary and
+before the commit. It writes one bounded, deterministic `docs/tasks/<task-id>.md`
+(goal, acceptance criteria with final results, per-round verdicts and actual
+implementers, approval source, final verdict, risk availability and omitted scope)
+into the worktree, and prints the sanitized `Task-*` commit trailers (`Task-Id`,
+`Task-Rounds`, `Task-Implementer`, `Task-Plan-Approved`) that are appended once to the
+commit message. All exported prose is scrubbed of personal paths, credential URLs,
+tokens, private keys and attribution markers; regeneration is byte-identical and a
+conflicting record is refused. Details:
+[Configuration](configuration.md#task-records-recordstoml).
+
 ## Layout
 
 ```
@@ -103,6 +119,9 @@ scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
 scripts/sdlc_status.py          SDLC status: validate, check, render, done and finish
                                 (opt-in per repository; see AI-native SDLC status above)
+scripts/task_record.py          finish-time task record (docs/tasks/<id>.md) and Task-*
+                                commit trailers (opt-in per repository via
+                                .claude/task-flow.records.toml; see Task records above)
 bench/bench.py, bench/publish.py, bench/README.md  benchmark harness and publisher:
                                 implementer profiles on frozen cases, cost per accepted
                                 task, and the published benchmark pages (see Benchmark)
@@ -111,6 +130,7 @@ bench/results/log.md            generated results log over the saved runs (bench
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
+templates/records.toml          commented task-record config example (disabled by default)
 tests/test_drivers.py, tests/test_doctor.py
                                 offline suites for scripts/drivers.py and scripts/doctor.py
                                 (the other test_*.py suites cover the other scripts)
@@ -118,4 +138,5 @@ tests/test_bench.py             offline suite for bench/bench.py
 tests/test_bench_publish.py     offline suite for bench/publish.py
 tests/test_docs.py              offline suite for the docs pages and their links
 tests/test_sdlc_status.py       offline suite for scripts/sdlc_status.py
+tests/test_task_record.py       offline suite for scripts/task_record.py
 ```

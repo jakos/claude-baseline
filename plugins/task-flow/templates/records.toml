@@ -1,0 +1,17 @@
+# task-flow finish records — commented example. Copy it to
+#   <repo-root>/.claude/task-flow.records.toml
+# and set enabled = true to opt in. scripts/task_record.py reads the file from the
+# selected worktree (or the repository root when the task has none); --config <path>
+# overrides the location. It is parsed strictly with tomllib: unknown keys anywhere
+# are an error (exit 2). No secrets here.
+#
+# [records] is the only table and enabled its only key:
+#   enabled  true: /task-flow:task-finish renders one bounded record
+#            docs/tasks/<task-id>.md in the worktree (before the commit) and prints
+#            the sanitized Task-* commit trailers; false or a missing file keeps the
+#            previous finish behaviour — no record, no trailers, no new required
+#            artifacts, no extra approval gate.
+# Default: false — this template ships disabled; enable it per repository.
+
+[records]
+enabled = false

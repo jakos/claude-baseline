@@ -15,8 +15,61 @@ release targets, their version files, tag patterns, changelogs, scopes and check
 Releasing, and [`templates/release.toml`](../../plugins/task-flow/templates/release.toml) for a commented
 example). It is TOML because a script parses it strictly, unlike `task-flow.md`.
 
+Optional `.claude/task-flow.records.toml` opts a repository into the finish-time task
+record — the deterministic `docs/tasks/<id>.md` and `Task-*` commit trailers that
+`scripts/task_record.py` renders at `/task-flow:task-finish` (see
+[Task records](#task-records-recordstoml), and
+[`templates/records.toml`](../../plugins/task-flow/templates/records.toml) for a commented example). It is
+TOML because a script parses it strictly too; the template ships `enabled = false`, so
+copying it changes nothing until you opt in.
+
 The planner copies what applies into `plan.md → Project rules` and `Verification
 commands`, so the other agents never read the config themselves.
+
+## Task records (`records.toml`)
+
+`.claude/task-flow.records.toml` in the target repository — read from the selected
+worktree, or the repository root when the task has none — opts into the finish-time
+task record:
+
+```toml
+[records]
+enabled = true
+```
+
+`scripts/task_record.py` parses the file strictly with tomllib: `[records]` is the
+only table and `enabled` its only key, a boolean; an unknown key or a wrong type is an
+error (exit 2). A missing file or `enabled = false` keeps the previous finish
+behaviour — no record, no trailers, no new required artifacts, no extra approval gate.
+Roll back by setting `enabled = false` or deleting the file.
+
+When enabled, `/task-flow:task-finish` runs, after `summary.md` and before the commit
+(both from the repository root, in the background):
+
+- `uv run --script plugins/task-flow/scripts/task_record.py render --repo <repo-root> --task-dir <abs .work/<id>> --worktree <abs worktree | none>`
+  writes one bounded, schema-versioned (`task-record/1`), UTF-8/LF
+  `docs/tasks/<id>.md` in the worktree: task id, goal and omitted scope (the
+  `## Goal` / `## Out of scope` sections of `summary.md`), every plan AC text with its
+  final result, per-round verdict and actual implementer (`profile`/`model` of
+  `impl-<n>.json`; `unknown` when absent — never guessed), approval source, final
+  verdict and risk availability (`unavailable` until a merged risk schema exists).
+  Regeneration is byte-identical; a conflicting existing record, an unsafe destination
+  or a malformed artifact is refused (exit 2) with no partial output, and finish stops
+  before the commit.
+- the same command with `trailers` prints the sanitized trailer block that is appended
+  once to the commit message: `Task-Id`, `Task-Rounds`, repeated
+  `Task-Implementer: <profile>/<model>` for the distinct executed pairs, and
+  `Task-Plan-Approved: user|auto`. `Task-Risk` is not emitted while no risk schema is
+  merged.
+
+All exported prose is scrubbed of file paths (Windows, POSIX, UNC, home), credential
+URLs, common token/private-key/secret-assignment patterns and attribution/session
+markers, with visible truncation at fixed length limits and no timestamps or absolute
+paths; the helper fails closed on unsafe residual input and its diagnostics never echo
+the values. It never copies prompts, raw logs, settings, endpoints or environment
+values, and it never commits, pushes, opens PRs, contacts models or prunes — the
+orchestrator stages the generated record with the task's other changes and commits it
+together.
 
 ## Configuration: `models.toml`
 

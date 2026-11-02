@@ -143,6 +143,16 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
      as a round, and is not a judgment that the run cannot pass.
    - (e) The History line names the implementer: `claude`, or `claude:<model>`, or
      `<profile> (external): <result line>`.
+   - (f) **Execution metadata (records only).** When the selected worktree (or the
+     repository root when `worktree: none`) has `.claude/task-flow.records.toml` with
+     `[records] enabled = true`, a Claude implementer round also writes
+     `<task-dir>/impl-<n>.json`:
+     `{"kind": "claude", "profile": "claude", "model": "<model>"}` with the `model`
+     argument passed to the subagent call, or the implementer agent file's frontmatter
+     `model` when none was passed (null). It is resolved and recorded at implement
+     time, never inferred from `models.toml` at finish; an unavailable model stays
+     `unknown`. External rounds already get their `impl-<n>.json` from `implement.py`.
+     Without the config, nothing is written.
 4. If the implementer appended `BLOCKED:` to the Log: phase `blocked`, show the problem,
    stop.
 
@@ -439,15 +449,38 @@ of "Explicit task list"); nothing is decomposed. Preconditions are not re-run.
    or no declaration the script is a byte-for-byte no-op and changes nothing, and
    repeated finish is idempotent. A repository without `docs/task-flow/sdlc-status.toml`
    skips this step entirely.
-3. Write `summary.md`: goal, what changed (files — including any SDLC status files from
-   step 2), how each criterion was verified, rounds taken, anything left out of scope.
-4. Propose a conventional commit message and a PR description built from `summary.md`.
-5. Commit on the task branch (in the worktree) — allowed without asking unless the config
-   says otherwise. Show the commit.
-6. **Ask** before each of: push, open a PR, remove the worktree. Do only what is
+3. Write `summary.md` with the fixed headings of the summary contract (SKILL.md →
+   summary.md): `## Goal`, `## Changes`, `## Verification`, `## Rounds`,
+   `## Out of scope` — goal, what changed (files — including any SDLC status files
+   from step 2), how each criterion was verified, rounds taken, anything left out of
+   scope.
+4. **Task record (opt-in, before the commit).** When the selected worktree (or the
+   repository root when `worktree: none`) contains `.claude/task-flow.records.toml`
+   with `[records] enabled = true`, run from the repository root, in the background,
+   and wait:
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/task_record.py" render --repo <abs repository root> --task-dir <abs .work/<id>> --worktree <abs worktree | none>`
+   then the same command with `trailers` instead of `render`; its stdout is the
+   sanitized trailer block. Exit 0: continue — stage `docs/tasks/<id>.md` in the
+   worktree together with the task's other changes, and append the trailer block once
+   at the end of the proposed commit message, after a blank line, keeping the
+   conventional subject and body and any unrelated trailers intact. Any non-zero
+   exit: show stderr and end the command before the commit — a precondition, not a
+   stop; fix and run the same command again. No record file and no trailers are
+   produced on failure, an identical re-run is a no-op, and a different existing
+   `docs/tasks/<id>.md` is refused. With no config file or `enabled = false` the
+   script is a no-op that writes nothing and prints no trailers, and finish follows
+   the old procedure unchanged — no extra approval gate. Record generation never
+   commits, pushes, opens a PR, contacts a model or prunes; it reads only the root
+   task artifacts listed in SKILL.md → Task records.
+5. Propose a conventional commit message and a PR description built from `summary.md`
+   (plus the trailer block of step 4 when it produced one).
+6. Commit on the task branch (in the worktree) — allowed without asking unless the
+   config says otherwise — including the staged `docs/tasks/<id>.md` from step 4.
+   Show the commit.
+7. **Ask** before each of: push, open a PR, remove the worktree. Do only what is
    confirmed, or what `.claude/task-flow.md → finish` allows without asking.
-7. Phase `done`.
-8. **Prune** (not asked): from the repository root run
+8. Phase `done`.
+9. **Prune** (not asked): from the repository root run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/prune_task.py" .work/<id>` and
    show its output. Every top-level `.md` file stays (task, plan, status, summary, checks,
    reviews) and so do the `impl-*.json` files, everything else in the folder is deleted, and `worktree/` is left to the

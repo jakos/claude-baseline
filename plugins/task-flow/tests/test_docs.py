@@ -196,7 +196,7 @@ BLOCKS_AFTER = {
     "docs/task-flow/setup.md": 8,
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 0,
-    "docs/task-flow/configuration.md": 2,
+    "docs/task-flow/configuration.md": 3,
     "docs/task-flow/external-implementer.md": 13,
     "docs/task-flow/gates.md": 5,
     "docs/task-flow/enforcement.md": 0,
@@ -221,6 +221,9 @@ BLOCKS_ADDED = {
     # mermaid-tagged, so it is not counted.
     "docs/development.md": 1,
     "docs/task-flow/gates.md": 2,
+    # Added by the task task-record-in-git: the records.toml example block in the new
+    # "Task records (records.toml)" section of docs/task-flow/configuration.md.
+    "docs/task-flow/configuration.md": 1,
 }
 # The pages that hold the `<!-- diagram:<name> -->` marker pairs; readme-front-page
 # copies the blocks between them onto the front page.
