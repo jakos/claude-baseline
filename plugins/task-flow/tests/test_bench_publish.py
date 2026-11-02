@@ -878,6 +878,41 @@ class HonestyTest(PublishFixture):
         self.assertIn("medians with min–max", page)
 
 
+class MergedRunNotesTest(PublishFixture):
+    def test_merge_and_turn_limit_notes_and_hidden_column(self):
+        run_dir = small_run(self.results)
+        nl = chr(10)
+        rows = [
+            json.loads(line)
+            for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        for i, row in enumerate(rows):
+            if row["profile"] == "a":
+                row["settings"] = {**row.get("settings", {}), "max_turns": 60 if i % 2 else 100}
+        write_file(run_dir / "results.jsonl", "".join(json.dumps(r, sort_keys=True) + nl for r in rows))
+        meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        meta["merged_from"] = ["first", "second"]
+        write_file(run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + nl)
+
+        done = self.bench()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        page = self.latest_md()
+        self.assertIn("this run merges rows of the runs `first`, `second`", page)
+        self.assertIn("profile `a` ran with different turn limits", page)
+        self.assertNotIn("profile `b` ran with different turn limits", page)
+        block = self.readme.read_text(encoding="utf-8")
+        self.assertIn("| Profile | Model | Accepted | Hidden pass |", block)
+        self.assertIn("Note: this run merges rows of the runs", block)
+        self.assertIn("Note: profile `a` ran with different turn limits", block)
+
+    def test_plain_run_has_no_merge_or_turn_notes(self):
+        small_run(self.results)
+        self.assertEqual(self.bench().returncode, 0)
+        page = self.latest_md()
+        self.assertNotIn("this run merges", page)
+        self.assertNotIn("different turn limits", page)
+
+
 class SelectionTest(PublishFixture):
     def test_newest_run_selection_and_refusals(self):
         rows_a = [

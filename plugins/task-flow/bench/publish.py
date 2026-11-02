@@ -326,6 +326,28 @@ def summarize(meta: dict, rows: list) -> dict:
             notes.append(
                 f"profile `{cell['profile']}` is partial — {'; '.join(cell['partial_reasons'])}"
             )
+    merged_from = meta.get("merged_from")
+    if merged_from:
+        notes.append(
+            "this run merges rows of the runs "
+            + ", ".join(f"`{rid}`" for rid in merged_from)
+            + "; each row records its `source_run` in the saved results.jsonl"
+        )
+    for name in profiles:
+        limits: dict = {}
+        for row in rows:
+            if row["profile"] == name and row["outcome"] != "skipped":
+                turns = (row.get("settings") or {}).get("max_turns")
+                limits[turns] = limits.get(turns, 0) + 1
+        if len(limits) > 1:
+            parts = ", ".join(
+                f"{count} row(s) at {turns if turns is not None else 'unknown'} turns"
+                for turns, count in sorted(limits.items(), key=lambda kv: str(kv[0]))
+            )
+            notes.append(
+                f"profile `{name}` ran with different turn limits ({parts}); "
+                "rows are not strictly like for like"
+            )
     failures = [r for r in rows if r["outcome"] != "accepted" or r["hidden"] == "fail"]
     return {
         "run_id": meta.get("run_id", ""),
@@ -631,15 +653,20 @@ def render_readme_block(summary: dict, rel: str) -> str:
         )
     lines.append("")
     lines.append(
-        "| Profile | Model | Accepted | Tokens per accepted (in / cached / out) | "
-        "Cost per accepted |"
+        "| Profile | Model | Accepted | Hidden pass | "
+        "Tokens per accepted (in / cached / out) | Cost per accepted |"
     )
-    lines.append("| " + " --- | " * 4 + "--- |")
+    lines.append("| " + " --- | " * 5 + "--- |")
     for cell in summary["all"]:
         lines.append(
             f"| {cell['label']} | {cell['model']} | {cell['accepted_text']} | "
-            f"{cell['tokens_text']} | {cell['cost_per_accepted_text']} |"
+            f"{cell['hidden_pass']} | {cell['tokens_text']} | "
+            f"{cell['cost_per_accepted_text']} |"
         )
+    for note in summary.get("notes", []):
+        if note.startswith("this run merges") or "different turn limits" in note:
+            lines.append("")
+            lines.append(f"Note: {note}")
     lines.append("")
     lines.append(f"![{summary['chart_alt']}]({prefix}benchmark/latest.svg)")
     lines.append("")
