@@ -77,6 +77,18 @@ the implementer's reasoning.
 
 Installing and first-running the plugin is covered in [Setting up task-flow](setup.md).
 
+## AI-native SDLC status
+
+task-flow's purpose is an AI-native SDLC: agents plan, build, check and review under
+human gates — assisted autonomy, never unattended. The current status of every SDLC
+stage is not maintained by hand: `scripts/sdlc_status.py` generates the `sdlc:status`
+block of the front page and the whole [AI-native SDLC status](ai-native-sdlc.md) page
+from `docs/task-flow/sdlc-status.toml`, and `check` runs as one of this repository's
+gates. The capability is opt-in per repository: without that source file the script is
+a no-op and nothing changes; `/task-flow:task-finish` runs its `finish` command so a
+task that declares `SDLC criteria closed by this task:` in its `task.md` has its
+criteria marked and the pages re-rendered before its commit.
+
 ## Layout
 
 ```
@@ -89,6 +101,8 @@ hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
+scripts/sdlc_status.py          SDLC status: validate, check, render, done and finish
+                                (opt-in per repository; see AI-native SDLC status above)
 bench/bench.py, bench/publish.py, bench/README.md  benchmark harness and publisher:
                                 implementer profiles on frozen cases, cost per accepted
                                 task, and the published benchmark pages (see Benchmark)
@@ -103,4 +117,5 @@ tests/test_drivers.py, tests/test_doctor.py
 tests/test_bench.py             offline suite for bench/bench.py
 tests/test_bench_publish.py     offline suite for bench/publish.py
 tests/test_docs.py              offline suite for the docs pages and their links
+tests/test_sdlc_status.py       offline suite for scripts/sdlc_status.py
 ```

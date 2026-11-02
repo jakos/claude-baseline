@@ -108,7 +108,7 @@ class RealRepoListTest(unittest.TestCase):
         gate = verify.gate_argvs(ROOT)
         self.assertEqual(verify.parity_problems(checks, gate), [])
         self.assertEqual(verify.test_guard_problems(checks, ROOT), [])
-        self.assertEqual(len(checks), 19, "the shared list has 19 checks")
+        self.assertEqual(len(checks), 21, "the shared list has 21 checks")
         listed = verify.listed_tests(checks)
         self.assertEqual(len(listed), len(set(listed)), "no duplicate test entry")
         self.assertEqual(sorted(set(listed)), verify.discovered_tests(ROOT))

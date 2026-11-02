@@ -422,15 +422,32 @@ of "Explicit task list"); nothing is decomposed. Preconditions are not re-run.
 ## Phase: finish — /task-flow:task-finish
 
 1. Refuse unless `last-verdict: APPROVED`.
-2. Write `summary.md`: goal, what changed (files), how each criterion was verified, rounds
-   taken, anything left out of scope.
-3. Propose a conventional commit message and a PR description built from `summary.md`.
-4. Commit on the task branch (in the worktree) — allowed without asking unless the config
+2. **SDLC status refresh (opt-in, before summary and commit).** When the selected
+   worktree (or the repository root when `worktree: none`) contains
+   `docs/task-flow/sdlc-status.toml`, run from the repository root, in the background,
+   and wait:
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc_status.py" finish --repo <abs worktree | abs repository root> --task-file <abs .work/<id>/task.md>`
+   The script validates the whole batch declared by the optional
+   `- SDLC criteria closed by this task: <stage>/<criterion>[, ...]` bullet of
+   `task.md` before changing anything, marks those criteria done in the source,
+   re-renders the `sdlc:status` block of `README.md` and the page
+   `docs/task-flow/ai-native-sdlc.md`, and re-checks them. Exit 0: continue — name the
+   changed source, README block and page in `summary.md` and commit them together with
+   the task's change. Any non-zero exit: show stderr and end the command without
+   changing `status.md` — a validation failure stops finish before the commit (a
+   precondition, not a stop; fix and run the same command again). With no source file
+   or no declaration the script is a byte-for-byte no-op and changes nothing, and
+   repeated finish is idempotent. A repository without `docs/task-flow/sdlc-status.toml`
+   skips this step entirely.
+3. Write `summary.md`: goal, what changed (files — including any SDLC status files from
+   step 2), how each criterion was verified, rounds taken, anything left out of scope.
+4. Propose a conventional commit message and a PR description built from `summary.md`.
+5. Commit on the task branch (in the worktree) — allowed without asking unless the config
    says otherwise. Show the commit.
-5. **Ask** before each of: push, open a PR, remove the worktree. Do only what is
+6. **Ask** before each of: push, open a PR, remove the worktree. Do only what is
    confirmed, or what `.claude/task-flow.md → finish` allows without asking.
-6. Phase `done`.
-7. **Prune** (not asked): from the repository root run
+7. Phase `done`.
+8. **Prune** (not asked): from the repository root run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/prune_task.py" .work/<id>` and
    show its output. Every top-level `.md` file stays (task, plan, status, summary, checks,
    reviews) and so do the `impl-*.json` files, everything else in the folder is deleted, and `worktree/` is left to the

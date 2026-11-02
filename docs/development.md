@@ -81,6 +81,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/doctor.py                read-only environment and configuration check behind /task-flow:task-doctor
     scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own
     scripts/verify.py                CI entry point: runs the shared check list, refusing list drift or unregistered tests
+    scripts/sdlc_status.py           AI-native SDLC status: validate, check, render, done and finish (opt-in, see docs/task-flow/ai-native-sdlc.md)
     bench/bench.py, bench/publish.py, bench/README.md  benchmark harness and publisher:
                                 implementer profiles on frozen cases, cost per accepted task
     bench/cases/<id>/                frozen benchmark cases (case.toml, plan.md, NOTES.md)
@@ -91,7 +92,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     tests/test_autopilot.py, tests/test_bench.py, tests/test_bench_publish.py,
     tests/test_gates.py, tests/test_models.py,
     tests/test_drivers.py, tests/test_doctor.py, tests/test_docs.py, tests/test_implement.py, tests/test_launch.py,
-    tests/test_release.py, tests/test_ci.py
+    tests/test_release.py, tests/test_ci.py, tests/test_sdlc_status.py
 ```
 
 Validate before pushing:

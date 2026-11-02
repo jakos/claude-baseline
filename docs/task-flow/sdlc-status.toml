@@ -1,0 +1,233 @@
+# AI-native SDLC status — the single source of the generated status view.
+#
+# `plugins/task-flow/scripts/sdlc_status.py` reads this file from the repository root
+# (override with `--repo`): `check` (a gate) validates it and both generated files,
+# `render` rewrites the `sdlc:status` block of README.md and the whole
+# docs/task-flow/ai-native-sdlc.md page, `done` flips criteria to done, and `finish`
+# does that for the criteria a task declares before its commit.
+#
+# Format: one `[stage.<id>]` table per stage — exactly the nine canonical stages in
+# order (plan, design, build, test, review, release, deploy, maintain, measure) — each
+# with a `title` and a nonempty `criteria` list of `[[stage.<id>.criteria]]` tables
+# with exactly these keys:
+#   id       criterion id, `[a-z][a-z0-9-]*`, unique within its stage
+#   title    one-line description
+#   state    `done` or `open`
+#   task     id of the task that closes the criterion; empty means historical (when
+#            done) or unplanned (when open) — no task id is invented
+#   evidence repository-relative path (forward slashes, no `..`) that must resolve
+#            inside this repository and exist; required nonempty when `state = "done"`,
+#            empty means none is recorded
+#
+# Stage state is derived, never stored: all criteria done = achieved, some = partial,
+# none = missing.
+
+[stage.plan]
+title = "Plan"
+
+[[stage.plan.criteria]]
+id = "plan-gate"
+title = "Reviewed plan with testable criteria"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/skills/workflow/SKILL.md"
+
+[[stage.plan.criteria]]
+id = "intent-in-git"
+title = "Intent and plan record visible in git"
+state = "open"
+task = "task-record-in-git"
+evidence = ""
+
+[[stage.plan.criteria]]
+id = "gate-enforced"
+title = "Approval gate cannot be skipped"
+state = "open"
+task = "enforce-gates-hooks"
+evidence = ""
+
+[stage.design]
+title = "Design"
+
+[[stage.design.criteria]]
+id = "design-in-plan"
+title = "Design captured inside plan.md"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/agents/planner.md"
+
+[[stage.design.criteria]]
+id = "design-role"
+title = "A designer role and design.md"
+state = "open"
+task = "designer-stage"
+evidence = ""
+
+[[stage.design.criteria]]
+id = "design-gate"
+title = "Design reviewed before planning"
+state = "open"
+task = "designer-stage"
+evidence = ""
+
+[stage.build]
+title = "Build"
+
+[[stage.build.criteria]]
+id = "guardrails-hooks"
+title = "Role boundaries enforced in hooks"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/hooks/hooks.json"
+
+[[stage.build.criteria]]
+id = "swappable-implementers"
+title = "Implementer chosen by config"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/templates/models.toml"
+
+[[stage.build.criteria]]
+id = "isolated-execution"
+title = "Model-influenced commands sandboxed"
+state = "open"
+task = "command-sandbox"
+evidence = ""
+
+[stage.test]
+title = "Test"
+
+[[stage.test.criteria]]
+id = "baseline-gates"
+title = "Baseline and deterministic gates"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/scripts/gates.py"
+
+[[stage.test.criteria]]
+id = "ci-on-pr"
+title = "All checks in CI on every PR"
+state = "open"
+task = "ci-github-actions"
+evidence = ""
+
+[[stage.test.criteria]]
+id = "evals-on-change"
+title = "Evals and bench run on change"
+state = "open"
+task = "ci-scheduled-evals"
+evidence = ""
+
+[[stage.test.criteria]]
+id = "quality-benchmark"
+title = "Benchmark measures code quality"
+state = "open"
+task = "bench-quality-scorecard"
+evidence = ""
+
+[stage.review]
+title = "Review"
+
+[[stage.review.criteria]]
+id = "independent-reviewer"
+title = "Fresh-context criterion review"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/agents/reviewer.md"
+
+[[stage.review.criteria]]
+id = "risk-flags"
+title = "Risk rating and human attention list"
+state = "open"
+task = "review-risk-flags"
+evidence = ""
+
+[[stage.review.criteria]]
+id = "pr-review"
+title = "AI review on every PR"
+state = "open"
+task = "pr-review-ci"
+evidence = ""
+
+[stage.release]
+title = "Release"
+
+[[stage.release.criteria]]
+id = "release-gate"
+title = "Controlled release with human approval"
+state = "done"
+task = ""
+evidence = "plugins/task-flow/skills/task-release/SKILL.md"
+
+[[stage.release.criteria]]
+id = "agent-pr-path"
+title = "Scoped agent PRs, protected main"
+state = "open"
+task = "agent-pr-path"
+evidence = ""
+
+[[stage.release.criteria]]
+id = "release-pipeline"
+title = "CI verifies and publishes tags"
+state = "open"
+task = "release-pipeline-ci"
+evidence = ""
+
+[[stage.release.criteria]]
+id = "rollback-rehearsed"
+title = "Rollback drill recorded"
+state = "open"
+task = "release-pipeline-ci"
+evidence = ""
+
+[stage.deploy]
+title = "Deploy"
+
+[[stage.deploy.criteria]]
+id = "deploy-adapter"
+title = "Agents can deploy behind a gate"
+state = "open"
+task = ""
+evidence = ""
+
+[stage.maintain]
+title = "Maintain"
+
+[[stage.maintain.criteria]]
+id = "signal-watch"
+title = "Scheduled drift and failure watch"
+state = "open"
+task = "maintain-signal-watch"
+evidence = ""
+
+[[stage.maintain.criteria]]
+id = "intake-loop"
+title = "Signals become tasks"
+state = "open"
+task = "task-intake"
+evidence = ""
+
+[[stage.maintain.criteria]]
+id = "regression-from-escapes"
+title = "Escapes become tests"
+state = "open"
+task = "regression-from-escapes"
+evidence = ""
+
+[stage.measure]
+title = "Measure"
+
+[[stage.measure.criteria]]
+id = "sdlc-status-view"
+title = "Stage status in the README"
+state = "open"
+task = "sdlc-status-readme"
+evidence = "README.md"
+
+[[stage.measure.criteria]]
+id = "delivery-metrics"
+title = "DORA and agent metrics"
+state = "open"
+task = "delivery-metrics"
+evidence = ""
+
