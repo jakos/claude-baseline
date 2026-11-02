@@ -1029,7 +1029,7 @@ REPORT_HEADER = (
 def _profile_rows(rows: list, size: str) -> list[str]:
     seen: list[str] = []
     for row in rows:
-        if row["size"] == size and row["profile"] not in seen:
+        if (size == "All" or row["size"] == size) and row["profile"] not in seen:
             seen.append(row["profile"])
     return seen
 
@@ -1073,7 +1073,9 @@ def _cost_per_accepted(prows: list, accepted: list) -> str:
 def _size_table(rows: list, size: str) -> list[str]:
     lines = [REPORT_HEADER, "| " + " --- | " * 12 + "--- |"]
     for name in _profile_rows(rows, size):
-        prows = [r for r in rows if r["size"] == size and r["profile"] == name]
+        prows = [
+            r for r in rows if (size == "All" or r["size"] == size) and r["profile"] == name
+        ]
         runs = len(prows)
         accepted = [r for r in prows if r["outcome"] == "accepted"]
         round1 = len([r for r in accepted if r["accepted_round"] == 1])
@@ -2212,6 +2214,108 @@ def cmd_save(args) -> int:
     return 0
 
 
+def cmd_merge(args) -> int:
+    """Combine rows of several runs of the same suite into one new run.
+
+    Sources apply in order: a later run's row for a cell (case, profile, repeat)
+    replaces the earlier one in place; cells new to the result are appended. The
+    sources must agree on harness version, repeat, review flag and, for every case they
+    share, on its fingerprint entry. The merged run gets the fingerprint of the union
+    of its cases, so a merge of runs that cover the whole suite is comparable with a
+    single run of it.
+    """
+    project = resolve_project(getattr(args, "project", None))
+    out = Path(args.out).resolve() if args.out else project / ".work" / "_bench"
+    new_id = args.into
+    if not RUN_ID.match(new_id):
+        raise BenchError(f"invalid run id {new_id!r}")
+    if new_id in args.sources:
+        raise BenchError(f"--into {new_id!r} is also a source")
+    if len(args.sources) < 2:
+        raise BenchError("merge needs at least two source runs")
+    if (out / new_id).exists():
+        raise BenchError(f"run id {new_id!r} already exists under {out}")
+    metas, run_rows = [], []
+    for rid in args.sources:
+        run_dir = out / rid
+        if not (run_dir / "run.json").is_file() or not (run_dir / "results.jsonl").is_file():
+            raise BenchError(f"no run {rid!r} under {out}")
+        metas.append(read_json(run_dir / "run.json"))
+        run_rows.append(
+            [
+                json.loads(line)
+                for line in (run_dir / "results.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+        )
+    first = metas[0]
+    for rid, meta in zip(args.sources, metas):
+        for key in ("harness_version", "repeat", "review"):
+            if meta[key] != first[key]:
+                raise BenchError(
+                    f"{rid}: {key} differs ({meta[key]!r} vs {first[key]!r} in {args.sources[0]})"
+                )
+    entries: dict = {}
+    for rid, meta in zip(args.sources, metas):
+        for cid, entry in meta["case_entries"].items():
+            if cid in entries and entries[cid] != entry:
+                raise BenchError(
+                    f"{rid}: case {cid} differs from the earlier source "
+                    "(case.toml, plan.md or commits changed)"
+                )
+            entries[cid] = entry
+    cells: dict = {}
+    for rid, rows in zip(args.sources, run_rows):
+        for row in sorted(rows, key=lambda r: r["n"]):
+            cells[(row["case"], row["profile"], row["repeat"])] = {**row, "source_run": rid}
+    merged = list(cells.values())
+    payload = {
+        "harness_version": first["harness_version"],
+        "repeat": first["repeat"],
+        "review": first["review"],
+        "cases": {cid: entries[cid] for cid in sorted(entries)},
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    fp = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    for n, row in enumerate(merged, 1):
+        row["n"] = n
+        row["run_id"] = new_id
+        row["fingerprint"] = fp
+    profiles: list = []
+    for meta in metas:
+        for name in meta["profiles"]:
+            if name not in profiles:
+                profiles.append(name)
+    meta_out = {
+        **first,
+        "run_id": new_id,
+        "created": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "case_entries": payload["cases"],
+        "cases": sorted(entries),
+        "profiles": profiles,
+        "fingerprint": fp,
+        "merged_from": list(args.sources),
+    }
+    run_dir = out / new_id
+    write_text(
+        run_dir / "run.json",
+        json.dumps(meta_out, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+    write_text(
+        run_dir / "results.jsonl",
+        "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in merged),
+    )
+    write_text(run_dir / "report.md", render_report(merged, meta_out))
+    replaced = sum(len(rows) for rows in run_rows) - len(merged)
+    print(
+        f"merged {', '.join(args.sources)} -> {new_id}: {len(merged)} rows "
+        f"({replaced} replaced) -> {run_dir / 'report.md'}"
+    )
+    return 0
+
+
 def cmd_publish(args) -> int:
     project = resolve_project(getattr(args, "project", None))
     results_dir = (
@@ -2338,6 +2442,15 @@ def main(argv=None) -> int:
         help="allow a plan that quotes a hidden line (recorded in NOTES.md)",
     )
 
+    merge_p = sub.add_parser(
+        "merge",
+        help="combine rows of several runs of one suite into a new run (later wins)",
+    )
+    merge_p.add_argument("sources", nargs="+", help="source run ids, applied in order")
+    merge_p.add_argument("--into", required=True, help="the new run id")
+    merge_p.add_argument("--out", default=None)
+    merge_p.add_argument("--project", default=None)
+
     log_p = sub.add_parser(
         "log", help="rewrite bench/results/log.md from the saved runs"
     )
@@ -2382,6 +2495,8 @@ def main(argv=None) -> int:
             return cmd_save(args)
         if args.command == "publish":
             return cmd_publish(args)
+        if args.command == "merge":
+            return cmd_merge(args)
         parser.error(f"unknown command {args.command!r}")
     except BenchError as exc:
         print(f"bench: {exc}", file=sys.stderr)

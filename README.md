@@ -123,7 +123,26 @@ Stuck? See [Setting up task-flow](docs/task-flow/setup.md).
 The latest published comparison of implementers, written by `bench.py publish`:
 
 <!-- bench:latest:start -->
-No benchmark has been published yet. See [Benchmark](docs/task-flow/benchmark.md) for how to run one.
+Latest benchmark: run combined-100, 2026-11-02, 3 cases x 1 repeats, task-flow 0.12.0.
+
+| Profile | Model | Accepted | Hidden pass | Tokens per accepted (in / cached / out) | Cost per accepted |
+|  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 3/3 (100%) | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.2112 |
+| mistral-small | mistral-small-2603 | 1/3 (33%) | 1/3 | 11,666,879 / 11,073,632 / 131,571 | $0.3340 |
+| glm-flash | zai-glm-5-3-flash | 3/3 (100%) | 2/3 | 6,202,722 / 5,051,136 / 80,816 | $0.3647 |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 3/3 (100%) | 2/3 | 1,225,506 / 1,182,549 / 13,514 | $0.0374 |
+
+Note: this run merges rows of the runs `first-pass-2`, `rerun-100-turns`, `rerun-small-task-list`; each row records its `source_run` in the saved results.jsonl
+
+Note: profile `mistral-small` ran with different turn limits (2 row(s) at 100 turns, 1 row(s) at 60 turns); rows are not strictly like for like
+
+Note: profile `glm-flash` ran with different turn limits (1 row(s) at 100 turns, 2 row(s) at 60 turns); rows are not strictly like for like
+
+Note: profile `deepseek-flash` ran with different turn limits (1 row(s) at 100 turns, 2 row(s) at 60 turns); rows are not strictly like for like
+
+![Benchmark run combined-100, all sizes: mistral-large: tokens in 1,433,672, cached 1,367,637, out 32,968, cost $0.2112; mistral-small: tokens in 11,666,879, cached 11,073,632, out 131,571, cost $0.3340; glm-flash: tokens in 6,202,722, cached 5,051,136, out 80,816, cost $0.3647; deepseek-flash: tokens in 1,225,506, cached 1,182,549, out 13,514, cost $0.0374.](docs/task-flow/benchmark/latest.svg)
+
+[Details and history](docs/task-flow/benchmark/latest.md) · [All results](docs/task-flow/benchmark.md)
 <!-- bench:latest:end -->
 
 Older results: [benchmark history](docs/task-flow/benchmark.md).

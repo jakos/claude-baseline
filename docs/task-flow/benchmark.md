@@ -76,6 +76,11 @@ workflow is:
    published pages are reproducible byte for byte from it);
 3. `publish` — write the pages (below).
 
+Re-running only some cells (for example the ones that hit `max_turns`): start a new run
+of just those profiles and cases, then `merge <first> <rerun> --into <new-id>` — later
+runs replace earlier cells — and `save` and `publish` the merged run. The published page
+says the run is merged and flags any profile whose rows used different turn limits.
+
 Adding a model to an existing run:
 
 1. add the profile to `.claude/task-flow.models.toml`;
@@ -132,4 +137,9 @@ benchmark; `run` does — that is the difference between the two.
 The list below is written by `bench.py publish`; do not edit it by hand.
 
 <!-- bench:history:start -->
+Rows are comparable only when their fingerprints are equal; a `new baseline` row marks a suite change.
+
+| Date | Run | Fingerprint | Profiles | Page |
+|  --- |  --- |  --- |  --- | --- |
+| 2026-11-02 | combined-100 | sha256:dbd92482d923 | mistral-large,mistral-small,glm-flash,deepseek-flash | latest |
 <!-- bench:history:end -->

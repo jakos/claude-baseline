@@ -158,6 +158,8 @@ uv run --script plugins/task-flow/bench/bench.py add-case --repo P --base B --re
 
 uv run --script plugins/task-flow/bench/bench.py log [--results-dir D]
 
+uv run --script plugins/task-flow/bench/bench.py merge <run-id> <run-id> ... --into <new-id> [--out D] [--project D]
+
 uv run --script plugins/task-flow/bench/bench.py publish [--run ID] [--results-dir D] [--docs-dir D] [--readme F] [--project D]
 ```
 
@@ -184,6 +186,16 @@ through `scripts/launch.py`).
   `<results-dir>/<run-id>/`, refuses (exit 2) when the target exists, and refreshes
   `<results-dir>/log.md`. `save --replace` overwrites an existing target — needed after
   `run --extend`, which appends rows to a saved run.
+- `merge a b ... --into m` combines the rows of several runs of one suite into the new
+  run `m`. Sources apply in order: a later run's row for a cell (case, profile, repeat)
+  replaces the earlier one, cells new to the result are appended, and rows are
+  renumbered. Use it to re-run only the cells that hit a cap or a failure of the
+  environment, instead of repeating a whole run. The sources must agree on harness
+  version, repeat and review flag, and on the fingerprint entry of every case they share;
+  otherwise exit 2 and nothing is written. The merged run's fingerprint is computed from
+  the union of its cases, so merging runs that cover a whole suite gives that suite's
+  fingerprint. `run.json` records `merged_from`, each row records `source_run`, and
+  `publish` notes both, plus any profile whose rows ran with different `max_turns`.
 - `log` rewrites `<results-dir>/log.md` from the saved runs (deterministic: the same
   inputs give byte-identical output, LF).
 - `publish [--run ID]` writes the committed benchmark pages from a saved run (see
