@@ -26,7 +26,7 @@ from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "doctor.py"
-README = SCRIPTS.parent / "README.md"
+SETUP_PAGE = SCRIPTS.parents[2] / "docs" / "task-flow" / "setup.md"
 sys.path.insert(0, str(SCRIPTS))
 import doctor
 import models
@@ -421,7 +421,7 @@ class SettingsTest(DoctorTest):
         self.assertEqual(row.fixes, [])
 
     def test_required_allow_matches_readme(self):
-        text = README.read_text(encoding="utf-8")
+        text = SETUP_PAGE.read_text(encoding="utf-8")
         section = text.split("## Permissions", 1)[1]
         block = re.search(r"```json\n(.*?)```", section, re.DOTALL).group(1)
         allow = json.loads(block)["permissions"]["allow"]

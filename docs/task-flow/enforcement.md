@@ -1,0 +1,57 @@
+# What enforces what
+
+Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `bench/…` are inside `plugins/task-flow/`.
+
+Prompts are advice; a hook is a rule. The rules live in `scripts/rules.py`
+(`check_command`, `check_write`) — one implementation used by the hook
+`scripts/guard.py`, which runs before every edit and shell command and applies only to
+task-flow's own agents (it reads `agent_type` from the hook input), and by
+`scripts/implement.py` for the external implementer (role `external-implementer`) and
+`scripts/gates.py` for the script checker (role `checker`):
+
+- planner, backlog, checker and reviewer can write only under `.work/`;
+- no task-flow agent can push, open a PR, `kubectl`/`oc apply`, `helm install`, `docker
+  push` or `terraform apply`;
+- no task-flow agent can commit — changes stay staged until `/task-flow:task-finish`;
+- planner, backlog and reviewer cannot run git commands that change the tree or branches;
+- no task-flow agent, and not the external implementer either, can snooze a habit-hooks
+  finding — writing a path that ends in `.habit-hooks/snooze.json` or running
+  `habit-snooze --snooze` / `habit-snooze --prune` is denied (habit-hooks' own guidance:
+  never snooze without the user's explicit approval).
+
+Commands are matched as raw text, split into `;`/`&`/`|`/newline segments, without
+regard to quotes. A `git` segment with whitespace followed by a mutating verb (`add`,
+`checkout`, `reset`, `worktree add`, ...) is denied for planner and reviewer; one with
+whitespace followed by a commit or push verb is denied for every task-flow agent.
+
+Run the rules' test with
+`uv run --script plugins/task-flow/tests/test_rules.py`, the guard's with
+`uv run --script plugins/task-flow/tests/test_guard.py`, the task list's with
+`uv run --script plugins/task-flow/tests/test_task_list.py`, the prune's with
+`uv run --script plugins/task-flow/tests/test_prune_task.py`, the autopilot's with
+`uv run --script plugins/task-flow/tests/test_autopilot.py`, the benchmark harness' with
+`uv run --script plugins/task-flow/tests/test_bench.py`, the deterministic gates' with
+`uv run --script plugins/task-flow/tests/test_gates.py`, the model config's with
+`uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
+`uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
+`uv run --script plugins/task-flow/tests/test_launch.py`, the release script's with
+`uv run --script plugins/task-flow/tests/test_release.py` and the doctor's with
+`uv run --script plugins/task-flow/tests/test_doctor.py`, the docs' with
+`uv run --script plugins/task-flow/tests/test_docs.py`.
+
+Limits of the guard, stated plainly (they apply to `implement.py`'s `run_command` too,
+which uses the same rules from `scripts/rules.py` with the `external-implementer` role):
+
+- It sees edit tools and shell command text. A shell redirect such as `echo x > file`
+  from the checker or reviewer is not caught; their prompts forbid it, nothing enforces it.
+  The snooze denial matches the write-tool path and the command text only: a shell
+  redirect or a `cp` into `.habit-hooks/snooze.json` is not caught.
+- **Known false positive:** planner and reviewer are denied when a mutating git phrase
+  appears with whitespace before the verb anywhere in the command text, including inside
+  quotes, e.g. `git grep -e "worktree add"`. Quotes are not parsed. Quoted single words
+  such as `git log --grep 'commit'` pass. Use the Grep tool for such searches. The test
+  pins this.
+- The approval gate, the 3-round cap, the no-progress stop and the list of stops are
+  enforced by the orchestration procedure and recorded in `status.md`; they are
+  instructions, not hooks. The autopilot's circuit breaker is the same: `autopilot.py`
+  computes the decision, the procedure obeys it.
