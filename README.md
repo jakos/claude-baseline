@@ -271,6 +271,8 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/doctor.py                read-only environment and configuration check behind /task-flow:task-doctor
     scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own
     bench/bench.py, bench/README.md  benchmark harness: implementer profiles on frozen cases, cost per accepted task
+    bench/cases/<id>/                frozen benchmark cases (case.toml, plan.md, NOTES.md)
+    bench/results/log.md             generated results log over the saved benchmark runs
     templates/models.toml            commented models.toml example (profiles, [roles])
     templates/release.toml           commented release config example (targets, version files)
     tests/test_guard.py, tests/test_rules.py, tests/test_task_list.py, tests/test_prune_task.py,

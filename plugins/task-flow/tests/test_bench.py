@@ -1122,5 +1122,544 @@ print(json.dumps({'total_cost_usd': 0.5, 'usage': {
         self.assertIn("exists", done.stderr)
 
 
+# ---------------------------------------------------------------------------- add-case (AC1-AC3)
+
+
+class AddCaseTest(BenchFixture):
+    def commit_result_with_test(self):
+        """A result commit that fixes calc.py and adds tests/test_calc.py."""
+        write_file(self.src / "calc.py", CALC_OK)
+        write_file(
+            self.src / "tests" / "test_calc.py",
+            "import calc\nassert calc.add(2, 3) == 5\n",
+        )
+        self.git(self.src, "add", "-A")
+        self.git(self.src, "commit", "-q", "-m", "result with test")
+        return self.git(self.src, "rev-parse", "HEAD").stdout.strip()
+
+    def plan_file(self, text=None):
+        """A plan file with CRLF endings, to prove add-case normalizes to LF."""
+        path = self.root / "plan-in.md"
+        body = (
+            text
+            if text is not None
+            else self.plan_text([command(sys.executable, "tools/check.py")])
+        )
+        path.write_bytes(body.replace("\n", "\r\n").encode("utf-8"))
+        return path
+
+    def add_case_args(self, result, plan_path, *extra):
+        return [
+            "add-case",
+            "--repo",
+            str(self.src),
+            "--base",
+            self.base_sha,
+            "--result",
+            result,
+            "--plan",
+            str(plan_path),
+            "--size",
+            "S",
+            "--id",
+            "newcase",
+            "--command",
+            command(sys.executable, "tests/test_calc.py"),
+            "--cases-dir",
+            str(self.cases),
+            *extra,
+        ]
+
+    def test_add_case_writes_case_folder(self):
+        result = self.commit_result_with_test()
+        plan_path = self.plan_file()
+        done = self.bench(*self.add_case_args(result, plan_path))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("candidate: tests/test_calc.py", done.stdout)
+        self.assertIn("case newcase written ->", done.stdout)
+        self.assertIn("check-case newcase", done.stdout)
+        case_dir = self.cases / "newcase"
+        toml = tomllib.loads((case_dir / "case.toml").read_text(encoding="utf-8"))
+        self.assertEqual(toml["id"], "newcase")
+        self.assertEqual(toml["size"], "S")
+        self.assertEqual(toml["plan"], "plan.md")
+        self.assertEqual(toml["base"], self.base_sha)
+        self.assertEqual(toml["result"], result)
+        self.assertRegex(toml["base"], r"^[0-9a-f]{40}$")
+        self.assertRegex(toml["result"], r"^[0-9a-f]{40}$")
+        self.assertEqual(
+            toml["commands"], [command(sys.executable, "tests/test_calc.py")]
+        )
+        self.assertEqual(toml["hidden_tests"], ["tests/test_calc.py"])
+        # plan.md is byte-equal to the input with LF endings
+        self.assertEqual(
+            (case_dir / "plan.md").read_bytes(),
+            plan_path.read_bytes().replace(b"\r\n", b"\n"),
+        )
+        self.assertTrue((case_dir / "NOTES.md").is_file())
+        notes = (case_dir / "NOTES.md").read_text(encoding="utf-8")
+        self.assertIn("adaptations: none", notes)
+        case = bench.load_case(case_dir)
+        self.assertEqual(case["repo"].resolve(), self.src.resolve())
+        done = self.bench("list", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("newcase  S", done.stdout)
+        self.assertIn(self.base_sha, done.stdout)
+
+    def test_add_case_refusals(self):
+        result = self.commit_result_with_test()
+        plan_path = self.plan_file()
+        leaky_plan = self.plan_file(
+            self.plan_text([command(sys.executable, "tools/check.py")])
+            + '\n    print("FAIL: hidden check failed: calc.add(2, 3) returned %d" % got)\n'
+        )
+        self.make_case("c1")
+        before = self.tree(self.cases)
+
+        def refusal(label, *args):
+            done = self.bench(*args)
+            self.assertEqual(done.returncode, 2, f"{label}: {done.stdout}{done.stderr}")
+            self.assertTrue(done.stderr.strip(), label)
+            self.assertEqual(self.tree(self.cases), before, label)
+            return done
+
+        done = refusal("unknown commit", *self.add_case_args("nosuchrev", plan_path))
+        self.assertIn("cannot resolve", done.stderr)
+        # base = result commit, result = base commit: not a descendant
+        args = self.add_case_args(result, plan_path)
+        base_i = args.index(self.base_sha)
+        result_i = args.index(result)
+        args[base_i] = result
+        args[result_i] = self.base_sha
+        done = refusal("not a descendant", *args)
+        self.assertIn("not a descendant", done.stderr)
+        done = refusal(
+            "existing id",
+            *[
+                a if a != "newcase" else "c1"
+                for a in self.add_case_args(result, plan_path)
+            ],
+        )
+        self.assertIn("already exists", done.stderr)
+        done = refusal(
+            "invalid id",
+            *[
+                a if a != "newcase" else "Bad_ID"
+                for a in self.add_case_args(result, plan_path)
+            ],
+        )
+        self.assertIn("invalid id", done.stderr)
+        done = refusal(
+            "bad size",
+            *[a if a != "S" else "XL" for a in self.add_case_args(result, plan_path)],
+        )
+        self.assertIn("invalid size", done.stderr)
+        args = self.add_case_args(result, plan_path)
+        idx = args.index("--command")
+        no_command = args[:idx] + args[idx + 2 :]
+        done = refusal("no --command", *no_command)
+        self.assertIn("--command", done.stderr)
+        done = refusal(
+            "no candidates",
+            *self.add_case_args(self.result_sha, plan_path),
+        )
+        self.assertIn("no hidden test candidate", done.stderr)
+        done = refusal(
+            "hidden test absent at result",
+            *self.add_case_args(result, plan_path, "--hidden-test", "nope.py"),
+        )
+        self.assertIn("not present at result", done.stderr)
+        done = refusal(
+            "plan leaks hidden code",
+            *self.add_case_args(result, leaky_plan, "--hidden-test", "hidden_check.py"),
+        )
+        self.assertIn("leaks hidden test code", done.stderr)
+
+    def test_add_case_repo_path(self):
+        result = self.commit_result_with_test()
+        plan_path = self.plan_file()
+        # the cases dir inside the source repo: repo is relative to the case folder
+        inside = self.src / "cases"
+        args = self.add_case_args(result, plan_path)
+        args[args.index(str(self.cases))] = str(inside)
+        done = self.bench(*args)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        case_dir = inside / "newcase"
+        toml = tomllib.loads((case_dir / "case.toml").read_text(encoding="utf-8"))
+        self.assertEqual(toml["repo"], "../..")
+        case = bench.load_case(case_dir)
+        self.assertEqual(case["repo"].resolve(), self.src.resolve())
+        # the cases dir outside the source repo: repo is an absolute POSIX path
+        done = self.bench(*self.add_case_args(result, plan_path))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        toml = tomllib.loads(
+            (self.cases / "newcase" / "case.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(toml["repo"], self.src.as_posix())
+        case = bench.load_case(self.cases / "newcase")
+        self.assertEqual(case["repo"].resolve(), self.src.resolve())
+
+
+# ---------------------------------------------------------------------------- check-case (AC4-AC6)
+
+
+class CheckCaseTest(BenchFixture):
+    def commit_fixed_result(self):
+        """A result commit that fixes calc.py and keeps hidden_check.py (idempotent)."""
+        write_file(self.src / "calc.py", CALC_OK)
+        self.git(self.src, "add", "-A")
+        self.git(self.src, "commit", "-q", "-m", "fix calc", check=False)
+        return self.git(self.src, "rev-parse", "HEAD").stdout.strip()
+
+    def good_case(self, cid="c1", **kwargs):
+        result = kwargs.pop("result", None) or self.commit_fixed_result()
+        visible = kwargs.pop("visible", [command(sys.executable, "tools/check.py")])
+        hidden = kwargs.pop(
+            "hidden_commands", [command(sys.executable, "hidden_check.py")]
+        )
+        plan = kwargs.pop("plan", None) or self.plan_text(visible)
+        return self.make_case(
+            cid,
+            commands=visible,
+            hidden_commands=hidden,
+            plan=plan,
+            result=result,
+            **kwargs,
+        )
+
+    def test_check_case_ok_and_failures(self):
+        self.good_case("good")
+        done = self.bench("check-case", "good", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual(
+            len([l for l in lines if l.startswith("PASS ")]), 7, done.stdout
+        )
+        for name in (
+            "load",
+            "commits",
+            "hidden-files",
+            "no-leak",
+            "visible-on-result",
+            "hidden-on-result",
+            "hidden-on-base",
+        ):
+            self.assertIn(f"PASS {name}:", done.stdout)
+        self.assertEqual(lines[-1], "check-case good: ok")
+
+        # a hidden command that also passes on the base -> hidden-on-base FAIL
+        self.good_case(
+            "passbase",
+            hidden_commands=[
+                command(sys.executable, "hidden_check.py"),
+                command(sys.executable, "-c", "pass"),
+            ],
+        )
+        done = self.bench("check-case", "passbase", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL hidden-on-base:", done.stdout)
+        self.assertIn("command 2", done.stdout)
+        self.assertIn("failed (1 checks)", done.stdout)
+
+        # a visible command failing on the result -> visible-on-result FAIL, number named
+        result = self.commit_fixed_result()
+        visible = [
+            command(sys.executable, "tools/check.py"),
+            command(sys.executable, "tools/check2.py"),
+        ]
+        self.make_case(
+            "visfail",
+            commands=visible,
+            hidden_commands=[command(sys.executable, "hidden_check.py")],
+            plan=self.plan_text(visible),
+            result=result,
+        )
+        done = self.bench("check-case", "visfail", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL visible-on-result:", done.stdout)
+        self.assertIn("command 2", done.stdout)
+
+        # a plan line equal to an added hidden line -> no-leak FAIL
+        result = self.commit_fixed_result()
+        leaky = self.plan_text([command(sys.executable, "tools/check.py")]) + (
+            '\n    print("FAIL: hidden check failed: calc.add(2, 3) returned %d" % got)\n'
+        )
+        self.make_case(
+            "leaky",
+            commands=[command(sys.executable, "tools/check.py")],
+            hidden_commands=[command(sys.executable, "hidden_check.py")],
+            plan=leaky,
+            result=result,
+        )
+        done = self.bench("check-case", "leaky", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL no-leak:", done.stdout)
+
+        # a missing hidden file -> hidden-files FAIL, later checks SKIP
+        self.good_case("nofile", hidden_tests=["missing.py"])
+        done = self.bench("check-case", "nofile", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL hidden-files:", done.stdout)
+        for name in ("visible-on-result", "hidden-on-result", "hidden-on-base"):
+            self.assertIn(f"FAIL {name}: SKIP", done.stdout)
+
+        # an unknown case -> exit 2
+        done = self.bench("check-case", "nope", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown case", done.stderr)
+
+    def test_check_case_leaves_no_trace(self):
+        self.good_case("c1")
+
+        def snapshot():
+            return (
+                self.git(self.src, "status", "--porcelain").stdout,
+                self.git(self.src, "worktree", "list").stdout,
+                self.git(self.src, "for-each-ref").stdout,
+                self.git(self.src, "rev-parse", "HEAD").stdout,
+            )
+
+        before = snapshot()
+        cases_before = self.tree(self.cases)
+        done = self.bench("check-case", "c1", "--cases-dir", str(self.cases))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(self.tree(self.cases), cases_before)
+        self.assertFalse(self.out.exists())
+
+
+class NoLeakTest(BenchFixture):
+    def test_no_leak_rule(self):
+        shared = 'SHARED_LINE = "present at the base as well, long enough"'
+        spaced = 'SPACED = "same modulo surrounding whitespace, long"'
+        hidden = 'NEW_HIDDEN_LINE = "leaks into the plan, long enough"'
+        write_file(self.src / "h.py", f"{shared}\n{spaced}\nx = 1\n")
+        self.git(self.src, "add", "-A")
+        self.git(self.src, "commit", "-q", "-m", "base h")
+        base = self.git(self.src, "rev-parse", "HEAD").stdout.strip()
+        write_file(
+            self.src / "h.py",
+            f"{shared}\n    {spaced}   \nSHORT_NEW = 1\n{hidden}\n",
+        )
+        self.git(self.src, "add", "-A")
+        self.git(self.src, "commit", "-q", "-m", "result h")
+        result = self.git(self.src, "rev-parse", "HEAD").stdout.strip()
+
+        leaking_plan = (
+            f"# Plan\n## Verification commands\n```\ntrue\n```\n\n"
+            f"{shared}\nSHORT_NEW = 1\n   {hidden}   \n"
+        )
+        leaks = bench.no_leak(self.src, base, result, ["h.py"], leaking_plan)
+        # only the new, long line leaks; the shared and the whitespace variants do not
+        self.assertEqual(leaks, [hidden])
+        clean_plan = f"# Plan\n{shared}\nSHORT_NEW = 1\n"
+        self.assertEqual(
+            bench.no_leak(self.src, base, result, ["h.py"], clean_plan), []
+        )
+        # a file that is new at the result: every long line is hidden
+        write_file(self.src / "new.py", f"{hidden}\n")
+        self.git(self.src, "add", "-A")
+        self.git(self.src, "commit", "-q", "-m", "new file")
+        result2 = self.git(self.src, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(
+            bench.no_leak(self.src, base, result2, ["new.py"], hidden), [hidden]
+        )
+
+
+# ---------------------------------------------------------------------------- results log (AC7, AC8)
+
+
+def canned_row(
+    run_id,
+    n,
+    profile,
+    outcome="accepted",
+    billing="api",
+    cost_known=True,
+    hidden="pass",
+    cost=0.004,
+    tokens=(1000, 400, 500),
+):
+    return {
+        "run_id": run_id,
+        "n": n,
+        "case": "c1",
+        "size": "S",
+        "profile": profile,
+        "repeat": 1,
+        "outcome": outcome,
+        "reason": "",
+        "rounds": 1,
+        "accepted_round": 1 if outcome == "accepted" else None,
+        "green": outcome == "accepted",
+        "hidden": hidden,
+        "out_of_scope": [],
+        "tokens": {"input": tokens[0], "cached": tokens[1], "output": tokens[2]},
+        "cache_tokens": {"read": 0, "write": 0},
+        "cost_usd": cost,
+        "review_cost_usd": 0.0,
+        "review_tokens": {"input": 0, "cached": 0, "output": 0},
+        "cost_known": cost_known,
+        "billing": billing,
+        "model": f"{profile}-model",
+        "settings": {},
+        "seconds": 1.0,
+        "implement_seconds": 1.0,
+        "started_at": "2026-01-01T00:00:00Z",
+        "fingerprint": "sha256:" + "ab" * 32,
+        "harness_version": 1,
+    }
+
+
+def canned_run(results_dir, run_id, created, profiles, rows):
+    run_dir = results_dir / run_id
+    run_dir.mkdir(parents=True)
+    meta = {
+        "run_id": run_id,
+        "created": created,
+        "harness_version": 1,
+        "repeat": 1,
+        "review": False,
+        "cases": ["c1"],
+        "case_entries": {},
+        "profiles": profiles,
+        "fingerprint": "sha256:" + "ab" * 32,
+    }
+    write_file(run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    write_file(
+        run_dir / "results.jsonl",
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+    )
+    return run_dir
+
+
+class LogTest(BenchFixture):
+    def test_log_deterministic(self):
+        self.results_dir.mkdir()
+        rows1 = [
+            canned_row("20260101T000000Z", 1, "p1", cost=0.004),
+            canned_row(
+                "20260101T000000Z", 2, "p1", cost=0.006, tokens=(2000, 800, 900)
+            ),
+        ]
+        canned_run(
+            self.results_dir, "20260101T000000Z", "2026-01-01T00:00:00Z", ["p1"], rows1
+        )
+        rows2 = [
+            canned_row(
+                "20260202T000000Z",
+                1,
+                "sub",
+                outcome="skipped",
+                billing="subscription",
+                cost_known=False,
+                hidden="not_run",
+                cost=0.0,
+            ),
+            canned_row(
+                "20260202T000000Z", 2, "sub", billing="subscription", cost_known=False
+            ),
+        ]
+        canned_run(
+            self.results_dir, "20260202T000000Z", "2026-02-02T00:00:00Z", ["sub"], rows2
+        )
+        text = bench.render_log(self.results_dir)
+        self.assertEqual(text, bench.render_log(self.results_dir))
+        lines = text.splitlines()
+        header = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("| Run | Date | Harness |")
+        )
+        rows = [l for l in lines[header + 2 :] if l.startswith("| ")]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0].startswith("| 20260101T000000Z | 2026-01-01 |"))
+        self.assertTrue(rows[1].startswith("| 20260202T000000Z | 2026-02-02 |"))
+        self.assertIn("sha256:abababababab", rows[0])  # fingerprint shortened to 12 hex
+        self.assertIn(
+            "| p1 | p1-model | 2 | 2 | 2 | 2/2 | 1500 / 600 / 700 | $0.0050 |", rows[0]
+        )
+        self.assertIn("| sub (partial) | sub-model | 2 | 1 | 1 | 1/1 |", rows[1])
+        self.assertIn("| subscription |", rows[1])  # cost per accepted, D10 rule
+        # the same cost per accepted as report.md computes
+        report = bench.render_report(
+            rows1,
+            json.loads(
+                (self.results_dir / "20260101T000000Z" / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+        )
+        self.assertIn("$0.0050", report)
+        self.assertIn("$0.0050", text)
+        # the CLI rewrites the same bytes
+        done = self.bench("log", "--results-dir", str(self.results_dir))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            (self.results_dir / "log.md").read_text(encoding="utf-8"), text
+        )
+        # an empty results dir
+        empty = self.root / "empty-results"
+        empty.mkdir()
+        self.assertIn("No saved runs yet.", bench.render_log(empty))
+
+    def test_save_refreshes_log_and_replace(self):
+        server = self.fix_calc_server()
+        self.add_profile("fake", server)
+        self.make_case()
+        done = self.run_bench("r1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        done = self.bench(
+            "save", "r1", "--out", str(self.out), "--results-dir", str(self.results_dir)
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        target = self.results_dir / "r1"
+        for name in ("results.jsonl", "run.json", "report.md"):
+            self.assertEqual(
+                (target / name).read_bytes(),
+                (self.out / "r1" / name).read_bytes(),
+                name,
+            )
+        log = (self.results_dir / "log.md").read_text(encoding="utf-8")
+        self.assertIn("| r1 | ", log)
+        self.assertIn("$0.0049", log)
+        log_bytes = (self.results_dir / "log.md").read_bytes()
+        target_bytes = (target / "results.jsonl").read_bytes()
+
+        # a second save refuses and changes nothing
+        done = self.bench(
+            "save", "r1", "--out", str(self.out), "--results-dir", str(self.results_dir)
+        )
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("exists", done.stderr)
+        self.assertEqual((target / "results.jsonl").read_bytes(), target_bytes)
+        self.assertEqual((self.results_dir / "log.md").read_bytes(), log_bytes)
+
+        # after a changed results.jsonl (as run --extend leaves it), --replace re-saves
+        rows = self.rows("r1")
+        rows[0]["cost_usd"] = 0.02
+        write_file(
+            self.out / "r1" / "results.jsonl",
+            "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+        )
+        done = self.bench(
+            "save",
+            "r1",
+            "--replace",
+            "--out",
+            str(self.out),
+            "--results-dir",
+            str(self.results_dir),
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            (target / "results.jsonl").read_bytes(),
+            (self.out / "r1" / "results.jsonl").read_bytes(),
+        )
+        log = (self.results_dir / "log.md").read_text(encoding="utf-8")
+        self.assertIn("$0.0200", log)
+        self.assertNotIn("$0.0049", log)
+
+
 if __name__ == "__main__":
     unittest.main()

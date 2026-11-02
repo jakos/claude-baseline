@@ -897,6 +897,15 @@ hidden acceptance tests — and reports cost per accepted task in
 uv run --script plugins/task-flow/bench/bench.py run --profiles <name> [--review] ...
 ```
 
+The suite has three frozen cases built from finished tasks of this repository —
+`bench/cases/task-list` (S), `bench/cases/finish-prunes-task-folder` (M) and
+`bench/cases/autopilot-plan-and-run-tasks` (L), each with its `case.toml`, plan copy and
+`NOTES.md`. `bench.py add-case` writes a new case folder from any repository and commit
+pair, `bench.py check-case <id>` calibrates a case (its hidden tests must pass on the
+result tree and fail on the base tree), and `bench.py log` regenerates the committed
+results log `bench/results/log.md` from the saved runs (`save` refreshes it too, and
+`save --replace` re-saves an extended run).
+
 It spends model budget (and with `--review`, Claude limits too), so it is never run by
 the gates — only its test is. See [bench/README.md](bench/README.md) for the case
 format, all commands and flags, the run layout, isolation and safety, and the limits.
@@ -953,8 +962,9 @@ scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drive
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
 bench/bench.py, bench/README.md  benchmark harness: implementer profiles on frozen cases,
-                                cost per accepted task (see Benchmark); bench/cases/ and
-                                bench/results/ are filled by later tasks
+                                cost per accepted task (see Benchmark)
+bench/cases/<id>/               frozen benchmark cases: case.toml, plan.md, NOTES.md
+bench/results/log.md            generated results log over the saved runs (bench.py log)
 templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)

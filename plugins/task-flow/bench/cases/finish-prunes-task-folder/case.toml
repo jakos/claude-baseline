@@ -1,0 +1,8 @@
+id = "finish-prunes-task-folder"
+size = "M"
+repo = "../../../../.."
+base = "1a82fa158fa596218f14996e7cd538d0428f1e4b"
+result = "cbe7683e9dcd9a6935299e20e62bdd73e86875b9"
+plan = "plan.md"
+hidden_tests = ["plugins/task-flow/tests/test_prune_task.py"]
+commands = ["uv run --script plugins/task-flow/tests/test_prune_task.py PruneTaskTest.test_keeps_all_markdown_files PruneTaskTest.test_removes_non_markdown_and_dirs PruneTaskTest.test_removes_markdown_inside_scratch_dirs PruneTaskTest.test_never_touches_worktree PruneTaskTest.test_refuses_when_not_done PruneTaskTest.test_refuses_outside_work_dir PruneTaskTest.test_refuses_missing_dir PruneTaskTest.test_dry_run_deletes_nothing PruneTaskTest.test_second_run_is_noop PruneTaskTest.test_removes_read_only_files PruneTaskTest.test_symlink_not_followed"]
