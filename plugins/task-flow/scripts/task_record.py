@@ -40,8 +40,10 @@ refused (exit 2) before any output.
   destination (invalid id, traversal, symlink escape) or any refusal changes no file.
 - `trailers` prints the sanitized trailer block for the commit message, one
   `Key: value` per line: `Task-Id`, `Task-Rounds`, repeated `Task-Implementer:
-  <profile>/<model>` for the distinct executed pairs and `Task-Plan-Approved:
-  user|auto`. `Task-Risk` is not emitted while no merged risk schema exists. Values
+  <profile>/<model>` for the distinct executed pairs, `Task-Plan-Approved:
+  user|auto`, and — when the task is a member of an epic (`.work/_epics/<epic-id>/`) —
+  exactly one `Task-Epic: <epic-id>` (the open epic, else the most recently completed
+  one). `Task-Risk` is not emitted while no merged risk schema exists. Values
   are validated single-line metadata without control characters.
 
 Exit codes: 0 success (or disabled no-op); 2 refusal — invalid config, malformed or
@@ -59,6 +61,8 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+import epics
 
 CONFIG_RELPATH = Path(".claude") / "task-flow.records.toml"
 RECORDS_RELPATH = Path("docs") / "tasks"
@@ -490,6 +494,8 @@ def validate_trailer_value(key: str, value: str) -> None:
         raise RecordError("trailer Task-Rounds: value is not a number; refusing")
     if key == "Task-Plan-Approved" and value not in APPROVALS:
         raise RecordError("trailer Task-Plan-Approved: value must be user or auto")
+    if key == "Task-Epic" and not TASK_ID_RE.match(value):
+        raise RecordError("trailer Task-Epic: value is not a valid epic id; refusing")
     if key == "Task-Implementer":
         parts = value.split("/")
         if len(parts) != 2 or not all(
@@ -500,14 +506,20 @@ def validate_trailer_value(key: str, value: str) -> None:
             )
 
 
-def render_trailers(record: Record) -> list[str]:
-    """The sanitized trailer block; `Task-Risk` is absent until a risk schema merges."""
+def render_trailers(record: Record, epic_id: str | None = None) -> list[str]:
+    """The sanitized trailer block; `Task-Risk` is absent until a risk schema merges.
+
+    A member task gets exactly one `Task-Epic: <epic-id>` trailer; a task outside every
+    epic gets none, and a disabled repository gets no trailers at all.
+    """
     entries = [
         ("Task-Id", record.task_id),
         ("Task-Rounds", str(len(record.rounds))),
     ]
     entries += [("Task-Implementer", pair) for pair in record.implementer_pairs()]
     entries.append(("Task-Plan-Approved", record.approval))
+    if epic_id is not None:
+        entries.append(("Task-Epic", epic_id))
     lines = []
     for key, value in entries:
         validate_trailer_value(key, value)
@@ -659,7 +671,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"disabled: {config} does not enable records; nothing to do")
             return 0
         record = build_record(task_dir)
-        trailers = render_trailers(record)
+        try:
+            epic_id = epics.epic_for_task(repo, record.task_id)
+            broken = epics.broken_epic_ids(repo)
+        except epics.EpicError as exc:
+            raise RecordError(f"epic membership: {exc}") from exc
+        if broken:
+            print(
+                f"task_record: warning: skipping unreadable epic(s): "
+                f"{', '.join(broken)}",
+                file=sys.stderr,
+            )
+        trailers = render_trailers(record, epic_id)
         if args.command == "trailers":
             for line in trailers:
                 print(line)

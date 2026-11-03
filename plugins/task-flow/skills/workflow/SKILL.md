@@ -33,6 +33,12 @@ Autopilot runs live in `.work/_autopilot/<run-id>/` (`requirements.md`, `run.md`
 `.work/<task-id>/` folders. Benchmark runs live in `.work/_bench/<run-id>/`; their task
 folders are scratch copies under `runs/<n>/.work/`, not real tasks.
 
+Epics live in `.work/_epics/<epic-id>/` (`epic.md`, plus `report.md` and
+`attempts/<task-id>/attempt-<k>/` once written); an epic is **not** a task: it never has
+a `status.md`, is never listed or picked by `task-list`, and never enters the
+`.work/<task-id>/` namespace. `.work/_epics/` is read and written at the repository root
+like the other `.work/` artifacts.
+
 When an external profile implements (`[roles] implementer` in models.toml), the script
 `scripts/implement.py`, not an agent, writes the `round <n> implementer:` and `BLOCKED:`
 Log lines in `status.md`.
@@ -43,6 +49,59 @@ kept) remain; any other file or directory in the folder is scratch and is delete
 Source changes happen **in the worktree** when `status.md` names one, otherwise in the
 repository root on the task branch. `.work/` files are always read and written at the
 repository root, never inside the worktree.
+
+## epics
+
+An epic gives a group of tasks one persistent id that exists before execution, runs or
+resumes through the ordinary autopilot loop (`source: epic` in the run's `run.md`, linked
+by the epic's `active-run:` field), and is inspected with `scripts/epics.py status`. The
+strict `epic.md` contract (UTF-8, LF, atomic replacement; every refusal leaves the existing
+bytes unchanged):
+
+```markdown
+# Epic: <epic-id>
+- title: <one line>
+- goal: <one line>
+- base: <branch the root tasks start from>
+- state: pending | active | paused | completed
+- delivery: per-task | epic
+- active-run: none | <autopilot run-id>
+## Tasks
+| # | Task | Depends on |
+| --- | --- | --- |
+| 1 | first-task | - |
+| 2 | second-task | first-task |
+## History
+- <ISO timestamp> <event> — <one line>
+```
+
+- Exactly the six header fields above, in that order; duplicate or unknown fields are
+  refused. Exactly the `## Tasks` and `## History` sections, in that order.
+- Task rows are numbered from 1; `Depends on` is `-` or the id of one **earlier** row —
+  at most one parent (joining branches needs a separate integration design). Forward,
+  dangling and cyclic dependencies and multiple parents are refused.
+- A row must name an existing ordinary task; epic ids and task ids never collide in
+  either creation direction, and a task belongs to at most one non-completed epic
+  (a completed epic's history survives later permitted membership).
+- `state` is derived: `completed` when every member is `done`, `active` while the linked
+  run is running, `paused` when the linked run is paused or stopped or a member failed,
+  else `pending`; adding a task to a completed epic reopens it as `pending`.
+- `delivery` is intent only until `agent-pr-path` merges: epics never push, open PRs,
+  merge or make an aggregate integration commit; a branched forest reports all delivery
+  branches.
+- `new`/`add`/`remove` mutate membership only while the epic is idle (active execution
+  freezes membership); a started task is never removed and no dangling edge is left.
+  While a run is linked, an idle `add`/`remove` — or `epics.py sync-run` after a hand edit
+  of `epic.md` — regenerates the linked run's `## Tasks` table from the epic graph:
+  existing rows keep their `Tokens used` / `External USD` cells and the header fields,
+  new rows start at `0`, and the run state returns to `planning` so the overview and the
+  start gate run again.
+- A retry offered through the epic archives the failed task's round evidence and a spend
+  snapshot under `attempts/<task-id>/attempt-<k>/` before round filenames are reused (task
+  pruning only prunes `.work/<task-id>/`, so the archive survives), records the attempt and
+  the previous round count in History, and — only with the user's explicit authorization —
+  resets the task's `status.md` (phase `approved`, round 0) so the next
+  `/task-flow:task-run` starts a new attempt at round 1; `--auto` never grants it.
 
 ## plan.md
 

@@ -18,6 +18,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "autopilot.py"
 sys.path.insert(0, str(SCRIPTS))
 import autopilot
+import epics
 
 HAS_GIT = shutil.which("git") is not None
 
@@ -61,11 +62,13 @@ class RunFixture(unittest.TestCase):
         omit=(),
         usd=None,
         source=None,
+        epic=None,
     ):
         """rows: (id, depends, tokens, phase) tuples; also creates the task folders.
 
         usd: None for the 4-column table, or a list of 5th-cell strings, one per row.
         source: None omits the `source:` header line, otherwise its value.
+        epic: None omits the `epic:` header line, otherwise its value.
         """
         header = {
             "mode": mode,
@@ -77,6 +80,8 @@ class RunFixture(unittest.TestCase):
         }
         if source is not None:
             header["source"] = source
+        if epic is not None:
+            header["epic"] = epic
         header["state"] = "running"
         lines = ["# Autopilot: r1"]
         lines += [f"- {k}: {v}" for k, v in header.items() if k not in omit]
@@ -833,6 +838,12 @@ class StackTest(unittest.TestCase):
         self.assert_refused(self.stack("_autopilot"), "_autopilot")
         self.assert_refused(self.stack(".hidden"), ".hidden")
 
+    def test_stack_refuses_epic_id(self):
+        self.task("a", "new")
+        (self.work / "_epics" / "e1").mkdir(parents=True)
+        self.assert_refused(self.stack("e1"), "epic id, not a task")
+        self.assert_refused(self.stack("a,e1"), "epic id, not a task")
+
     def test_stack_refuses_planned_without_plan(self):
         self.task("a", "planned")
         self.assert_refused(self.stack("a"), "a")
@@ -975,6 +986,168 @@ class StackedRunTest(RunFixture):
         self.assertEqual(self.out("next"), "wait b: escalated")
         self.run_md(rows, mode="semi", source="tasks", cont="b")
         self.assertEqual(self.out("next"), "stop: cannot finish: c depend on failed b")
+
+
+class EpicSourceTest(RunFixture):
+    """`source: epic` runs: validated epic linkage, forest `next`, dependency-aware base."""
+
+    def make_epic(self, rows, epic_id="demo", base="epic-base", active_run="r1"):
+        directory = self.root / ".work" / "_epics" / epic_id
+        directory.mkdir(parents=True, exist_ok=True)
+        tasks = [
+            epics.EpicTask(number=number, task_id=task_id, depends=depends)
+            for number, (task_id, depends) in enumerate(rows, 1)
+        ]
+        epic = epics.Epic(
+            epic_id=epic_id,
+            title="T",
+            goal="G",
+            base=base,
+            state="active",
+            delivery="per-task",
+            active_run=active_run,
+            tasks=tasks,
+            history=["- 2026-01-01T00:00:00Z created — fixture"],
+        )
+        (directory / "epic.md").write_bytes(epics.render_epic(epic).encode("utf-8"))
+        return epic
+
+    def epic_run(
+        self, rows, mode="full", epic_id="demo", source="epic", epic_field="demo"
+    ):
+        self.run_md(
+            rows,
+            mode=mode,
+            source=source,
+            epic=epic_field,
+        )
+
+    def test_accepts_matching_epic_table(self):
+        self.make_epic([("a", None), ("b", None), ("c", "a")])
+        self.epic_run(
+            [
+                ("a", "-", "0", "approved"),
+                ("b", "-", "0", "approved"),
+                ("c", "a", "0", "approved"),
+            ]
+        )
+        self.assertIn("| 1 | a |", self.out("estimate"))
+        self.assertEqual(self.out("next"), "run a")
+
+    def test_refuses_unlinked_epic(self):
+        self.make_epic([("a", None)], active_run="none")
+        self.epic_run([("a", "-", "0", "approved")])
+        for command in ("estimate", "next"):
+            with self.subTest(command=command):
+                result = self.call(command)
+                self.assertEqual((result.returncode, result.stdout), (2, b""))
+                self.assertIn(b"not linked to run", result.stderr)
+
+    def test_refuses_second_run_of_same_epic(self):
+        self.make_epic([("a", None)], active_run="r1")
+        self.epic_run([("a", "-", "0", "approved")])
+        self.assertEqual(self.out("next"), "run a")
+        other = self.root / ".work" / "_autopilot" / "r2"
+        other.mkdir(parents=True)
+        text = (
+            (self.run_dir / "run.md")
+            .read_text(encoding="utf-8")
+            .replace("# Autopilot: r1", "# Autopilot: r2")
+        )
+        (other / "run.md").write_text(text, encoding="utf-8")
+        result = self.call("next", other)
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"not linked to run 'r2'", result.stderr)
+
+    def test_refuses_row_mismatch_with_epic(self):
+        self.make_epic([("a", None), ("b", None)])
+        self.task("b", "approved", plan())
+        self.epic_run([("a", "-", "0", "approved"), ("c", "-", "0", "approved")])
+        result = self.call("next")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"do not match the epic", result.stderr)
+
+    def test_refuses_dependency_mismatch_with_epic(self):
+        self.make_epic([("a", None), ("c", "a")])
+        self.epic_run([("a", "-", "0", "approved"), ("c", "-", "0", "approved")])
+        result = self.call("next")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"depends on", result.stderr)
+
+    def test_refuses_epic_line_without_epic_source(self):
+        self.make_epic([("a", None)])
+        self.epic_run([("a", "-", "0", "approved")], source="tasks", epic_field="demo")
+        result = self.call("next")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"only allowed with source: epic", result.stderr)
+
+    def test_refuses_missing_epic_line(self):
+        self.make_epic([("a", None)])
+        self.run_md([("a", "-", "0", "approved")], source="epic")
+        result = self.call("next")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"epic: <epic-id>", result.stderr)
+
+    def test_refuses_completed_epic(self):
+        self.make_epic([("a", None)])
+        self.task("a", "done", plan())
+        self.epic_run([("a", "-", "10", "done")])
+        result = self.call("next")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"completed", result.stderr)
+
+    def test_next_forest_failing_root_blocks_child_permits_other_root(self):
+        self.make_epic([("a", None), ("b", None), ("c", "a")])
+        self.epic_run(
+            [
+                ("a", "-", "10", "escalated"),
+                ("b", "-", "0", "approved"),
+                ("c", "a", "0", "approved"),
+            ],
+            mode="full",
+        )
+        self.assertEqual(self.out("next"), "run b")
+        self.epic_run(
+            [
+                ("a", "-", "10", "escalated"),
+                ("b", "-", "10", "done"),
+                ("c", "a", "0", "approved"),
+            ],
+            mode="full",
+        )
+        self.assertEqual(self.out("next"), "stop: cannot finish: c depend on failed a")
+
+    def test_base_roots_use_epic_base_children_use_parent(self):
+        self.make_epic(
+            [("a", None), ("z", None), ("b", None), ("c", "a")], base="epic-base"
+        )
+        self.epic_run(
+            [
+                ("a", "-", "10", "done"),
+                ("z", "-", "10", "done"),
+                ("b", "-", "0", "approved"),
+                ("c", "a", "0", "approved"),
+            ]
+        )
+        # roots use the epic base, irrespective of the unrelated done rows a and z
+        self.assertEqual(self.out_base("b"), "epic-base")
+        # the child uses its completed parent's branch, not the last done row
+        self.assertEqual(self.out_base("c"), "task/a")
+
+    def test_base_refuses_child_with_parent_not_done(self):
+        self.make_epic([("a", None), ("c", "a")])
+        self.epic_run([("a", "-", "0", "approved"), ("c", "a", "0", "approved")])
+        result = self.call_base("c")
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertIn(b"parent a of c is not done", result.stderr)
+
+    def call_base(self, task_id):
+        return self.call("base", self.run_dir, task_id)
+
+    def out_base(self, task_id):
+        result = self.call_base(task_id)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode("utf-8").strip()
 
 
 class BaseTest(RunFixture):

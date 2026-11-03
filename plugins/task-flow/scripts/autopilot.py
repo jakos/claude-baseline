@@ -54,11 +54,21 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   `approved`, when `.work/<id>/worktree` exists, or when `run.md` has no `base:`.
 
 `<run-dir>` is `.work/_autopilot/<run-id>/` with a `run.md` written by the orchestrator;
-this script only reads. The optional header line `source: backlog | tasks` (absent means
-`backlog`) marks a run made from an explicit task list: `tasks` requires `bootstrap:
-none`, row 1 depending on `-`, and every later row depending on exactly the previous
-row, and `estimate` appends a `warning:` line when such a run has more than 10 rows.
-Stdlib only, started by `uv run --script`.
+this script only reads. The optional header line `source: backlog | tasks | epic` (absent
+means `backlog`) marks a run made from an explicit task list or an epic: `tasks`
+requires `bootstrap: none`, row 1 depending on `-`, and every later row depending on
+exactly the previous row, and `estimate` appends a `warning:` line when such a run has
+more than 10 rows. `source: epic` additionally requires an `epic: <epic-id>` header line:
+the epic must exist under `.work/_epics/<epic-id>/epic.md`, be linked to this run
+(`active-run:` of the epic equals the run id), not be completed, and the `## Tasks`
+table must match the epic's rows and dependencies exactly — the run table is generated
+from the epic graph, never edited by hand. After an idle membership change, `epics.py`
+regenerates the linked run's table (existing rows keep their spend cells, new rows start
+at `0`, the run state returns to `planning`), so the run is accepted again. For such a
+run, `base <run-dir> <task-id>`
+returns the epic's `base` for root rows and `task/<parent>` for a row whose single parent
+is done, irrespective of unrelated completed rows. Stdlib only, started by
+`uv run --script`.
 
 It also exposes `verification_commands(plan)`, the shared parser of a plan's first
 `## Verification commands` fenced block, used by `plan_counts` here and by
@@ -74,6 +84,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+import epics
 
 # Coarse default estimate constants (tokens). Invented, not measured.
 CHECK_BASE, CHECK_PER_COMMAND = 15000, 3000
@@ -340,8 +352,15 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
     )
     bootstrap = fields["bootstrap"]
     source = fields.get("source", "backlog")
-    if source not in ("backlog", "tasks"):
-        raise Refusal(f"source must be backlog or tasks, got {source!r}")
+    if source not in ("backlog", "tasks", "epic"):
+        raise Refusal(f"source must be backlog, tasks or epic, got {source!r}")
+    epic_id = fields.get("epic")
+    if source == "epic" and not epic_id:
+        raise Refusal("an epic run's run.md header needs an 'epic: <epic-id>' line")
+    if source != "epic" and epic_id:
+        raise Refusal(
+            f"an 'epic:' line is only allowed with source: epic, got {epic_id!r}"
+        )
 
     tasks: list[dict] = []
     width = 4
@@ -421,6 +440,36 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
                     f"{task['id']} of a tasks run must depend on exactly "
                     f"{previous['id']}, the previous row"
                 )
+    epic_base = None
+    if source == "epic":
+        assert epic_id is not None
+        repo_root = work.parent
+        try:
+            epic = epics.load_epic(repo_root, epic_id)
+        except epics.EpicError as error:
+            raise Refusal(f"epic {epic_id!r}: {error}") from error
+        if epic.active_run != run_dir.name:
+            raise Refusal(
+                f"epic {epic_id!r} is not linked to run {run_dir.name!r} "
+                f"(its active-run is {epic.active_run!r})"
+            )
+        if epics.derive_state(repo_root, epic) == "completed":
+            raise Refusal(f"epic {epic_id!r} is completed; its membership is history")
+        members = {row.task_id: row.depends for row in epic.tasks}
+        rows = {task["id"]: task["deps"] for task in tasks}
+        if set(rows) != set(members):
+            raise Refusal(
+                f"the run table rows {sorted(rows)} do not match the epic "
+                f"{epic_id!r} members {sorted(members)}"
+            )
+        for task_id, deps in rows.items():
+            expected = [members[task_id]] if members[task_id] else []
+            if deps != expected:
+                raise Refusal(
+                    f"{task_id} depends on {deps or '-'} in run.md but on "
+                    f"{members[task_id] or '-'} in epic {epic_id!r}"
+                )
+        epic_base = epic.base
     return {
         "mode": mode,
         "budget": budget,
@@ -431,6 +480,8 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
         "has_usd": width == 5,
         "source": source,
         "base": fields.get("base"),
+        "epic": epic_id,
+        "epic_base": epic_base,
     }
 
 
@@ -469,6 +520,8 @@ def stack(root: str, ids_arg: str, external: bool) -> str:
     require_toplevel(root)
     work = Path(root) / ".work"
     for task_id in ids:
+        if (work / epics.EPICS_DIRNAME / task_id).exists():
+            raise Refusal(f"{task_id} is an epic id, not a task")
         phase = status_phase(work, task_id)
         if phase == "done":
             raise Refusal(f"{task_id} is already finished (phase done)")
@@ -507,7 +560,11 @@ def stack(root: str, ids_arg: str, external: bool) -> str:
 
 
 def base_line(run_dir_arg: str, task_id: str) -> str:
-    """`task/<id>` of the last done row, or the run's base when nothing is done."""
+    """`task/<id>` of the last done row, the run's base when nothing is done.
+
+    For a `source: epic` run: the epic's `base` for a root row, and `task/<parent>` for
+    a row whose single parent is done — irrespective of unrelated completed rows.
+    """
     run = load_run(run_dir_arg, for_next=False)
     task = next((t for t in run["tasks"] if t["id"] == task_id), None)
     if task is None:
@@ -519,6 +576,18 @@ def base_line(run_dir_arg: str, task_id: str) -> str:
         raise Refusal(f"{task_id} already has a worktree")
     if run["base"] is None:
         raise Refusal("run.md has no base: line")
+    if run["source"] == "epic":
+        if task["deps"]:
+            parent = task["deps"][0]
+            parent_row = next(t for t in run["tasks"] if t["id"] == parent)
+            if parent_row["phase"] not in FINISHED_OK:
+                raise Refusal(
+                    f"parent {parent} of {task_id} is not done "
+                    f"(phase {parent_row['phase']})"
+                )
+            return f"task/{parent}"
+        assert run["epic_base"] is not None
+        return run["epic_base"]
     last_done = None
     for row in run["tasks"]:
         if row["phase"] in FINISHED_OK:

@@ -117,6 +117,7 @@ IMPL_CLAUDE = {"kind": "claude", "profile": "claude", "model": "opus"}
 
 
 def load_module():
+    sys.path.insert(0, str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("task_record", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -383,6 +384,94 @@ class TaskRecordTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         parsed = self.git_trailers("s\n\nb\n\n" + result.stdout.decode("utf-8"))
         self.assertIn("Task-Plan-Approved: auto", parsed.splitlines())
+
+    # ------------------------------------------------------ AC: Task-Epic trailer
+
+    def write_epic(self, repo, epic_id, task_ids, state="pending", active_run="none"):
+        directory = repo / ".work" / "_epics" / epic_id
+        directory.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for number, task_id in enumerate(task_ids, 1):
+            depends = task_ids[number - 2] if number > 1 else "-"
+            rows.append(f"| {number} | {task_id} | {depends} |")
+        text = "\n".join(
+            [
+                f"# Epic: {epic_id}",
+                "- title: T",
+                "- goal: G",
+                "- base: main",
+                f"- state: {state}",
+                "- delivery: per-task",
+                f"- active-run: {active_run}",
+                "## Tasks",
+                "| # | Task | Depends on |",
+                "| --- | --- | --- |",
+                *rows,
+                "## History",
+                "- 2026-01-01T00:00:00Z created — fixture",
+                "",
+            ]
+        )
+        (directory / "epic.md").write_bytes(text.encode("utf-8"))
+
+    def trailer_lines(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [
+            line
+            for line in result.stdout.decode("utf-8").splitlines()
+            if line.startswith("Task-Epic:")
+        ]
+
+    def test_member_task_gets_exactly_one_task_epic_trailer(self):
+        repo, task, worktree = self.fresh()
+        self.write_task(task)
+        self.write_epic(repo, "demo-epic", [TASK_ID])
+        result = self.cli("trailers", repo, task, worktree)
+        self.assertEqual(self.trailer_lines(result), ["Task-Epic: demo-epic"])
+        parsed = self.git_trailers("s\n\nb\n\n" + result.stdout.decode("utf-8"))
+        self.assertIn("Task-Epic: demo-epic", parsed.splitlines())
+
+    def test_non_member_task_gets_no_task_epic_trailer(self):
+        repo, task, worktree = self.fresh()
+        self.write_task(task)
+        self.write_epic(repo, "other-epic", ["some-other-task"])
+        result = self.cli("trailers", repo, task, worktree)
+        self.assertEqual(self.trailer_lines(result), [])
+
+    def test_completed_epic_is_reported_when_no_open_epic_contains_task(self):
+        repo, task, worktree = self.fresh()
+        self.write_task(task)
+        # demo-task is not done, so mark the epic completed via a done member instead
+        self.write_epic(repo, "old-epic", [TASK_ID], state="completed")
+        (task / "status.md").write_text(
+            status_text().replace("- phase: review-approved", "- phase: done"),
+            encoding="utf-8",
+        )
+        result = self.cli("trailers", repo, task, worktree)
+        self.assertEqual(self.trailer_lines(result), ["Task-Epic: old-epic"])
+
+    def test_disabled_records_emit_no_task_epic_trailer(self):
+        repo, task, worktree = self.fresh()
+        self.write_task(task)
+        self.write_epic(repo, "demo-epic", [TASK_ID])
+        (worktree / ".claude" / "task-flow.records.toml").write_text(
+            "[records]\nenabled = false\n", encoding="utf-8"
+        )
+        result = self.cli("trailers", repo, task, worktree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"")
+
+    def test_unreadable_unrelated_epic_is_named_not_fatal(self):
+        repo, task, worktree = self.fresh()
+        self.write_task(task)
+        self.write_epic(repo, "demo-epic", [TASK_ID])
+        broken = repo / ".work" / "_epics" / "broken-epic"
+        broken.mkdir(parents=True)
+        (broken / "epic.md").write_bytes(b"# Epic: broken-epic\n- nope\n")
+        result = self.cli("trailers", repo, task, worktree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.trailer_lines(result), ["Task-Epic: demo-epic"])
+        self.assertIn(b"skipping unreadable epic(s): broken-epic", result.stderr)
 
     def test_trailer_injection_rejected(self):
         repo, task, worktree = self.fresh()

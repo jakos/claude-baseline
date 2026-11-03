@@ -194,7 +194,7 @@ Older results: [benchmark history](docs/task-flow/benchmark.md).
 - [task-flow overview](docs/task-flow/overview.md)
 - [Setting up task-flow](docs/task-flow/setup.md)
 - [Commands](docs/task-flow/commands.md)
-- [Autopilot](docs/task-flow/autopilot.md)
+- [Autopilot and epics](docs/task-flow/autopilot.md#epics)
 - [Configuration](docs/task-flow/configuration.md)
 - [External implementer](docs/task-flow/external-implementer.md)
 - [Benchmark](docs/task-flow/benchmark.md)

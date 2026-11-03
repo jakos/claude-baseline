@@ -114,7 +114,9 @@ skills/workflow/                shared contract (SKILL.md) + orchestration.md fo
 skills/profile-*/               python, docs, config, generic
 skills/task-*/                  the 12 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
-scripts/prune_task.py, scripts/autopilot.py, scripts/implement.py, scripts/drivers.py,
+scripts/prune_task.py, scripts/autopilot.py, scripts/epics.py (persistent epics:
+`.work/_epics/<epic-id>/epic.md`, run through the autopilot with `source: epic`),
+scripts/implement.py, scripts/drivers.py,
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
 scripts/sdlc_status.py          SDLC status: validate, check, render, done and finish
@@ -139,4 +141,5 @@ tests/test_bench_publish.py     offline suite for bench/publish.py
 tests/test_docs.py              offline suite for the docs pages and their links
 tests/test_sdlc_status.py       offline suite for scripts/sdlc_status.py
 tests/test_task_record.py       offline suite for scripts/task_record.py
+tests/test_epics.py             offline suite for scripts/epics.py
 ```
