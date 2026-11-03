@@ -35,6 +35,10 @@ uv run --script plugins/task-flow/tests/test_release.py
 uv run --script plugins/task-flow/tests/test_rules.py
 uv run --script plugins/task-flow/tests/test_task_list.py
 uv run --script plugins/task-flow/tests/test_ci.py
+uv run --script plugins/task-flow/tests/test_sdlc_status.py
+uv run --script plugins/task-flow/scripts/sdlc_status.py check
+uv run --script plugins/task-flow/tests/test_epics.py
+uv run --script plugins/task-flow/tests/test_task_record.py
 uvx ruff==0.17.3 check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
 uvx ruff==0.17.3 format --check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench
 claude plugin validate .

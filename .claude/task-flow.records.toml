@@ -1,0 +1,10 @@
+# task-flow finish records for THIS repository (project file).
+# scripts/task_record.py reads it from the selected worktree (or the repository root
+# when the task has no worktree); --config <path> overrides the location. Parsed
+# strictly with tomllib: unknown keys anywhere are an error (exit 2). No secrets here.
+# Enabled here: /task-flow:task-finish renders docs/tasks/<task-id>.md and the Task-*
+# commit trailers for this repository's tasks. Set enabled = false (or delete the
+# file) to roll back — finish then behaves as before, with no record and no trailers.
+
+[records]
+enabled = true

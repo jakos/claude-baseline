@@ -10,7 +10,7 @@ procedure; this command only says which part to run.
 
 Arguments: `$ARGUMENTS`
 
-- If the first argument names an existing `.work/_autopilot/<run-id>/`, resume that run from the state in its `run.md`.
+- If the first argument names an existing `.work/_autopilot/<run-id>/`, resume that run from the state in its `run.md` — including a `source: epic` run, which stays linked to its epic id (see "Epics — /task-flow:task-epic" in orchestration.md).
 - Otherwise it is a new run: the argument text (if any) is the requirements. `--semi` is the default; `--full` keeps going past failed tasks.
 - `--tasks <id>[,<id>...]` runs existing tasks from `.work/` stacked in that order (see "Explicit task list (`--tasks`)" in orchestration.md); it cannot be combined with requirement text or `--from-repo`.
 - `--auto` skips only the start question (start / edit / cancel), and only when the user typed it. It never permits an early stop, push, PR or deploy.

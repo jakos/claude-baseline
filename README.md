@@ -12,9 +12,50 @@ guardrails, and `task-flow`, the main one — a reviewed multi-agent task workfl
 
 `plugins/task-flow/` turns a request into a reviewed change: the planner writes a plan,
 you approve it, the implementer works in a git worktree, the checker runs the gates, and
-an independent reviewer judges the result — at most three rounds, all artifacts in
-`.work/<task-id>/`. The command list is in [Commands](docs/task-flow/commands.md).
+an independent reviewer judges the result — at most three rounds, all artifacts in `.work/<task-id>/`. The command list is in [Commands](docs/task-flow/commands.md). Purpose: an AI-native SDLC — agents under human gates, never unattended; generated status below, details in [AI-native SDLC status](docs/task-flow/ai-native-sdlc.md).
+<!-- sdlc:status:start -->
+Generated from [`docs/task-flow/sdlc-status.toml`](docs/task-flow/sdlc-status.toml) by `plugins/task-flow/scripts/sdlc_status.py render` — do not edit by hand; details: [AI-native SDLC status](docs/task-flow/ai-native-sdlc.md).
 
+<!-- diagram:sdlc-status -->
+```mermaid
+flowchart TD
+  plan["Plan (partial)"]
+  design["Design (partial)"]
+  build["Build (partial)"]
+  test["Test (partial)"]
+  review["Review (partial)"]
+  release["Release (partial)"]
+  deploy["Deploy (missing)"]
+  maintain["Maintain (missing)"]
+  measure["Measure (missing)"]
+  plan --> design
+  design --> build
+  build --> test
+  test --> review
+  review --> release
+  release --> deploy
+  deploy --> maintain
+  maintain --> measure
+  classDef achieved fill:#d4f8d4,stroke:#1a7f37,color:#0b3d0b
+  classDef partial fill:#fff3cd,stroke:#9a6700,color:#5c4400
+  classDef missing fill:#ffd7d5,stroke:#cf222e,color:#6e1119
+  class plan,design,build,test,review,release partial
+  class deploy,maintain,measure missing
+```
+<!-- /diagram:sdlc-status -->
+
+| Stage | State | Achieved criteria | Missing criteria | Next task |
+| --- | --- | --- | --- | --- |
+| Plan | partial | Reviewed plan with testable criteria | Intent and plan record visible in git; Approval gate cannot be skipped | task-record-in-git, enforce-gates-hooks |
+| Design | partial | Design captured inside plan.md | A designer role and design.md; Design reviewed before planning | designer-stage |
+| Build | partial | Role boundaries enforced in hooks; Implementer chosen by config | Model-influenced commands sandboxed | command-sandbox |
+| Test | partial | Baseline and deterministic gates | All checks in CI on every PR; Evals and bench run on change; Benchmark measures code quality | ci-github-actions, ci-scheduled-evals, bench-quality-scorecard |
+| Review | partial | Fresh-context criterion review | Risk rating and human attention list; AI review on every PR | review-risk-flags, pr-review-ci |
+| Release | partial | Controlled release with human approval | Scoped agent PRs, protected main; CI verifies and publishes tags; Rollback drill recorded | agent-pr-path, release-pipeline-ci |
+| Deploy | missing | — | Agents can deploy behind a gate | unplanned |
+| Maintain | missing | — | Scheduled drift and failure watch; Signals become tasks; Escapes become tests | maintain-signal-watch, task-intake, regression-from-escapes |
+| Measure | missing | — | Stage status in the README; DORA and agent metrics | sdlc-status-readme, delivery-metrics |
+<!-- sdlc:status:end -->
 ### Architecture
 
 The roles in one Claude Code session exchange nothing but the task files.
@@ -69,7 +110,7 @@ flowchart TD
   round["round 1-3: implement, gates, review"]
   verdict{"verdict"}
   approved["APPROVED"]
-  finish["/task-flow:task-finish"]
+  finish["/task-flow:task-finish: status refresh, record, summary, commit"]
   changes["CHANGES_REQUESTED"]
   escalate["no progress or round 3: escalate to you (summary.md)"]
   blocked["BLOCKED: stop"]
@@ -153,7 +194,7 @@ Older results: [benchmark history](docs/task-flow/benchmark.md).
 - [task-flow overview](docs/task-flow/overview.md)
 - [Setting up task-flow](docs/task-flow/setup.md)
 - [Commands](docs/task-flow/commands.md)
-- [Autopilot](docs/task-flow/autopilot.md)
+- [Autopilot and epics](docs/task-flow/autopilot.md#epics)
 - [Configuration](docs/task-flow/configuration.md)
 - [External implementer](docs/task-flow/external-implementer.md)
 - [Benchmark](docs/task-flow/benchmark.md)

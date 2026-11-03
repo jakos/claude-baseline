@@ -45,7 +45,34 @@ class TaskListTest(unittest.TestCase):
     def add(self, task_id, content):
         directory = self.root / ".work" / task_id
         directory.mkdir(parents=True)
-        (directory / "status.md").write_text(content, encoding="utf-8")
+        (directory / "status.md").write_bytes(content.encode("utf-8"))
+
+    def add_epic(self, epic_id, task_ids, state="pending"):
+        directory = self.root / ".work" / "_epics" / epic_id
+        directory.mkdir(parents=True)
+        rows = []
+        for number, task_id in enumerate(task_ids, 1):
+            depends = task_ids[number - 2] if number > 1 else "-"
+            rows.append(f"| {number} | {task_id} | {depends} |")
+        text = "\n".join(
+            [
+                f"# Epic: {epic_id}",
+                "- title: T",
+                "- goal: G",
+                "- base: main",
+                f"- state: {state}",
+                "- delivery: per-task",
+                "- active-run: none",
+                "## Tasks",
+                "| # | Task | Depends on |",
+                "| --- | --- | --- |",
+                *rows,
+                "## History",
+                "- 2026-01-01T00:00:00Z created — fixture",
+                "",
+            ]
+        )
+        (directory / "epic.md").write_bytes(text.encode("utf-8"))
 
     def run_script(self, *args, env=None):
         return subprocess.run(
@@ -149,7 +176,7 @@ class TaskListTest(unittest.TestCase):
         directory.mkdir(parents=True)
         (directory / "status.md").write_bytes(b"- phase: \xff\xfe\n")
         self.assertEqual(self.ids(), ["a-new", "b-broken"])
-        self.assertIn("| b-broken | ? | ? | ? | ? |", self.out())
+        self.assertIn("| b-broken | - | ? | ? | ? | ? |", self.out())
 
     def test_no_work_dir_prints_message(self):
         self.assertIn("No open tasks under .work/.", self.out())
@@ -172,6 +199,76 @@ class TaskListTest(unittest.TestCase):
 
     def test_unknown_argument_exits_2(self):
         self.assertEqual(self.run_script("--bogus").returncode, 2)
+
+    def test_epic_column_shows_membership(self):
+        self.add("a", status("new"))
+        self.add("b", status("planned"))
+        self.add("c", status("new"))
+        self.add_epic("demo", ["a", "b"])
+        out = self.out()
+        self.assertIn("| id | epic | phase |", out)
+        self.assertIn("| a | demo | new |", out)
+        self.assertIn("| b | demo | planned |", out)
+        self.assertIn("| c | - | new |", out)
+
+    def test_epic_never_listed_as_task(self):
+        self.add("a", status("new"))
+        self.add_epic("demo", ["a"])
+        self.assertEqual(self.ids(), ["a"])
+
+    def test_epic_filter_lists_only_members(self):
+        self.add("a", status("new"))
+        self.add("b", status("planned"))
+        self.add("c", status("new"))
+        self.add_epic("demo", ["a", "b"])
+        self.assertEqual(self.ids("--epic", "demo"), ["b", "a"])
+        self.assertEqual(self.ids(), ["b", "a", "c"])
+
+    def test_epic_filter_with_all_includes_done_members(self):
+        self.add("a", status("done"))
+        self.add("b", status("done"))
+        self.add("c", status("new"))
+        self.add_epic("demo", ["a", "b"])
+        self.assertEqual(self.ids("--epic", "demo"), [])
+        self.assertIn(
+            "2 done task(s) hidden; --all lists them.", self.out("--epic", "demo")
+        )
+        self.assertEqual(self.ids("--epic", "demo", "--all"), ["a", "b"])
+        self.assertNotIn("hidden", self.out("--epic", "demo", "--all"))
+
+    def test_epic_filter_empty_output_keeps_messages(self):
+        self.add("a", status("new"))
+        self.add_epic("demo", ["a"])
+        self.add_epic("empty", [])
+        self.assertIn("No open tasks under .work/.", self.out("--epic", "empty"))
+        self.assertIn("No tasks under .work/.", self.out("--epic", "empty", "--all"))
+
+    def test_unknown_epic_exits_2(self):
+        self.add("a", status("new"))
+        result = self.run_script("--epic", "zzz")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"no epic", result.stderr)
+
+    def test_epic_column_prefers_the_open_epic_over_a_completed_one(self):
+        self.add("a", status("done"))
+        self.add("b", status("new"))
+        self.add_epic("aaa-done", ["a"], state="completed")
+        self.add_epic("zzz-open", ["a", "b"])
+        # a is in both; the open epic reports it, like epics.epic_for_task
+        self.assertEqual(self.ids("--epic", "zzz-open", "--all"), ["b", "a"])
+        self.assertEqual(self.ids("--epic", "aaa-done", "--all"), [])
+        out = self.out("--all")
+        self.assertIn("| a | zzz-open |", out)
+
+    def test_unreadable_epic_is_skipped_not_fatal(self):
+        self.add("a", status("new"))
+        self.add_epic("good", ["a"])
+        broken = self.root / ".work" / "_epics" / "broken"
+        broken.mkdir(parents=True)
+        (broken / "epic.md").write_bytes(b"# Epic: broken\n- nope\n")
+        self.assertEqual(self.ids(), ["a"])
+        self.assertIn("| a | good |", self.out())
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 - [dev-baseline](dev-baseline.md)
 - [Developing claude-baseline](development.md)
 - [task-flow overview](task-flow/overview.md)
+- [AI-native SDLC status](task-flow/ai-native-sdlc.md)
 - [Setting up task-flow](task-flow/setup.md)
 - [Commands](task-flow/commands.md)
 - [Autopilot](task-flow/autopilot.md)

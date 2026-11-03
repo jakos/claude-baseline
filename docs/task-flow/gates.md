@@ -68,6 +68,18 @@ so the planner must list every command it wants checked; there is no shell of an
 (pipes, redirects, `&&`, variables, globs, `cd`); the matching patterns are heuristics,
 and a tool with unusual output falls back to its last 30 lines.
 
+## Generated-file freshness: scripts/sdlc_status.py
+
+`uv run --script plugins/task-flow/scripts/sdlc_status.py check` is one entry of the
+shared list above. It validates `docs/task-flow/sdlc-status.toml` — this repository's
+AI-native SDLC criteria — and fails when the generated `sdlc:status` block of
+`README.md` or the page `docs/task-flow/ai-native-sdlc.md` is stale or missing, when a
+`done` criterion lacks existing evidence, or when the source is malformed. It never
+writes; `render` regenerates both files, and `/task-flow:task-finish` runs `finish` to
+mark the criteria a task declares done and re-render before its commit (see
+[AI-native SDLC status](ai-native-sdlc.md)). In a repository without the source file
+the command is a no-op for `finish` and the entry simply does not exist.
+
 ## The same list in CI: scripts/verify.py
 
 `scripts/verify.py` is this repository's CI entry point (`.github/workflows/ci.yml`, see

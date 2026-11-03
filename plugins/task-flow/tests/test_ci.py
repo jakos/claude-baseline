@@ -108,7 +108,10 @@ class RealRepoListTest(unittest.TestCase):
         gate = verify.gate_argvs(ROOT)
         self.assertEqual(verify.parity_problems(checks, gate), [])
         self.assertEqual(verify.test_guard_problems(checks, ROOT), [])
-        self.assertEqual(len(checks), 19, "the shared list has 19 checks")
+        # task-record-in-git added plugins/task-flow/tests/test_task_record.py to the
+        # shared list, so it grew from 21 to 22 checks; task-epics added test_epics.py,
+        # so it grew to 23.
+        self.assertEqual(len(checks), 23, "the shared list has 23 checks")
         listed = verify.listed_tests(checks)
         self.assertEqual(len(listed), len(set(listed)), "no duplicate test entry")
         self.assertEqual(sorted(set(listed)), verify.discovered_tests(ROOT))

@@ -3,7 +3,9 @@
 A multi-agent workflow for tasks and feature requests: the planner writes a plan you
 approve, an implementer works in a git worktree, a checker runs the gates, and an
 independent reviewer judges the result — at most three rounds, every artifact in
-`.work/<task-id>/`.
+`.work/<task-id>/`. Its purpose is achieving an AI-native SDLC — agents work under
+human gates, never unattended; the generated stage status is in
+[AI-native SDLC status](../../docs/task-flow/ai-native-sdlc.md).
 
 ## Quick reference
 
@@ -18,6 +20,7 @@ independent reviewer judges the result — at most three rounds, every artifact 
 ## Documentation
 
 - [Overview](../../docs/task-flow/overview.md)
+- [AI-native SDLC status](../../docs/task-flow/ai-native-sdlc.md)
 - [Setting up task-flow](../../docs/task-flow/setup.md)
 - [Commands](../../docs/task-flow/commands.md)
 - [Autopilot](../../docs/task-flow/autopilot.md)
