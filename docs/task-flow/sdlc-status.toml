@@ -35,9 +35,9 @@ evidence = "plugins/task-flow/skills/workflow/SKILL.md"
 [[stage.plan.criteria]]
 id = "intent-in-git"
 title = "Intent and plan record visible in git"
-state = "open"
+state = "done"
 task = "task-record-in-git"
-evidence = ""
+evidence = ".claude/task-flow.records.toml"
 
 [[stage.plan.criteria]]
 id = "gate-enforced"
@@ -107,9 +107,9 @@ evidence = "plugins/task-flow/scripts/gates.py"
 [[stage.test.criteria]]
 id = "ci-on-pr"
 title = "All checks in CI on every PR"
-state = "open"
+state = "done"
 task = "ci-github-actions"
-evidence = ""
+evidence = ".github/workflows/ci.yml"
 
 [[stage.test.criteria]]
 id = "evals-on-change"
@@ -220,7 +220,7 @@ title = "Measure"
 [[stage.measure.criteria]]
 id = "sdlc-status-view"
 title = "Stage status in the README"
-state = "open"
+state = "done"
 task = "sdlc-status-readme"
 evidence = "README.md"
 

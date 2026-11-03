@@ -32,7 +32,7 @@ flowchart TD
   release["Release (partial)"]
   deploy["Deploy (missing)"]
   maintain["Maintain (missing)"]
-  measure["Measure (missing)"]
+  measure["Measure (partial)"]
   plan --> design
   design --> build
   build --> test
@@ -44,22 +44,22 @@ flowchart TD
   classDef achieved fill:#d4f8d4,stroke:#1a7f37,color:#0b3d0b
   classDef partial fill:#fff3cd,stroke:#9a6700,color:#5c4400
   classDef missing fill:#ffd7d5,stroke:#cf222e,color:#6e1119
-  class plan,design,build,test,review,release partial
-  class deploy,maintain,measure missing
+  class plan,design,build,test,review,release,measure partial
+  class deploy,maintain missing
 ```
 <!-- /diagram:sdlc-status -->
 
 | Stage | State | Achieved criteria | Missing criteria | Next task |
 | --- | --- | --- | --- | --- |
-| Plan | partial | Reviewed plan with testable criteria | Intent and plan record visible in git; Approval gate cannot be skipped | task-record-in-git, enforce-gates-hooks |
+| Plan | partial | Reviewed plan with testable criteria; Intent and plan record visible in git | Approval gate cannot be skipped | enforce-gates-hooks |
 | Design | partial | Design captured inside plan.md | A designer role and design.md; Design reviewed before planning | designer-stage |
 | Build | partial | Role boundaries enforced in hooks; Implementer chosen by config | Model-influenced commands sandboxed | command-sandbox |
-| Test | partial | Baseline and deterministic gates | All checks in CI on every PR; Evals and bench run on change; Benchmark measures code quality | ci-github-actions, ci-scheduled-evals, bench-quality-scorecard |
+| Test | partial | Baseline and deterministic gates; All checks in CI on every PR | Evals and bench run on change; Benchmark measures code quality | ci-scheduled-evals, bench-quality-scorecard |
 | Review | partial | Fresh-context criterion review | Risk rating and human attention list; AI review on every PR | review-risk-flags, pr-review-ci |
 | Release | partial | Controlled release with human approval | Scoped agent PRs, protected main; CI verifies and publishes tags; Rollback drill recorded | agent-pr-path, release-pipeline-ci |
 | Deploy | missing | — | Agents can deploy behind a gate | unplanned |
 | Maintain | missing | — | Scheduled drift and failure watch; Signals become tasks; Escapes become tests | maintain-signal-watch, task-intake, regression-from-escapes |
-| Measure | missing | — | Stage status in the README; DORA and agent metrics | sdlc-status-readme, delivery-metrics |
+| Measure | partial | Stage status in the README | DORA and agent metrics | delivery-metrics |
 
 Stage states are derived from the criteria, never stored: all criteria done = `achieved`, some = `partial`, none = `missing`. Every node also carries its state as text, so the colours are never the only signal.
 
@@ -98,7 +98,7 @@ unattended operation is implemented or claimed anywhere.
 | Stage | Criterion | Title | State | Evidence | Closing task |
 | --- | --- | --- | --- | --- | --- |
 | plan | plan-gate | Reviewed plan with testable criteria | done | `plugins/task-flow/skills/workflow/SKILL.md` | — |
-| plan | intent-in-git | Intent and plan record visible in git | open | — | task-record-in-git |
+| plan | intent-in-git | Intent and plan record visible in git | done | `.claude/task-flow.records.toml` | task-record-in-git |
 | plan | gate-enforced | Approval gate cannot be skipped | open | — | enforce-gates-hooks |
 | design | design-in-plan | Design captured inside plan.md | done | `plugins/task-flow/agents/planner.md` | — |
 | design | design-role | A designer role and design.md | open | — | designer-stage |
@@ -107,7 +107,7 @@ unattended operation is implemented or claimed anywhere.
 | build | swappable-implementers | Implementer chosen by config | done | `plugins/task-flow/templates/models.toml` | — |
 | build | isolated-execution | Model-influenced commands sandboxed | open | — | command-sandbox |
 | test | baseline-gates | Baseline and deterministic gates | done | `plugins/task-flow/scripts/gates.py` | — |
-| test | ci-on-pr | All checks in CI on every PR | open | — | ci-github-actions |
+| test | ci-on-pr | All checks in CI on every PR | done | `.github/workflows/ci.yml` | ci-github-actions |
 | test | evals-on-change | Evals and bench run on change | open | — | ci-scheduled-evals |
 | test | quality-benchmark | Benchmark measures code quality | open | — | bench-quality-scorecard |
 | review | independent-reviewer | Fresh-context criterion review | done | `plugins/task-flow/agents/reviewer.md` | — |
@@ -121,7 +121,7 @@ unattended operation is implemented or claimed anywhere.
 | maintain | signal-watch | Scheduled drift and failure watch | open | — | maintain-signal-watch |
 | maintain | intake-loop | Signals become tasks | open | — | task-intake |
 | maintain | regression-from-escapes | Escapes become tests | open | — | regression-from-escapes |
-| measure | sdlc-status-view | Stage status in the README | open | `README.md` | sdlc-status-readme |
+| measure | sdlc-status-view | Stage status in the README | done | `README.md` | sdlc-status-readme |
 | measure | delivery-metrics | DORA and agent metrics | open | — | delivery-metrics |
 
 ## Sources

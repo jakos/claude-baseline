@@ -27,7 +27,7 @@ flowchart TD
   release["Release (partial)"]
   deploy["Deploy (missing)"]
   maintain["Maintain (missing)"]
-  measure["Measure (missing)"]
+  measure["Measure (partial)"]
   plan --> design
   design --> build
   build --> test
@@ -39,22 +39,22 @@ flowchart TD
   classDef achieved fill:#d4f8d4,stroke:#1a7f37,color:#0b3d0b
   classDef partial fill:#fff3cd,stroke:#9a6700,color:#5c4400
   classDef missing fill:#ffd7d5,stroke:#cf222e,color:#6e1119
-  class plan,design,build,test,review,release partial
-  class deploy,maintain,measure missing
+  class plan,design,build,test,review,release,measure partial
+  class deploy,maintain missing
 ```
 <!-- /diagram:sdlc-status -->
 
 | Stage | State | Achieved criteria | Missing criteria | Next task |
 | --- | --- | --- | --- | --- |
-| Plan | partial | Reviewed plan with testable criteria | Intent and plan record visible in git; Approval gate cannot be skipped | task-record-in-git, enforce-gates-hooks |
+| Plan | partial | Reviewed plan with testable criteria; Intent and plan record visible in git | Approval gate cannot be skipped | enforce-gates-hooks |
 | Design | partial | Design captured inside plan.md | A designer role and design.md; Design reviewed before planning | designer-stage |
 | Build | partial | Role boundaries enforced in hooks; Implementer chosen by config | Model-influenced commands sandboxed | command-sandbox |
-| Test | partial | Baseline and deterministic gates | All checks in CI on every PR; Evals and bench run on change; Benchmark measures code quality | ci-github-actions, ci-scheduled-evals, bench-quality-scorecard |
+| Test | partial | Baseline and deterministic gates; All checks in CI on every PR | Evals and bench run on change; Benchmark measures code quality | ci-scheduled-evals, bench-quality-scorecard |
 | Review | partial | Fresh-context criterion review | Risk rating and human attention list; AI review on every PR | review-risk-flags, pr-review-ci |
 | Release | partial | Controlled release with human approval | Scoped agent PRs, protected main; CI verifies and publishes tags; Rollback drill recorded | agent-pr-path, release-pipeline-ci |
 | Deploy | missing | — | Agents can deploy behind a gate | unplanned |
 | Maintain | missing | — | Scheduled drift and failure watch; Signals become tasks; Escapes become tests | maintain-signal-watch, task-intake, regression-from-escapes |
-| Measure | missing | — | Stage status in the README; DORA and agent metrics | sdlc-status-readme, delivery-metrics |
+| Measure | partial | Stage status in the README | DORA and agent metrics | delivery-metrics |
 <!-- sdlc:status:end -->
 ### Architecture
 
