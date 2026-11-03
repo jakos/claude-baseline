@@ -21,10 +21,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
-
-import tomllib
+from typing import ClassVar
 
 TESTS = Path(__file__).resolve().parent
 PLUGIN = TESTS.parent
@@ -105,7 +105,7 @@ class BenchFixture(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
+        root = Path(tmp.name).resolve()  # expand Windows 8.3 short names
         self.root = root
         self.home = root / "home"
         self.home.mkdir()
@@ -252,6 +252,9 @@ class BenchFixture(unittest.TestCase):
         environment["FAKE_KEY"] = "fake-key"
         environment["NO_PROXY"] = "127.0.0.1"
         environment["no_proxy"] = "127.0.0.1"
+        # The fake model rewrites calc.py with a same-length body within the same second as
+        # the gates imported it; a stale .pyc would then look valid and hide the change.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment.update(extra or {})
         return environment
 
@@ -1538,17 +1541,31 @@ def canned_run(results_dir, run_id, created, profiles, rows):
 
 
 class MergeTest(BenchFixture):
-    ENTRY = {"case_toml_sha256": "a", "plan_sha256": "b", "base": "c", "result": "d"}
+    ENTRY: ClassVar[dict[str, str]] = {
+        "case_toml_sha256": "a",
+        "plan_sha256": "b",
+        "base": "c",
+        "result": "d",
+    }
 
     def canned(self, run_id, profiles, rows, entry=None):
         run_dir = canned_run(self.out, run_id, "2026-01-01T00:00:00Z", profiles, rows)
         meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         meta["case_entries"] = {"c1": entry or self.ENTRY}
-        write_file(run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + "\n")
+        write_file(
+            run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + "\n"
+        )
 
     def merge(self, *sources, into="m1"):
         return self.bench(
-            "merge", *sources, "--into", into, "--out", str(self.out), "--project", str(self.project)
+            "merge",
+            *sources,
+            "--into",
+            into,
+            "--out",
+            str(self.out),
+            "--project",
+            str(self.project),
         )
 
     def test_later_run_replaces_its_cell_and_keeps_the_rest(self):
@@ -1564,8 +1581,10 @@ class MergeTest(BenchFixture):
         done = self.merge("a1", "a2")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         rows = self.rows("m1")
-        self.assertEqual([(r["n"], r["profile"], r["outcome"]) for r in rows],
-                         [(1, "p1", "accepted"), (2, "p2", "accepted")])
+        self.assertEqual(
+            [(r["n"], r["profile"], r["outcome"]) for r in rows],
+            [(1, "p1", "accepted"), (2, "p2", "accepted")],
+        )
         self.assertEqual([r["source_run"] for r in rows], ["a2", "a1"])
         self.assertEqual({r["run_id"] for r in rows}, {"m1"})
         meta = json.loads((self.out / "m1" / "run.json").read_text(encoding="utf-8"))
@@ -1578,7 +1597,12 @@ class MergeTest(BenchFixture):
 
     def test_refuses_sources_whose_case_changed(self):
         self.canned("a1", ["p1"], [canned_row("a1", 1, "p1")])
-        self.canned("a2", ["p1"], [canned_row("a2", 1, "p1")], entry={**self.ENTRY, "plan_sha256": "x"})
+        self.canned(
+            "a2",
+            ["p1"],
+            [canned_row("a2", 1, "p1")],
+            entry={**self.ENTRY, "plan_sha256": "x"},
+        )
         done = self.merge("a1", "a2")
         self.assertEqual(done.returncode, 2)
         self.assertIn("case c1 differs", done.stderr)

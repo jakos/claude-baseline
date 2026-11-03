@@ -213,7 +213,7 @@ class RoundFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name)
+        root = Path(self._tmp.name).resolve()  # expand Windows 8.3 short names
         self.home = root / "home"
         self.home.mkdir()
         self.repo = root / "repo"
