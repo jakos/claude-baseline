@@ -1,0 +1,72 @@
+# CI for this repository — added by the task ci-github-actions.
+#
+# Every pull request and every push to main runs the shared task-flow check list (the
+# Verification commands of .claude/task-flow.md, identical to [targets.task-flow].checks
+# of .claude/task-flow.release.toml) on a Linux and a Windows GitHub-hosted runner,
+# through the same entry point the local gates and release verify use:
+#   uv run --script plugins/task-flow/scripts/verify.py
+# The script refuses to run when the two lists disagree or a discovered test_*.py is
+# missing, duplicated or stale, so CI can never silently run a different list.
+#
+# Pins (verified full commit SHAs and exact tool versions):
+#   actions/checkout   v6.1.0  d23441a48e516b6c34aea4fa41551a30e30af803 (node24)
+#   astral-sh/setup-uv v6.8.0  d0cc045d04ccac9d8b7881df0226f9e82c39688e
+#   uv                 0.12.21 (astral-sh/uv tag 0.12.21)
+#   Python             3.14.7  (uv-managed cpython, downloadable for linux and windows)
+#   Claude CLI         @anthropic-ai/claude-code 2.1.316 (npm), auto-updater disabled
+# No secrets, no model calls, no release steps; standard hosted runners are free for
+# public repositories. Windows steps use the native default shell (pwsh), not Git Bash.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  # the pinned CLI must never self-update or send telemetry during validation
+  DISABLE_AUTOUPDATER: "1"
+  DISABLE_TELEMETRY: "1"
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+          # there is no lockfile: the cache key follows the PEP 723 scripts and tests
+          # themselves, so an edited script or test invalidates the cached environment
+          cache-dependency-glob: |
+            plugins/task-flow/scripts/*.py
+            plugins/task-flow/tests/*.py
+            plugins/task-flow/bench/*.py
+
+      - name: Install Python 3.14
+        run: uv python install 3.14.7
+
+      - name: Install the pinned Claude CLI
+        run: npm install --global @anthropic-ai/claude-code@2.1.316
+
+      - name: Run the shared task-flow checks
+        run: uv run --script plugins/task-flow/scripts/verify.py

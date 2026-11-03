@@ -179,14 +179,14 @@ BLOCKS_AFTER = {
     BENCH_README: 8,
     "docs/README.md": 0,
     "docs/dev-baseline.md": 6,
-    "docs/development.md": 3,
+    "docs/development.md": 4,
     "docs/task-flow/overview.md": 2,
     "docs/task-flow/setup.md": 8,
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 0,
     "docs/task-flow/configuration.md": 2,
     "docs/task-flow/external-implementer.md": 13,
-    "docs/task-flow/gates.md": 3,
+    "docs/task-flow/gates.md": 5,
     "docs/task-flow/enforcement.md": 0,
     "docs/task-flow/profiles.md": 0,
     "docs/task-flow/releasing.md": 1,
@@ -203,6 +203,12 @@ BLOCKS_ADDED = {
     # README gains its five-line quick-reference block.
     "README.md": 0,
     PLUGIN_README: 1,
+    # Added by the task ci-github-actions: one block in docs/development.md (the local
+    # verify.py command in the CI section) and two in docs/task-flow/gates.md (the local
+    # verify.py run and a sample of its per-check output). The CI Mermaid diagram is
+    # mermaid-tagged, so it is not counted.
+    "docs/development.md": 1,
+    "docs/task-flow/gates.md": 2,
 }
 # The pages that hold the `<!-- diagram:<name> -->` marker pairs; readme-front-page
 # copies the blocks between them onto the front page.

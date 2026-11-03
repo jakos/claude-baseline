@@ -67,3 +67,32 @@ Limits, stated plainly: gates.py runs only the plan's commands — no profile de
 so the planner must list every command it wants checked; there is no shell of any kind
 (pipes, redirects, `&&`, variables, globs, `cd`); the matching patterns are heuristics,
 and a tool with unusual output falls back to its last 30 lines.
+
+## The same list in CI: scripts/verify.py
+
+`scripts/verify.py` is this repository's CI entry point (`.github/workflows/ci.yml`, see
+[Developing claude-baseline](../development.md#continuous-integration-github-actions))
+and runs on a Linux and a Windows hosted runner what the local gates run: the
+`## Verification commands` block of `.claude/task-flow.md` — which must equal
+`[targets.task-flow].checks` of `.claude/task-flow.release.toml` entry by entry, in
+order, or the script refuses to run anything. It also refuses when a discovered
+`tests/test_*.py` is missing, duplicated or stale in the lists, so a new test file is
+added to both lists by hand. Run it locally from the repository root:
+
+```
+uv run --script scripts/verify.py
+```
+
+Each check runs from the repository root with its argument list (a Windows `.cmd`/`.bat`
+tool goes through `scripts/launch.py`), with a per-check timeout, one visible line per
+check, and the run continues after failures. The exit code is nonzero when any check
+failed, was denied, could not start, timed out or had no program on `PATH` — that exit
+code, not a report, is the CI signal (gates.py above stays the task-round checker that
+records results as data):
+
+```
+PASS uv run --script tests/test_ci.py
+FAIL uvx ruff==0.17.3 check plugins/task-flow/scripts plugins/task-flow/tests plugins/task-flow/bench (exit 1)
+ERROR claude plugin validate . (timed out after 600 s; the process tree was killed)
+verify.py: 17 passed, 2 failed of 19 checks
+```

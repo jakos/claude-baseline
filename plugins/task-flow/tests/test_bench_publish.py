@@ -327,7 +327,7 @@ class PublishFixture(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()  # expand Windows 8.3 short names
         self.results, self.docs, self.readme = make_tree(self.root)
 
     def bench(self, *args):
@@ -884,15 +884,25 @@ class MergedRunNotesTest(PublishFixture):
         nl = chr(10)
         rows = [
             json.loads(line)
-            for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+            for line in (run_dir / "results.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
         ]
         for i, row in enumerate(rows):
             if row["profile"] == "a":
-                row["settings"] = {**row.get("settings", {}), "max_turns": 60 if i % 2 else 100}
-        write_file(run_dir / "results.jsonl", "".join(json.dumps(r, sort_keys=True) + nl for r in rows))
+                row["settings"] = {
+                    **row.get("settings", {}),
+                    "max_turns": 60 if i % 2 else 100,
+                }
+        write_file(
+            run_dir / "results.jsonl",
+            "".join(json.dumps(r, sort_keys=True) + nl for r in rows),
+        )
         meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         meta["merged_from"] = ["first", "second"]
-        write_file(run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + nl)
+        write_file(
+            run_dir / "run.json", json.dumps(meta, indent=2, sort_keys=True) + nl
+        )
 
         done = self.bench()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)

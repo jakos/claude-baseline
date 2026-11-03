@@ -1,0 +1,17 @@
+# Ruff configuration for this repository — added by the task ci-github-actions.
+#
+# The gates run the PINNED `uvx ruff==0.17.3 check` and `uvx ruff==0.17.3 format --check`
+# on plugins/task-flow (see the Verification commands in .claude/task-flow.md and
+# [targets.task-flow].checks in .claude/task-flow.release.toml). There is no
+# pyproject.toml here, so before this file those commands ran on ruff's built-in
+# defaults. Verified on 2026-11-02 with `uvx ruff==0.17.3 check --show-settings`:
+# a clean environment and a developer machine without a user-level ruff config
+# resolve the same settings, and the effective target version is py311
+# (linter.analyze.target_version = 3.11). This file pins that resolved target version
+# so a clean CI runner matches the local gate result; the lint rule selection and all
+# formatter settings stay at the pinned ruff's defaults.
+#
+# The check/format findings that remain on main are pre-existing (recorded in the
+# round-0 baseline and listed in docs/development.md). Do not reformat or rewrite
+# unrelated source to silence them from this file.
+target-version = "py311"

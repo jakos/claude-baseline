@@ -80,6 +80,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/models.py                reads, merges and validates models.toml
     scripts/doctor.py                read-only environment and configuration check behind /task-flow:task-doctor
     scripts/release.py               task-release: preconditions, version files, changelog, commit and tag; never pushes on its own
+    scripts/verify.py                CI entry point: runs the shared check list, refusing list drift or unregistered tests
     bench/bench.py, bench/publish.py, bench/README.md  benchmark harness and publisher:
                                 implementer profiles on frozen cases, cost per accepted task
     bench/cases/<id>/                frozen benchmark cases (case.toml, plan.md, NOTES.md)
@@ -90,7 +91,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     tests/test_autopilot.py, tests/test_bench.py, tests/test_bench_publish.py,
     tests/test_gates.py, tests/test_models.py,
     tests/test_drivers.py, tests/test_doctor.py, tests/test_docs.py, tests/test_implement.py, tests/test_launch.py,
-    tests/test_release.py
+    tests/test_release.py, tests/test_ci.py
 ```
 
 Validate before pushing:
@@ -99,3 +100,83 @@ Validate before pushing:
 claude plugin validate .            # manifests: schema and syntax
 cd plugins/dev-baseline && claude plugin eval .   # behaviour: do the skills fire
 ```
+
+## Continuous integration (GitHub Actions)
+
+`.github/workflows/ci.yml` runs the shared task-flow check list on every pull request
+and every push to `main`, on both `ubuntu-latest` and `windows-latest` (one matrix job,
+`fail-fast: false`, job names `checks (ubuntu-latest)` and `checks (windows-latest)`,
+`permissions: contents: read`, a 60-minute job timeout, no path filters, no
+`continue-on-error`, no secrets and no model calls). Both jobs run the same entry point
+as the local gates and the release verify — there is no third copy of the list:
+
+```bash
+uv run --script plugins/task-flow/scripts/verify.py
+```
+
+`scripts/verify.py` reads `[targets.task-flow].checks` of
+`.claude/task-flow.release.toml` and the `## Verification commands` block of
+`.claude/task-flow.md`, and refuses to run anything when the two lists disagree entry
+by entry, in order, or when a discovered `plugins/task-flow/tests/test_*.py` is
+missing, duplicated or stale in them — so a new test file is added to both lists by
+hand (the parity guard; see [Deterministic gates](task-flow/gates.md) and
+[Releasing](task-flow/releasing.md)). Each check then runs from the repository root with
+its argument list (on Windows a `.cmd`/`.bat` tool goes through `scripts/launch.py`),
+prints one `PASS` / `FAIL` / `ERROR` / `NOTRUN` line, continues after failures, and
+exits nonzero when any check failed, was denied, could not start, timed out or had no
+program on `PATH`. That exit code — not a report — is the CI signal, unlike
+`scripts/gates.py`, which records task-round failures as data in `checks-<n>.md` and
+exits zero.
+
+```mermaid
+flowchart TD
+  pr["pull request or push to main"]
+  matrix["OS matrix: ubuntu-latest, windows-latest"]
+  verify["uv run --script scripts/verify.py"]
+  shared["shared check list: 19 checks"]
+  gate["gate block in .claude/task-flow.md"]
+  release["checks of .claude/task-flow.release.toml"]
+  local["local gates.py and release verify"]
+  pr --> matrix
+  matrix --> verify
+  verify --> shared
+  gate -->|"must match in order"| shared
+  release -->|"must match in order"| shared
+  local -->|"consume the same lists"| shared
+```
+
+Pins, all recorded in the workflow file: `actions/checkout` v6.1.0 and
+`astral-sh/setup-uv` v6.8.0 at verified full 40-character commit SHAs (checkout with
+`persist-credentials: false`), uv 0.12.21 with caching keyed on the PEP 723 scripts
+and tests through `cache-dependency-glob` (there is no lockfile), Python 3.14.7
+(uv-managed), and the Claude CLI `@anthropic-ai/claude-code@2.1.316` from npm with the
+auto-updater disabled (`DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1` in the workflow
+environment). Ruff runs as `uvx ruff==0.17.3` against the committed `ruff.toml`.
+Windows steps use the runner's native default shell, not Git Bash.
+
+Validator evidence, recorded 2026-11-02: `claude plugin validate .` was run on Windows
+with Claude Code CLI 2.1.316 from the repository root, with `CLAUDE_CONFIG_DIR`, `HOME`,
+`USERPROFILE`, `APPDATA` and `LOCALAPPDATA` all pointed at a fresh empty temporary
+directory (empty configuration, no credentials anywhere in the environment), stdin
+closed and a 180 s timeout: exit 0, `Validation passed` — no login and no model call.
+The Linux and hosted-runner results stay pending until the first authorized push or
+pull request (a follow-up for the user); a pending hosted result does not fail this
+change.
+
+Pre-existing lint findings, identical to the round-0 baseline and deliberately not
+fixed here: `ruff check` reports 7 errors — I001 import sorting in `bench/bench.py`
+(line 65), `scripts/models.py` (line 86), `scripts/release.py` (line 57),
+`tests/test_bench.py` (line 18) and `tests/test_models.py` (line 10), UP017 in
+`bench/bench.py` (line 140), RUF012 in `tests/test_bench.py` (line 1541) — and
+`ruff format --check` would reformat `bench/bench.py`, `tests/test_bench.py` and
+`tests/test_bench_publish.py`. The committed `ruff.toml` pins the target version
+(py311) that the pinned Ruff 0.17.3 resolves by default (checked with
+`ruff check --show-settings`; no user-level Ruff configuration is involved), so a clean
+runner matches the local gate result.
+
+Branch protection for `main` — exact user steps, to do in the GitHub web UI after the
+first CI run, changing nothing else: Settings → Branches → Add branch protection rule
+(or edit the existing rule for `main`) → check "Require a pull request before merging"
+→ check "Require status checks to pass before merging" → in that setting's search box,
+add both `CI / checks (ubuntu-latest)` and `CI / checks (windows-latest)` (they appear
+once they have run) → Save changes.
