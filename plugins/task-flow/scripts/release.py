@@ -60,11 +60,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import tomllib
 from rules import check_command
 
 DEFAULT_CONFIG = (".claude", "task-flow.release.toml")

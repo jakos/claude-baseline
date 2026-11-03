@@ -76,10 +76,9 @@ import sys
 import tarfile
 import tempfile
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-
 import tomllib
+from datetime import UTC, datetime
+from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = BENCH_DIR.parent
@@ -137,7 +136,7 @@ class CaseError(Exception):
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso_now() -> str:
@@ -1074,7 +1073,9 @@ def _size_table(rows: list, size: str) -> list[str]:
     lines = [REPORT_HEADER, "| " + " --- | " * 12 + "--- |"]
     for name in _profile_rows(rows, size):
         prows = [
-            r for r in rows if (size == "All" or r["size"] == size) and r["profile"] == name
+            r
+            for r in rows
+            if (size == "All" or r["size"] == size) and r["profile"] == name
         ]
         runs = len(prows)
         accepted = [r for r in prows if r["outcome"] == "accepted"]
@@ -2238,7 +2239,10 @@ def cmd_merge(args) -> int:
     metas, run_rows = [], []
     for rid in args.sources:
         run_dir = out / rid
-        if not (run_dir / "run.json").is_file() or not (run_dir / "results.jsonl").is_file():
+        if (
+            not (run_dir / "run.json").is_file()
+            or not (run_dir / "results.jsonl").is_file()
+        ):
             raise BenchError(f"no run {rid!r} under {out}")
         metas.append(read_json(run_dir / "run.json"))
         run_rows.append(
@@ -2269,7 +2273,10 @@ def cmd_merge(args) -> int:
     cells: dict = {}
     for rid, rows in zip(args.sources, run_rows):
         for row in sorted(rows, key=lambda r: r["n"]):
-            cells[(row["case"], row["profile"], row["repeat"])] = {**row, "source_run": rid}
+            cells[(row["case"], row["profile"], row["repeat"])] = {
+                **row,
+                "source_run": rid,
+            }
     merged = list(cells.values())
     payload = {
         "harness_version": first["harness_version"],
@@ -2277,7 +2284,9 @@ def cmd_merge(args) -> int:
         "review": first["review"],
         "cases": {cid: entries[cid] for cid in sorted(entries)},
     }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     fp = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     for n, row in enumerate(merged, 1):
         row["n"] = n
@@ -2305,7 +2314,9 @@ def cmd_merge(args) -> int:
     )
     write_text(
         run_dir / "results.jsonl",
-        "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in merged),
+        "".join(
+            json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in merged
+        ),
     )
     write_text(run_dir / "report.md", render_report(merged, meta_out))
     replaced = sum(len(rows) for rows in run_rows) - len(merged)

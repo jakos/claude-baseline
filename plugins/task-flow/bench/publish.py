@@ -743,8 +743,17 @@ def _write_if_changed(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def _rel_posix(target, start) -> str:
+    """POSIX path of `target` relative to `start`; the absolute POSIX path when the two
+    are on different drives (Windows), where no relative path exists."""
+    try:
+        return Path(os.path.relpath(target, start)).as_posix()
+    except ValueError:
+        return Path(target).as_posix()
+
+
 def _benchmark_md_template(docs_dir: Path) -> str:
-    rel = Path(os.path.relpath(BENCH_DIR / "README.md", docs_dir)).as_posix()
+    rel = _rel_posix(BENCH_DIR / "README.md", docs_dir)
     return (
         "# Benchmark\n"
         "\n"
@@ -809,7 +818,7 @@ def publish(results_dir, docs_dir, readme, run_id=None) -> list[str]:
     if not readme.is_file():
         raise PublishError(f"README not found: {readme}")
     readme_text = _read_text(readme)
-    rel = Path(os.path.relpath(docs_dir, readme.parent)).as_posix()
+    rel = _rel_posix(docs_dir, readme.parent)
     new_readme_text = _apply_block(
         readme_text,
         README_START,
