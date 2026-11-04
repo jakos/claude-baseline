@@ -33,7 +33,8 @@ Run the rules' test with
 `uv run --script plugins/task-flow/tests/test_bench.py`, the deterministic gates' with
 `uv run --script plugins/task-flow/tests/test_gates.py`, the model config's with
 `uv run --script plugins/task-flow/tests/test_models.py`, the external implementer's with
-`uv run --script plugins/task-flow/tests/test_implement.py`, the launcher's with
+`uv run --script plugins/task-flow/tests/test_implement.py`, the CLI driver's with
+`uv run --script plugins/task-flow/tests/test_cli_driver.py`, the launcher's with
 `uv run --script plugins/task-flow/tests/test_launch.py`, the release script's with
 `uv run --script plugins/task-flow/tests/test_release.py` and the doctor's with
 `uv run --script plugins/task-flow/tests/test_doctor.py`, the docs' with
@@ -55,3 +56,11 @@ which uses the same rules from `scripts/rules.py` with the `external-implementer
   enforced by the orchestration procedure and recorded in `status.md`; they are
   instructions, not hooks. The autopilot's circuit breaker is the same: `autopilot.py`
   computes the decision, the procedure obeys it.
+- A `driver = "cli"` implementer (`scripts/cli_driver.py`) is a process, not a tool-call
+  stream: `rules.py` and the `guard.py` hook never see its commands, so they cannot police
+  its commits, pushes, network activity or child processes — its confinement is the CLI's
+  own sandbox flag (e.g. `--sandbox workspace-write`) and the runner's environment
+  (allowlist + `pass_env`), working directory, deadline and result capture. A credential
+  passed through `pass_env` (e.g. `CODEX_API_KEY`) may reach the CLI's child commands.
+  What the runner does stage is the ordinary result: tracked changes and new files, with
+  a same-branch descendant commit recovered via `git reset --soft` before staging.

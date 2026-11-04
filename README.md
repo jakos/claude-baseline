@@ -74,7 +74,7 @@ flowchart TD
   impl["implement.py"]
   loop1["openai-loop (Mistral, OpenAI-compatible)"]
   loop2["anthropic-loop (Claude API)"]
-  cli["agent CLI, e.g. Codex (planned)"]
+  cli["agent CLI, e.g. Codex (driver cli)"]
   gate["checker subagent or gates.py"]
   wt["git worktree"]
   orch -->|"reads and writes"| files
@@ -87,13 +87,11 @@ flowchart TD
   orch --> impl
   impl --> loop1
   impl --> loop2
-  impl -.->|"planned"| cli
+  impl -->|"one process, driver cli"| cli
   sub -->|"changes in"| wt
   impl -->|"changes in"| wt
   gate -->|"reads"| wt
   gate -->|"writes checks-n.md"| files
-  classDef planned stroke-dasharray: 5 5
-  class cli planned
 ```
 <!-- /diagram:architecture -->
 
@@ -134,7 +132,7 @@ flowchart TD
 
 - A [planner and an independent reviewer](docs/task-flow/overview.md) that see only files, never the implementer's reasoning.
 - [Your approval gate](docs/task-flow/commands.md) before anything is built — `--auto` skips it.
-- An optional, experimental [external implementer](docs/task-flow/external-implementer.md) on a cheaper per-token model via `models.toml`.
+- An optional, experimental [external implementer](docs/task-flow/external-implementer.md) on a cheaper per-token model or an agent CLI (Codex) on your subscription, via `models.toml`.
 - [Autopilot](docs/task-flow/autopilot.md) for a whole list of tasks: `/task-flow:task-autopilot`.
 - A [benchmark](docs/task-flow/benchmark.md) that compares implementers on frozen cases.
 
@@ -153,6 +151,7 @@ Claude Code starts from ([Setting the key](docs/task-flow/setup.md#setting-the-k
 copy [`plugins/task-flow/templates/models.toml`](plugins/task-flow/templates/models.toml)
 to `.claude/task-flow.models.toml`, and set a real `model` with
 `[roles] implementer = "mistral"` ([models.toml](docs/task-flow/setup.md#modelstoml-for-the-external-implementer)).
+An agent CLI (Codex) works too: [Agent CLI driver](docs/task-flow/external-implementer.md#agent-cli-driver-cli-codex).
 
 Check the setup with `/task-flow:task-doctor` (add `--online` once a key is set), then run
 a first task: `/task-flow:task-run "<request>"`.

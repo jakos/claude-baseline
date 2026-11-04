@@ -62,7 +62,11 @@ files whether the next task may start. Its four triggers, in both modes:
 
 All four count Claude tokens only; external USD cost is measured and reported, never a
 trigger. A task already in progress always resumes. The breaker is decided by the script
-but obeyed by procedure, not by a hook.
+but obeyed by procedure, not by a hook. An external round whose `impl-<n>.json` has a null
+`cost_usd` (a `driver = "cli"` subscription profile, or unknown usage) is not added
+numerically: its `External USD` cell is `unknown` (sticky — later numeric rounds add to
+the known subtotal and the total is reported `at least`), exactly like `autopilot.py`
+already reads it.
 
 **Estimates are coarse.** Per task: check = 15000 + 3000 x commands, implement = 30000 +
 12000 x steps, review = 30000 + 6000 x criteria, finish = 10000. A round is implement +
@@ -71,7 +75,9 @@ check + review. The 1-round estimate is check (baseline) + 1 round + finish; the
 measured. With an external implementer, `autopilot.py estimate` and `next` take
 `--implementer-kind profile` and count the implement term as 0 — the external round's
 cost is measured in USD (the `External USD` column of `run.md`, totalled in `report.md`),
-not estimated. Tokens of your main session are not counted, and Claude cannot see your plan's
+not estimated; a null `cost_usd` (a CLI subscription round or unknown usage) is recorded
+as `unknown` in the column, not as 0. Tokens of your main session are not counted, and
+Claude cannot see your plan's
 session or weekly limit; check it with `/usage`.
 
 ## Epics

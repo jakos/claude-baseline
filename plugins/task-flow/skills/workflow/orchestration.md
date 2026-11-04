@@ -258,7 +258,10 @@ be recorded, add it to the header and every row with `0`. Its values are a USD s
 plain decimal notation, never scientific notation — write `0.000012`, not `1.2e-05` (6
 decimal places are enough, because `implement.py` rounds `cost_usd` to 6; `autopilot.py`
 accepts either notation when reading) — or `unknown` (sticky) when an `impl-<n>.json`
-that should exist is missing or unreadable. `budget` is Claude tokens. `bootstrap` names
+that should exist is missing or unreadable, **or when its `cost_usd` is null** (a
+`driver = "cli"` subscription round or unknown usage: do not add anything numerically and
+do not write `0` — write `unknown`; a later numeric round adds to the known subtotal and
+the run total is then reported `at least`). `budget` is Claude tokens. `bootstrap` names
 the bootstrap task; it is row 1 and every other row depends on it directly. `source` is
 optional and absent means `backlog`; `tasks` marks a run built from an explicit
 `--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`, row 1
@@ -363,7 +366,12 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
      `implement.py` rounds `cost_usd` to 6; `autopilot.py` also accepts scientific
      notation) (exit 2 adds nothing — a stale file from an earlier attempt may exist; if
      the column is absent, add it to the header and every row with `0` first), and record
-     the History line `implementer <profile>: <cost_usd> USD external`. If an external
+     the History line `implementer <profile>: <cost_usd> USD external`. When that
+     `cost_usd` is **null** (a `driver = "cli"` subscription profile, or usage the CLI did
+     not report), skip the numeric addition: write `unknown` in the cell (sticky — later
+     numeric rounds still add to the known subtotal and the totals read `at least`) and
+     record the History line `implementer <profile>: unknown USD external (subscription
+     or unreported usage)`. If an external
      round ends with exit 1 or 2, set state `paused` (also with `--auto`), show the line
      and append the History line `paused: external implementer failed (<id>)`; do not run
      `next`. Otherwise append a History line to `run.md`, then run `next` again with the
@@ -380,7 +388,8 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    are none —, Claude tokens used, External USD, the 1-round and 3-round estimates), a
    totals line with the Claude tokens (`planning-tokens` plus the sum of `Tokens used`,
    `at least` when any is `unknown`) and the external USD (the sum of the `External USD`
-   column, or `0` when the column is absent), the branch stack in order (the last `done`
+   column, `at least` when any row is `unknown` — a null CLI cost is never added as 0 —,
+   or `0` when the column is absent), the branch stack in order (the last `done`
    branch contains all finished work), skipped
    and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
    worktree removal. Show it.

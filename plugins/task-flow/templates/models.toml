@@ -7,7 +7,7 @@
 [profiles.mistral]
 # One example profile with every key. The model id is a placeholder; take a real
 # one from GET /v1/models.
-driver = "openai-loop"                  # "openai-loop" or "anthropic-loop" (required)
+driver = "openai-loop"                  # "openai-loop", "anthropic-loop" or "cli" (required)
 base_url = "https://api.mistral.ai/v1"  # http(s) URL; "/chat/completions" is appended on openai-loop, "/messages" on anthropic-loop (required)
 model = "<model id from GET /v1/models>"  # model id string (required)
 api_key_env = "MISTRAL_API_KEY"         # NAME of the env var holding the key; required unless billing = "local"
@@ -31,6 +31,43 @@ max_tokens_param = "max_tokens"         # the body key max_output_tokens is sent
 extra_body = {}                         # table merged into the request body; reserved keys are per driver: openai-loop model, messages, tools, tool_choice; anthropic-loop also system, max_tokens, stream, temperature, top_p, top_k (default: none)
 post_edit = []                         # commands run after each successful write_file/edit_file call; every "{path}" is replaced by the written file (worktree-relative, quoted); the exit code and output (max 40 lines) are appended to the tool result (default [])
 prompt_extras = []                     # files whose contents are appended to the system prompt before the runner adapter; "~" is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) (default [])
+
+# An agent-CLI profile (driver = "cli"): the implementer round runs an installed agent
+# CLI (e.g. Codex) instead of an HTTP API. The CLI owns its own tools and sandbox; the
+# runner controls only the environment, the working directory, the deadline and the
+# result capture (scripts/cli_driver.py). billing = "subscription" uses the CLI's saved
+# login (codex login) and needs no api_key_env; billing = "api" needs one, passed through
+# pass_env. A "cli" profile refuses the API-loop keys (base_url, max_turns, retries,
+# temperature, extra_body, post_edit, ...) — the CLI's internal loop is not governed by
+# them; its deadline is timeout_seconds. Only {worktree}, {prompt_file} and
+# {last_message_file} are expanded in command, each argument on its own, with no shell.
+# [profiles.codex]
+# driver = "cli"
+# model = "gpt-5.2-codex"               # metadata only: the -m argument below picks the model
+# billing = "subscription"              # saved login; no api_key_env needed
+# command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-"]
+# timeout_seconds = 600                 # the whole CLI run's deadline, seconds (default 600)
+# prompt_via = "stdin"                   # "stdin" (default), "file" (requires {prompt_file} in command) or "arg" (prompt appended as one final argument)
+# usage_format = "codex-jsonl"          # "codex-jsonl" sums turn.completed usage from stdout JSONL; "none" (default) leaves usage and cost unknown (null)
+# pass_env = []                         # extra environment-variable NAMES passed to the CLI (default []); the runner allowlist applies first
+# limit_patterns = []                   # regexes; a match on the bounded stderr/final output makes this attempt unavailable and tries the next fallback (default [])
+# prompt_extras = []
+# fallback = []
+# enabled = true
+# price_input_per_mtok = 0.0            # used for the cost figure only on billing = "api" with reported usage
+# price_cached_input_per_mtok = 0.0
+# price_output_per_mtok = 0.0
+
+# The same CLI on an invocation-scoped API key instead of the saved login:
+# [profiles.codex-api]
+# driver = "cli"
+# model = "gpt-5.2-codex"
+# billing = "api"
+# api_key_env = "CODEX_API_KEY"          # required with billing = "api" on driver "cli"
+# pass_env = ["CODEX_API_KEY"]           # the key reaches the CLI; no other secret does
+# command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-o", "{last_message_file}", "-"]
+# usage_format = "codex-jsonl"
+# timeout_seconds = 900
 
 # A Claude profile on the native Messages API (prompt caching, cache-aware cost).
 # Prices are USD per 1M tokens as of 2026-11-01; check the provider's pricing page.

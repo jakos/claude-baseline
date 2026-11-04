@@ -322,6 +322,58 @@ class BenchFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------- units
 
 
+class SettingsForTest(BenchFixture):
+    """settings_for: the generated per-run models.toml must validate again (D4)."""
+
+    def write_and_load(self, name, settings):
+        gen = self.root / "gen"
+        (gen / ".claude").mkdir(parents=True, exist_ok=True)
+        lines = [f"[profiles.{name}]"]
+        lines += [f"{k} = {toml_value(v)}" for k, v in settings.items()]
+        (gen / ".claude" / "task-flow.models.toml").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+        )
+        return bench.models.load(gen)[0][name]
+
+    def test_api_profile_drops_cli_only_keys(self):
+        server = self.server([reply(content="done")])
+        self.add_profile("fake", server)
+        profiles, _roles = bench.models.load(self.project)
+        settings = bench.Runner.settings_for(
+            type("Stub", (), {"profiles": profiles})(), "fake", None
+        )
+        for key in bench.models.CLI_ONLY_KEYS:
+            self.assertNotIn(key, settings, key)
+        reloaded = self.write_and_load("fake", settings)
+        self.assertEqual(reloaded["driver"], "openai-loop")
+        self.assertEqual(reloaded["base_url"], server.url)
+
+    def test_cli_profile_drops_api_loop_keys(self):
+        with open(self.models_path, "a", encoding="utf-8", newline="") as handle:
+            handle.write(
+                "[profiles.codex]\n"
+                'driver = "cli"\n'
+                'model = "codex-model"\n'
+                'billing = "subscription"\n'
+                'command = ["codex", "exec", "-"]\n'
+                'prompt_via = "stdin"\n'
+                'usage_format = "codex-jsonl"\n'
+                "timeout_seconds = 123\n"
+            )
+        profiles, _roles = bench.models.load(self.project)
+        settings = bench.Runner.settings_for(
+            type("Stub", (), {"profiles": profiles})(), "codex", None
+        )
+        for key in bench.models.CLI_INCOMPATIBLE_KEYS:
+            self.assertNotIn(key, settings, key)
+        self.assertEqual(settings["command"], ["codex", "exec", "-"])
+        self.assertEqual(settings["usage_format"], "codex-jsonl")
+        self.assertEqual(settings["timeout_seconds"], 123)
+        reloaded = self.write_and_load("codex", settings)
+        self.assertEqual(reloaded["driver"], "cli")
+        self.assertEqual(reloaded["command"], ["codex", "exec", "-"])
+
+
 class ParseChecksTest(unittest.TestCase):
     CHECKS0 = (
         "# Checks: round 0\n"

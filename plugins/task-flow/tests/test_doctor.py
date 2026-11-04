@@ -615,6 +615,95 @@ class DriverTest(DoctorTest):
             self.assertIn(driver, doctor.DRIVER_CHECKS)
 
 
+CLI_TOML = """
+[profiles.codex]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "subscription"
+command = ["codex", "exec", "-"]
+prompt_via = "stdin"
+usage_format = "codex-jsonl"
+fallback = ["codex-api"]
+
+[profiles.codex-api]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "api"
+api_key_env = "CODEX_API_KEY"
+pass_env = ["CODEX_API_KEY"]
+command = ["codex", "exec", "-"]
+
+[roles]
+implementer = "codex"
+"""
+
+
+class CliProfileTest(DoctorTest):
+    """The driver "cli" rows of check 14: executable and key, never an online probe."""
+
+    def rows_for(self, profiles, roles, env, lookup=lambda name: None, which=None):
+        kwargs = {} if which is None else {"which": which}
+        rows, targets = doctor.check_implementer_profiles(
+            profiles, roles, env, lookup, **kwargs
+        )
+        return {row.name: row for row in rows}, targets
+
+    def fake_which(self, name):
+        return f"/fake/bin/{name}" if name == "codex" else None
+
+    def test_cli_rows_replace_base_url_and_limits(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        rows, targets = self.rows_for(profiles, roles, {}, which=self.fake_which)
+        self.assertNotIn("profile codex (primary): base_url", rows)
+        self.assertNotIn("profile codex (primary): limits", rows)
+        driver = rows["profile codex (primary): driver"]
+        self.assertEqual(driver.result, "PASS")
+        self.assertIn("no /models request", driver.detail)
+        self.assertIn("timeout_seconds", driver.detail)
+        self.assertIn("saved login", driver.detail)
+        command = rows["profile codex (primary): command"]
+        self.assertEqual(command.result, "PASS")
+        self.assertIn("/fake/bin/codex", command.detail)
+        # subscription: no key needed, and never an online target
+        key = rows["profile codex (primary): key"]
+        self.assertEqual(key.result, "PASS")
+        self.assertIn("no api_key_env", key.detail)
+        self.assertEqual(targets, [])
+        # the api fallback: its key is required, and it is no online target either
+        api_key = rows["profile codex-api (fallback): key"]
+        self.assertEqual(api_key.result, "WARN")
+        self.assertIn("CODEX_API_KEY", api_key.detail)
+        self.assertEqual(targets, [])
+
+    def test_cli_missing_executable_fails_primary_warns_fallback(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        rows, _ = self.rows_for(profiles, roles, {}, which=lambda name: None)
+        primary = rows["profile codex (primary): command"]
+        self.assertEqual(primary.result, "FAIL")
+        self.assertIn("not found on PATH", primary.detail)
+        self.assertIn("install codex", " ".join(primary.fixes))
+        self.assertEqual(rows["profile codex-api (fallback): command"].result, "WARN")
+
+    def test_cli_api_key_set_passes_without_revealing_and_stays_offline(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        env = {"CODEX_API_KEY": "sk-codex-123456"}
+        rows, targets = self.rows_for(profiles, roles, env, which=self.fake_which)
+        key = rows["profile codex-api (fallback): key"]
+        self.assertEqual(key.result, "PASS")
+        self.assertIn("chars", key.detail)
+        self.assertNotIn("sk-codex-123456", key.detail)
+        self.assertEqual(targets, [])
+
+    def test_cli_profile_is_never_probed_online(self):
+        provider = FakeProvider(make_handler([], 200, ["gpt-5.2-codex"]))
+        self.addCleanup(provider.stop)
+        self.project_models(CLI_TOML)
+        os.environ["CODEX_API_KEY"] = "sk-live-key-1"
+        _code, out, _ = self.run_doctor(["--project", str(self.repo), "--online"])
+        self.assertNotIn("| online", out)
+        self.assertEqual(provider.hits, [])
+
+
 # --- AC14: the online check ------------------------------------------------------------------------
 
 

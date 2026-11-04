@@ -138,11 +138,15 @@ machine, this Claude Code session and this repository: `uv` on `PATH`, the Pytho
 scripts need, `git` with worktree support, the repository (work tree, a commit, a clean
 tree), which task-flow the session loaded, `.claude/task-flow.md`, the settings files, the
 recommended permission rules, `ANTHROPIC_API_KEY`, `models.toml`, and every profile the
-`[roles] implementer` uses (enabled, key, `base_url`, limits, driver). Each check is one
+`[roles] implementer` uses (enabled, key, `base_url`, limits, driver; for a `driver = "cli"`
+profile the executable of its `command` instead of `base_url`/limits). Each check is one
 row — PASS, WARN or FAIL — and every WARN and FAIL has its exact fix under `## Fixes`. The
 exit code is 0 when no check is FAIL, 1 otherwise. `--online` adds one authenticated
-`GET <base_url>/models` per profile in use — the provider's model list, which costs no
-tokens — and says whether the configured `model` is among the listed ids. There is no
+`GET <base_url>/models` per API profile in use — the provider's model list, which costs no
+tokens — and says whether the configured `model` is among the listed ids; a `cli` profile
+is never probed online (no `/models` request, no agent run — both would spend
+subscription or API capacity), so its saved login stays unverified until you run the CLI
+yourself. There is no
 `--fix`: the doctor changes nothing, and it never prints a secret (key values are
 redacted).
 
@@ -164,7 +168,8 @@ runs a stack of them. A failed external round (exit 1 or 2 of `scripts/implement
 leaves the phase `implementing`: rerun the same command and the round is not counted
 again; in an autopilot run the run pauses and `/task-flow:task-autopilot <run-id>`
 resumes it. The `External USD` column in `run.md` accumulates the `cost_usd` of every
-finished external round from `impl-<n>.json`.
+finished external round from `impl-<n>.json` (a null `cost_usd` — a CLI subscription
+round or unknown usage — is recorded as `unknown`, not 0).
 
 ## What to look at in /usage
 

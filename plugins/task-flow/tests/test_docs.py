@@ -61,7 +61,9 @@ FRONT_PAGE = "README.md"
 # lines strictly between the sdlc:status markers, because sdlc_status.py controls those
 # (bounded separately by SDLC_BLOCK_MAX_LINES).
 FRONT_PAGE_MAX_LINES = 150
-PLUGIN_README_MAX_LINES = 40
+# cli-implementer-driver added the Codex subscription/API example block under the plugin
+# README's Documentation section, so the README grew from 40 to 59 lines.
+PLUGIN_README_MAX_LINES = 60
 # readme-front-page: the bench:latest marker pair of the front page; must equal
 # README_START / README_END in plugins/task-flow/bench/publish.py.
 BENCH_LATEST = ("<!-- bench:latest:start -->", "<!-- bench:latest:end -->")
@@ -186,7 +188,7 @@ BLOCKS_BEFORE = {
 }
 BLOCKS_AFTER = {
     "README.md": 1,
-    PLUGIN_README: 1,
+    PLUGIN_README: 2,
     BENCH_README: 8,
     "docs/README.md": 0,
     "docs/dev-baseline.md": 6,
@@ -197,7 +199,7 @@ BLOCKS_AFTER = {
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 1,
     "docs/task-flow/configuration.md": 3,
-    "docs/task-flow/external-implementer.md": 13,
+    "docs/task-flow/external-implementer.md": 16,
     "docs/task-flow/gates.md": 5,
     "docs/task-flow/enforcement.md": 0,
     "docs/task-flow/profiles.md": 0,
@@ -212,9 +214,15 @@ BLOCKS_ADDED = {
     "docs/task-flow/setup.md": 5,
     # Added by the task readme-front-page: the front page keeps one fenced block (the
     # quick-start install block, delta 0 against the post-split count), and the plugin
-    # README gains its five-line quick-reference block.
+    # README gains its five-line quick-reference block; cli-implementer-driver added the
+    # Codex subscription/API example block under the plugin README's Documentation
+    # section, so its total is 2.
     "README.md": 0,
-    PLUGIN_README: 1,
+    PLUGIN_README: 2,
+    # Added by the task cli-implementer-driver: the three blocks of the new
+    # "Agent CLI driver (cli): Codex" section of external-implementer.md (two toml
+    # examples and the manual smoke command).
+    "docs/task-flow/external-implementer.md": 3,
     # Added by the task ci-github-actions: one block in docs/development.md (the local
     # verify.py command in the CI section) and two in docs/task-flow/gates.md (the local
     # verify.py run and a sample of its per-check output). The CI Mermaid diagram is

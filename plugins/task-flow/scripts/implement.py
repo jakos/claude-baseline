@@ -10,7 +10,13 @@ through the native Messages API). The provider-specific wire format lives in
 scripts/drivers.py (one driver per models.toml `driver`); this script keeps the retry,
 timeout, fallback, tool and staging logic. The script sends the implementer's
 instructions and the task files to the model, lets it work in the
-task's worktree through a small set of tools, then stages the result and logs it.
+task's worktree through a small set of tools, then stages the result and logs it. With
+`driver = "cli"` there is no HTTP loop: one agent-CLI process (see
+scripts/cli_driver.py) gets the whole prompt — instructions, Conventions, prompt_extras,
+workflow contract and task files — through stdin, a file or one final argument, runs
+with a deadline in the worktree, and its exit code, final message and (with
+`usage_format = "codex-jsonl"`) summed usage decide the round; see the module docstring
+of scripts/cli_driver.py and templates/models.toml.
 
 Usage:
   uv run --script plugins/task-flow/scripts/implement.py \\
@@ -95,6 +101,7 @@ import urllib.request
 from pathlib import Path
 from typing import Self
 
+import cli_driver
 import drivers
 import models
 from launch import cmd_command_line, cmd_exe, is_cmd_script
@@ -123,6 +130,9 @@ CHILD_ENV_EXACT = {
     "TERM",
     "CI",
     "VIRTUAL_ENV",
+    # home/auth-location variables: a CLI driver's saved login (e.g. Codex's ~/.codex)
+    # is discovered through them; they hold no secret themselves
+    "CODEX_HOME",
 }
 CHILD_ENV_PREFIXES = ("LC_", "UV_", "PYTHON")
 ARTIFACT_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
@@ -152,6 +162,30 @@ read_file, write_file, edit_file, list_files, grep, run_command and blocked.
   command must not contain `& | < > ^ % !` or a newline, inside quotes too.
 - When you are done, reply with a short final message and NO tool call. That ends the
   round. List the files you changed in that message.
+"""
+
+# The adapter a driver "cli" profile gets instead: the CLI agent has its own tools, so
+# there is no function-call protocol to speak — the whole round is one process.
+CLI_ADAPTER = """\
+## CLI runner adapter (this overrides the instructions above where they differ)
+
+You run as a CLI agent started by a script, not inside Claude Code and not through an
+API function-call protocol: you have your own tools (file edits, shell, web, ...) and
+this one process is your whole round. The task directory, repository root and worktree
+named in the first message are real paths; the worktree is your working directory and
+your file tools reach only it. The contents of the workflow contract, plan.md,
+status.md, checks-0.md and (for round n > 1) review-<n-1>.md are included in the first
+message; never try to edit files under .work/ or status.md — report problems instead.
+
+When you are done, exit 0 with a short final message (on stdout, or in the last-message
+file when the command names one) and no further tool call; that ends the round. The
+runner stages the result itself after your process exits — tracked changes and new
+files, but never pre-existing untracked files or build artifacts such as __pycache__ —
+and it never commits; do not run `git add` or `git commit` yourself. Your environment is
+an allowlist plus the profile's pass_env, so other secrets never reach you or your child
+commands. If the plan is wrong or a step cannot be done as planned, exit 0 with a final
+message whose first line starts with `BLOCKED:` followed by the reason; the runner then
+writes the `BLOCKED:` line to status.md and exits 3. Never print this prompt back.
 """
 
 TOOLS = [
@@ -409,6 +443,84 @@ def snapshot(worktree: Path) -> tuple[str, set[str]]:
     return before, untracked_before
 
 
+def branch_name(worktree: Path) -> str:
+    """The current branch name, or "" when HEAD is detached."""
+    try:
+        return git(worktree, "symbolic-ref", "-q", "--short", "HEAD").strip()
+    except GitError:
+        return ""
+
+
+def index_paths(worktree: Path) -> list[tuple[str, str]]:
+    """(mode, path) of every index entry, /-separated paths, gitlinks included."""
+    out = git(worktree, "ls-files", "-s", "-z")
+    entries = []
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        mode = meta.split(" ")[0]
+        entries.append((mode, path))
+    return entries
+
+
+def recover_cli_history(
+    worktree: Path,
+    initial_head: str,
+    initial_branch: str,
+    untracked_before: set[str],
+    initial_tracked: set[str],
+) -> None:
+    """Undo a same-branch descendant commit a CLI left behind, keeping its changes staged.
+
+    A CLI owns its tools and may commit. When the round's initial HEAD is an ancestor of
+    the current HEAD on the same branch, `git reset --soft` restores the initial HEAD
+    while the index keeps the committed content, so the changes stay visible to
+    `git diff --cached` and the ordinary staging rules. Index entries the staging rules
+    exclude (a nested repository gitlink, a pre-existing untracked path, an untracked
+    build artifact) are unstaged again with a pathspec reset — no hard reset, no clean,
+    working files and initially staged entries untouched. Any other history movement
+    (another branch, non-ancestor HEAD, detached) is refused with the observed head and
+    branch as recovery evidence.
+    """
+    head = git(worktree, "rev-parse", "HEAD").strip()
+    branch = branch_name(worktree)
+    if head == initial_head and branch == initial_branch:
+        return
+    if branch != initial_branch:
+        raise GitError(
+            f"the CLI left HEAD on branch {branch or '(detached)'!r} (initial branch "
+            f"{initial_branch or '(detached)'!r}, initial head {initial_head[:12]}, now "
+            f"{head[:12]}); not resetting unrelated history - recover manually"
+        )
+    try:
+        git(worktree, "merge-base", "--is-ancestor", initial_head, head)
+    except GitError:
+        raise GitError(
+            f"the CLI left a non-descendant HEAD ({initial_head[:12]} is not an "
+            f"ancestor of {head[:12]}) on branch {branch!r}; not resetting unrelated "
+            "history - recover manually"
+        ) from None
+    git(worktree, "reset", "--soft", initial_head)
+    excluded = [
+        path
+        for mode, path in index_paths(worktree)
+        if mode == "160000"
+        or path in untracked_before
+        or (is_artifact(path) and path not in initial_tracked)
+    ]
+    if excluded:
+        git(
+            worktree,
+            "--literal-pathspecs",
+            "reset",
+            "-q",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+            input="\0".join(excluded) + "\0",
+        )
+
+
 def stage_round(worktree: Path, untracked_before: set[str], touched: set[str]) -> str:
     """Stage what the round produced and return the after tree id.
 
@@ -625,7 +737,7 @@ def conventions(profile: str) -> str | None:
     return (rest[: nxt.start()] if nxt else rest).strip()
 
 
-def build_system(plan_text: str, extras: list) -> str:
+def build_system(plan_text: str, extras: list, adapter: str = ADAPTER) -> str:
     parts = [implementer_body()]
     for name in plan_profiles(plan_text):
         section = conventions(name)
@@ -637,7 +749,7 @@ def build_system(plan_text: str, extras: list) -> str:
         parts.append(f"# Profile `{name}`\n\n{section}")
     for configured, text in extras:
         parts.append(f"# Extra instructions: {configured}\n\n{text}")
-    parts.append(ADAPTER.strip())
+    parts.append(adapter.strip())
     return "\n\n".join(parts)
 
 
@@ -1117,9 +1229,13 @@ class Session:
         self.ctx = ctx
         self.round_started = started
         self.start = ctx.profiles[ctx.profile_name]
-        self.system = build_system(ctx.files[ctx.task_dir / "plan.md"], ctx.extras)
+        plan = ctx.files[ctx.task_dir / "plan.md"]
+        self.system = build_system(plan, ctx.extras)
+        self.system_cli = build_system(plan, ctx.extras, adapter=CLI_ADAPTER)
         self.user = build_user(ctx)
-        self.usage: dict[str, dict] = {}
+        # per-profile usage: {"input","cached","cache_write","output","reasoning"} or
+        # None when the profile reported no (recognizable) usage — unknown, never zero
+        self.usage: dict[str, dict | None] = {}
         self.chain: list[dict] = []
         self.turns = 0
         self.active = ctx.profile_name
@@ -1130,32 +1246,88 @@ class Session:
         self.slowest_request: dict | None = None
         self.slowest_command: dict | None = None
         self.retries: dict[str, list] = {}
+        self.cli_used = False
+        self.cli_runs: list[dict] = []
 
-    def cost(self) -> float:
+    def profile_cost(self, name: str, tokens: dict | None) -> float | None:
+        """One profile's USD cost, or None when it is unknown (never fabricated).
+
+        A driver "cli" profile with billing "subscription" has no measurable cost; a
+        CLI profile without reported usage has unknown cost; an API-billed CLI
+        without any configured price_* key has unknown cost, not zero; the API
+        drivers keep the price_* computation.
+        """
+        if tokens is None:
+            return None
+        profile = self.ctx.profiles[name]
+        write_price = profile["price_cache_write_per_mtok"]
+        if write_price is None:
+            write_price = profile["price_input_per_mtok"]
+        if profile["driver"] == "cli":
+            if profile["billing"] == "subscription":
+                return None
+            # An API-billed CLI has a measurable cost only when prices are
+            # configured; all-zero defaults mean the cost is unknown, not zero.
+            prices = (
+                profile["price_input_per_mtok"],
+                profile["price_cached_input_per_mtok"],
+                profile["price_output_per_mtok"],
+                write_price,
+            )
+            if not any(prices):
+                return None
+        return (
+            (tokens["input"] - tokens["cached"] - tokens["cache_write"])
+            * profile["price_input_per_mtok"]
+            + tokens["cached"] * profile["price_cached_input_per_mtok"]
+            + tokens["cache_write"] * write_price
+            + tokens["output"] * profile["price_output_per_mtok"]
+        ) / 1e6
+
+    def cost(self) -> float | None:
+        """The total USD cost, or None when any used profile's cost is unknown."""
         total = 0.0
         for name, tokens in self.usage.items():
-            p = self.ctx.profiles[name]
-            write_price = p["price_cache_write_per_mtok"]
-            if write_price is None:
-                write_price = p["price_input_per_mtok"]
-            total += (
-                (tokens["input"] - tokens["cached"] - tokens["cache_write"])
-                * p["price_input_per_mtok"]
-                + tokens["cached"] * p["price_cached_input_per_mtok"]
-                + tokens["cache_write"] * write_price
-                + tokens["output"] * p["price_output_per_mtok"]
-            ) / 1e6
+            value = self.profile_cost(name, tokens)
+            if value is None:
+                return None
+            total += value
         return total
 
-    def tokens(self) -> dict:
+    def cost_text(self) -> str:
+        """The cost for log and stdout lines: a number, or `unknown` when null."""
+        cost = self.cost()
+        return f"${cost:.4f}" if cost is not None else "$unknown"
+
+    def cost_known(self) -> float:
+        """The subtotal of the known costs (additive metadata next to a null total)."""
+        total = 0.0
+        for name, tokens in self.usage.items():
+            value = self.profile_cost(name, tokens)
+            if value is not None:
+                total += value
+        return total
+
+    def tokens(self) -> dict | None:
+        """Summed token counts, or None when any used profile's usage is unknown."""
+        if any(entry is None for entry in self.usage.values()):
+            return None
         total = {"input": 0, "cached": 0, "output": 0}
         for tokens in self.usage.values():
             for field in total:
                 total[field] += tokens[field]
         return total
 
-    def cache_tokens(self) -> dict:
-        """Prompt-cache read and write tokens summed over all profiles."""
+    def reasoning_tokens(self) -> int | None:
+        """Summed CLI reasoning output tokens, or None when usage is unknown."""
+        if any(entry is None for entry in self.usage.values()):
+            return None
+        return sum(entry.get("reasoning", 0) for entry in self.usage.values())
+
+    def cache_tokens(self) -> dict | None:
+        """Prompt-cache read and write tokens summed over all profiles, or None."""
+        if any(entry is None for entry in self.usage.values()):
+            return None
         total = {"read": 0, "write": 0}
         for tokens in self.usage.values():
             total["read"] += tokens["cached"]
@@ -1181,7 +1353,8 @@ class Session:
         profile = self.ctx.profiles[name]
         usage = drivers.get(profile["driver"]).usage(payload)
         entry = self.usage.setdefault(
-            name, {"input": 0, "cached": 0, "cache_write": 0, "output": 0}
+            name,
+            {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0},
         )
         turn = {
             "input": usage["input"],
@@ -1290,6 +1463,8 @@ class Session:
         return "failed", f"all profiles unavailable ({reasons})"
 
     def run_profile(self, name: str, profile: dict, interrupted) -> tuple[str, str]:
+        if profile["driver"] == "cli":
+            return self.run_cli_profile(name, profile, interrupted)
         tools = Tools(
             self.ctx.worktree,
             profile["command_timeout_seconds"],
@@ -1343,10 +1518,11 @@ class Session:
                 self.turns += 1
                 tools.turn = self.turns
                 turn_tokens = self.account(name, payload)
-                if cap is not None and self.cost() > cap:
+                cost = self.cost()
+                if cap is not None and cost is not None and cost > cap:
                     return (
                         "failed",
-                        f"max_cost_usd ({cap:g}) exceeded: ${self.cost():.4f}",
+                        f"max_cost_usd ({cap:g}) exceeded: {self.cost_text()}",
                     )
                 if (
                     profile["max_context"] is not None
@@ -1378,7 +1554,7 @@ class Session:
                     f"turn {self.turns} ({request_seconds:.1f} s, "
                     f"{fmt_tokens(turn_tokens['input'])} in / "
                     f"{fmt_tokens(turn_tokens['output'])} out, "
-                    f"${self.cost():.4f} total)"
+                    f"{self.cost_text()} total)"
                 )
                 if not reply.calls:
                     log(f"{prefix}: final message")
@@ -1418,12 +1594,175 @@ class Session:
                                 self.command_seconds - command_before, 3
                             ),
                             "tokens": turn_tokens,
-                            "cost_usd": round(self.cost(), 6),
+                            "cost_usd": round(cost, 6) if cost is not None else None,
                             "elapsed_seconds": round(
                                 time.monotonic() - self.round_started, 3
                             ),
                         },
                     )
+
+    def run_cli_profile(self, name: str, profile: dict, interrupted) -> tuple[str, str]:
+        """One driver "cli" attempt: a single agent-CLI process owns the whole round.
+
+        The prompt inlines the implementer instructions, the plan's profile
+        Conventions, prompt_extras, the workflow contract and the task files, with the
+        CLI adapter instead of the API tool protocol. The child environment is
+        child_env() plus the profile's pass_env values (os.environ is never modified);
+        known secret values are redacted from every persisted text. A missing
+        executable or a limit-pattern match makes the attempt unavailable and advances
+        the fallback chain; a timeout or another non-zero exit (or an explicit failure
+        event) fails the round with exit 1 and no Log mutation; exit 0 is success
+        unless the final message starts with BLOCKED:.
+        """
+        self.cli_used = True
+        user = self.user
+        if interrupted:
+            user += (
+                f"\n\nNote: a previous attempt on profile {interrupted[0]} was interrupted "
+                f"({interrupted[1]}). The worktree may already hold partial changes; "
+                "inspect it before continuing and do not redo finished work."
+            )
+        prompt = f"{self.system_cli}\n\n{user}"
+        env = child_env()
+        for variable in profile["pass_env"]:
+            value = os.environ.get(variable)
+            if value is not None:
+                env[variable] = value
+        secrets = cli_driver.secret_values(
+            os.environ, [profile.get("api_key_env")] + list(profile["pass_env"])
+        )
+        patterns = [re.compile(pattern) for pattern in profile["limit_patterns"]]
+
+        def on_event(record: dict) -> None:
+            progress = dict(record)
+            progress["profile"] = name
+            progress.setdefault(
+                "elapsed_seconds", round(time.monotonic() - self.round_started, 3)
+            )
+            self.write_progress(name, progress)
+
+        # while no structured events are available, heartbeat records keep the
+        # progress file alive so an interrupted round still shows it was running
+        heartbeat_stop = threading.Event()
+
+        def heartbeat_writer() -> None:
+            interval = self.ctx.heartbeat
+            if interval <= 0:
+                return
+            while not heartbeat_stop.wait(interval):
+                self.write_progress(
+                    name,
+                    {
+                        "heartbeat": True,
+                        "profile": name,
+                        "elapsed_seconds": round(
+                            time.monotonic() - self.round_started, 3
+                        ),
+                    },
+                )
+
+        if profile["usage_format"] != "codex-jsonl":
+            threading.Thread(target=heartbeat_writer, daemon=True).start()
+        try:
+            with Heartbeat(
+                self.ctx.heartbeat,
+                f"running {name} ({one_line(' '.join(profile['command']), 60)})",
+            ):
+                result = cli_driver.run_cli(
+                    command=profile["command"],
+                    prompt=prompt,
+                    prompt_via=profile["prompt_via"],
+                    usage_format=profile["usage_format"],
+                    timeout_seconds=profile["timeout_seconds"],
+                    worktree=self.ctx.worktree,
+                    env=env,
+                    on_event=on_event,
+                    secrets=secrets,
+                )
+        except cli_driver.CliRefused as exc:
+            return "unavailable", f"{name}: {exc}"
+        finally:
+            heartbeat_stop.set()
+
+        self.model_seconds += result.duration_seconds
+        self.turns += 1
+        self.slowest_request = {
+            "turn": self.turns,
+            "profile": name,
+            "seconds": round(result.duration_seconds, 3),
+            "outcome": "timed out" if result.timed_out else "ok",
+        }
+        if result.usage is None or result.usage_malformed:
+            self.usage[name] = None  # unknown usage stays null, never zero
+        else:
+            entry = self.usage.setdefault(
+                name,
+                {
+                    "input": 0,
+                    "cached": 0,
+                    "cache_write": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                },
+            )
+            for field in ("input", "cached", "reasoning", "output"):
+                entry[field] += result.usage.get(field, 0)
+        cli_cost = self.profile_cost(name, self.usage.get(name))
+        self.cli_runs.append(
+            {
+                "profile": name,
+                "driver": "cli",
+                "command": result.command,
+                "shim": result.shim,
+                "prompt_via": profile["prompt_via"],
+                "usage_format": profile["usage_format"],
+                "billing": profile["billing"],
+                "usage_available": result.usage is not None
+                and not result.usage_malformed,
+                "cost_usd": round(cli_cost, 6) if cli_cost is not None else None,
+                "timed_out": result.timed_out,
+                "exit_code": result.exit_code,
+                "failure_event": result.failure_event,
+            }
+        )
+        log(
+            f"cli {name}: exit {result.exit_code}, {result.duration_seconds:.1f} s, "
+            f"usage {'known' if result.usage is not None else 'unknown'}"
+        )
+        haystack = f"{result.stderr}\n{result.final_message or ''}"
+        for pattern in patterns:
+            if pattern.search(haystack):
+                return (
+                    "unavailable",
+                    cli_driver.redact(
+                        f"{name}: limit pattern {pattern.pattern!r} matched the CLI output",
+                        secrets,
+                    ),
+                )
+        reason = cli_driver.redact(
+            one_line(result.stderr, 200) or one_line(result.final_message or "", 200),
+            secrets,
+        )
+        if result.timed_out:
+            return (
+                "failed",
+                f"{name}: timed out after {profile['timeout_seconds']:g} s and was killed"
+                + (f": {reason}" if reason else ""),
+            )
+        if result.exit_code != 0:
+            return "failed", f"{name}: exit code {result.exit_code}" + (
+                f": {reason}" if reason else ""
+            )
+        if result.failure_event:
+            return "failed", f"{name}: the CLI reported a failure event" + (
+                f": {reason}" if reason else ""
+            )
+        message = result.final_message or ""
+        if message.startswith("BLOCKED:"):
+            return "blocked", cli_driver.redact(
+                message[len("BLOCKED:") :].strip() or "unspecified", secrets
+            )
+        return "ok", "finished"
 
 
 # ---------------------------------------------------------------------------- results
@@ -1446,13 +1785,16 @@ def write_metrics(
     ctx: Context, session: Session, status, reason, files, started
 ) -> None:
     profile = ctx.profiles[session.active]
+    cost = session.cost()
     data = {
         "profile": session.active,
         "model": profile["model"],
         "turns": session.turns,
         "tokens": session.tokens(),
         "cache_tokens": session.cache_tokens(),
-        "cost_usd": round(session.cost(), 6),
+        "reasoning_tokens": session.reasoning_tokens(),
+        "cost_usd": round(cost, 6) if cost is not None else None,
+        "cost_known_usd": round(session.cost_known(), 6),
         "duration_seconds": round(time.monotonic() - started, 3),
         "status": status,
         "reason": reason,
@@ -1465,6 +1807,12 @@ def write_metrics(
         "slowest_request": session.slowest_request,
         "slowest_command": session.slowest_command,
     }
+    if session.cli_used:
+        data["cli"] = {
+            "driver": "cli",
+            "runs": session.cli_runs,
+            "usage_available": any(run["usage_available"] for run in session.cli_runs),
+        }
     path = ctx.task_dir / f"impl-{ctx.round}.json"
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
@@ -1474,6 +1822,9 @@ def main(argv=None) -> int:
     try:
         ctx = prepare(parse_args(argv))
         before, untracked_before = snapshot(ctx.worktree)
+        initial_head = git(ctx.worktree, "rev-parse", "HEAD").strip()
+        initial_branch = branch_name(ctx.worktree)
+        initial_tracked = {path for _mode, path in index_paths(ctx.worktree)}
     except Refusal as exc:
         print(f"refused: {one_line(exc)}")
         return 2
@@ -1501,6 +1852,15 @@ def main(argv=None) -> int:
 
     files: list[dict] = []
     try:
+        if session.cli_used:
+            # a CLI may have committed on the task branch; recover that before staging
+            recover_cli_history(
+                ctx.worktree,
+                initial_head,
+                initial_branch,
+                untracked_before,
+                initial_tracked,
+            )
         after = stage_round(ctx.worktree, untracked_before, session.touched)
         files = changed_files(ctx.worktree, before, after)
     except GitError as exc:
@@ -1522,7 +1882,7 @@ def main(argv=None) -> int:
     if status == "ok":
         print(
             f"ok: {len(files)} files changed ({session.active}/{profile['model']}, "
-            f"{session.turns} turns, ${session.cost():.4f})"
+            f"{session.turns} turns, {session.cost_text()})"
         )
         return 0
     print(f"{status}: {one_line(reason)}")

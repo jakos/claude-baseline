@@ -80,8 +80,8 @@ name the file and the key. Keys of `[profiles.<name>]`:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
-| `driver` | `"openai-loop"` or `"anthropic-loop"` (required) | |
-| `base_url` | `http(s)://` URL; `/chat/completions` is appended on `openai-loop`, `/messages` on `anthropic-loop` (required) | |
+| `driver` | `"openai-loop"`, `"anthropic-loop"` or `"cli"` (required) | |
+| `base_url` | `http(s)://` URL; `/chat/completions` is appended on `openai-loop`, `/messages` on `anthropic-loop` (required on the API drivers, refused on `cli`) | |
 | `model` | model id (required) | |
 | `api_key_env` | NAME of the environment variable holding the key, never the key; required unless `billing = "local"` | none |
 | `billing` | `subscription`, `api` or `local` (required) | |
@@ -100,6 +100,26 @@ name the file and the key. Keys of `[profiles.<name>]`:
 | `extra_body` | table merged into the request body, e.g. reasoning effort; reserved keys per driver — `openai-loop`: `model`, `messages`, `tools`, `tool_choice`; `anthropic-loop`: those plus `system`, `max_tokens`, `stream`, `temperature`, `top_p`, `top_k` | none |
 | `post_edit` | list of commands run after each successful `write_file`/`edit_file` call, with every literal `{path}` replaced by the written file; the exit code and output (capped to 40 lines) are appended to that tool call's result | `[]` |
 | `prompt_extras` | list of files read before the round whose contents are appended to the system prompt before the runner adapter; `~` is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) | `[]` |
+
+Keys that only `driver = "cli"` accepts (refused on the API drivers), all validated after
+the user/project merge with file/key provenance in the error; a `cli` profile also refuses
+the API-loop keys `base_url`, `max_turns`, `max_cost_usd`, `max_context`, `retries`,
+`retry_base_seconds`, `request_timeout_seconds`, `command_timeout_seconds`, `temperature`,
+`max_output_tokens`, `max_tokens_param`, `extra_body` and `post_edit` (the CLI owns its
+internal loop; `model` stays required and is metadata only):
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `command` | the CLI program and its arguments, a non-empty list of non-empty strings (required on `cli`); only `{worktree}`, `{prompt_file}` and `{last_message_file}` are expanded, each argument on its own, no shell | |
+| `timeout_seconds` | the whole CLI run's deadline; on timeout the process tree is killed | 600 |
+| `prompt_via` | how the prompt reaches the CLI: `"stdin"`, `"file"` (requires `{prompt_file}` in `command`), or `"arg"` (appended as one final argument; refused for a Windows `.cmd`/`.bat` shim) | `"stdin"` |
+| `usage_format` | `"codex-jsonl"` parses stdout as one JSON event per line and sums `turn.completed` usage; `"none"` uses only the final plain stdout message, leaving usage and cost unknown (null) | `"none"` |
+| `pass_env` | extra environment-variable NAMES whose values are passed to the CLI on top of the runner allowlist | `[]` |
+| `limit_patterns` | regular expressions; a match against the bounded stderr or final output makes this attempt unavailable and tries the next `fallback` | `[]` |
+
+`billing = "api"` on `driver = "cli"` requires `api_key_env` (passed through `pass_env`);
+`billing = "subscription"` or `"local"` refuses one. See
+[Agent CLI driver](external-implementer.md#agent-cli-driver-cli-codex) for Codex examples.
 
 `[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
 `claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for

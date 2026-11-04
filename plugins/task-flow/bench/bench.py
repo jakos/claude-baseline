@@ -1312,6 +1312,13 @@ class Runner:
         profile = self.profiles[name]
         settings: dict = {}
         for key in models.PROFILE_KEYS:
+            # the generated per-run file must validate again: a driver "cli" profile
+            # refuses the API-loop keys and an API profile refuses the cli-only ones
+            if profile["driver"] == "cli":
+                if key in models.CLI_INCOMPATIBLE_KEYS:
+                    continue
+            elif key in models.CLI_ONLY_KEYS:
+                continue
             value = profile[key]
             if key == "max_cost_usd" and remaining is not None:
                 value = min(value, remaining) if value is not None else remaining
@@ -1569,12 +1576,13 @@ class Runner:
                 metrics_path = task / f"impl-{round_n}.json"
                 if metrics_path.exists():
                     metrics = read_json(metrics_path)
+                    metrics_tokens = metrics.get("tokens") or {}
                     for key in tokens:
-                        tokens[key] += metrics.get("tokens", {}).get(key, 0)
+                        tokens[key] += metrics_tokens.get(key, 0)
                     cache = metrics.get("cache_tokens") or {}
                     cache_tokens["read"] += cache.get("read", 0)
                     cache_tokens["write"] += cache.get("write", 0)
-                    cost += metrics.get("cost_usd", 0.0)
+                    cost += metrics.get("cost_usd") or 0.0
                     implement_seconds += metrics.get("duration_seconds", 0.0)
             if done.returncode == 0:
                 settings = self.settings_for(name, self.remaining_budget())

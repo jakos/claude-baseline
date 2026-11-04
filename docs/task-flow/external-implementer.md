@@ -6,8 +6,10 @@ Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `be
 model instead of the Claude `implementer` subagent: an OpenAI-compatible chat model
 (`openai-loop` — the Mistral API, any OpenAI-compatible host, a local llama.cpp server) or
 Anthropic through the native Messages API with prompt caching (`anthropic-loop`); the
-per-provider wire formats live in `scripts/drivers.py`. Only the Mistral API has been
-exercised so far (see [Limits, stated plainly](#limits-stated-plainly));
+per-provider wire formats live in `scripts/drivers.py`. Or an installed agent CLI
+(`cli` — e.g. Codex on a ChatGPT subscription or an invocation-scoped API key), run as one
+process by `scripts/cli_driver.py`. Only the Mistral API has been exercised so far (see
+[Limits, stated plainly](#limits-stated-plainly));
 the configuration and the `impl-<n>.json` format may still change between versions. To
 switch it off again, see [Rolling back](#rolling-back). It follows the same contract as
 `agents/implementer.md` (that file's body is its system prompt, plus the Conventions of
@@ -16,8 +18,9 @@ the plan's profiles).
 Optional and experimental: the implementer role can run on a per-token, non-Claude model
 through `plugins/task-flow/scripts/implement.py` — Mistral or any OpenAI-compatible host,
 or Anthropic through the native Messages API via `scripts/drivers.py` (so far only the
-Mistral API has been exercised) — while Claude still plans, checks and reviews. A
-`models.toml` turns it on.
+Mistral API has been exercised) — or on an agent CLI (`driver = "cli"`, see
+[Agent CLI driver](#agent-cli-driver-cli-codex)) — while Claude still plans, checks and
+reviews. A `models.toml` turns it on.
 
 ## Billing modes
 
@@ -46,14 +49,22 @@ flowchart TD
     lretry["timeout or unreachable server: retries, then fallback"]
     nokey --> lretry
   end
+  subgraph clib["driver = cli"]
+    clilogin["saved login, or api_key_env via pass_env"]
+    clilim["deadline timeout_seconds; cost null (unknown) unless billing = api reports usage"]
+    clilogin --> clilim
+  end
   exit1["exit 1: the round failed; it pauses or reruns"]
   retry --> exit1
   cap --> exit1
   lretry --> exit1
+  clilim --> exit1
 ```
 
 The diagram cannot carry: the bench labels a `subscription` profile `subscription` in
-its cost columns and draws no cost bar for it.
+its cost columns and draws no cost bar for it; a `driver = "cli"` round's cost is null
+(unknown) for a subscription profile and is recorded as `unknown`, not 0, in the
+autopilot's `External USD` column.
 
 ## Two cascades
 
@@ -65,11 +76,14 @@ flowchart TD
   subgraph avail["availability cascade"]
     prof["profile"]
     retries["retries: 408, 429, 5xx, timeouts, connection errors"]
+    climiss["cli: missing executable or a limit_patterns match"]
     fb["fallback profiles, in order; a disabled one is skipped"]
     unavail["all unavailable: exit 1"]
     paused["paused: the same command reruns the round"]
     prof --> retries
+    prof --> climiss
     retries --> fb
+    climiss --> fb
     fb --> unavail
     unavail --> paused
   end
@@ -220,6 +234,7 @@ prompt, tools, conversation and results through either of them:
 | OpenAI | `openai-loop` | `https://api.openai.com/v1` | `OPENAI_API_KEY` | provider-side; cached tokens reported in the usage | untested against the real API |
 | Anthropic | `anthropic-loop` | `https://api.anthropic.com/v1` | e.g. `TASK_FLOW_ANTHROPIC_KEY` | `cache_control` breakpoints on the request; cache-aware cost | untested against the real API |
 | any other OpenAI-compatible host, local llama.cpp | `openai-loop` | the host's base URL | the host's variable | depends on the host | untested |
+| an agent CLI, e.g. Codex | `cli` | none (refused) | saved login, or `api_key_env` + `pass_env` with `billing = "api"` | none: `usage_format = "codex-jsonl"` sums the CLI's own reported usage | codex-cli 0.166.0 `exec` flags verified offline; no authenticated run performed |
 
 Mistral (as in this repository's [`.claude/task-flow.models.toml`](../../.claude/task-flow.models.toml)):
 
@@ -299,6 +314,126 @@ Anthropic also serves an OpenAI-compatible endpoint at the same `base_url`, whic
 through `openai-loop` as a quick test path — but without prompt caching and with empty
 cached-token usage, so `cache_tokens` stays zero and cost is not cache-aware. Use
 `anthropic-loop` for real work.
+
+## Agent CLI driver (`cli`): Codex
+
+With `driver = "cli"` there is no HTTP loop: `scripts/implement.py` builds one prompt —
+the implementer instructions, the plan's profile Conventions, `prompt_extras`, the
+workflow contract, plan, status, `checks-0.md` and (round n > 1) the previous review's
+Fix list — and hands it to ONE agent-CLI process through `scripts/cli_driver.py`, which
+runs the configured `command` in the worktree with a deadline (`timeout_seconds`) and
+decides the round from the exit code, the final message and (with
+`usage_format = "codex-jsonl"`) the summed usage of the CLI's JSONL events. The CLI agent
+gets a CLI adapter instead of the API tool protocol: it has its own tools, and the whole
+round is that one process. `model` is metadata only — the `-m` argument in `command`
+picks the real model, so keep the two consistent.
+
+Only `{worktree}`, `{prompt_file}` and `{last_message_file}` are expanded in `command`
+arguments, each argument on its own, with no shell of any kind. `prompt_via` decides how
+the prompt travels: `"stdin"` (default) writes it to the child's stdin; `"file"` writes a
+UTF-8 temporary file outside the worktree whose path replaces `{prompt_file}` (required
+for that transport); `"arg"` appends the whole prompt as one final argument. On Windows a
+program that resolves to a `.cmd`/`.bat` (the npm `codex` shims) runs through the guarded
+`cmd.exe` line of `scripts/launch.py`, which refuses `& | < > ^ % !` and newlines — so
+with a shim use `"stdin"` or `"file"` (never `"arg"`, which would put the whole prompt on
+that command line); a configured native executable path (e.g. the `codex.exe` inside a
+npm-global install) takes the plain argv path. Which one you use is a per-machine choice;
+do not hard-code an installation path in a committed `models.toml`.
+
+Codex on a ChatGPT subscription — the saved login, no key anywhere:
+
+```toml
+[profiles.codex]
+driver = "cli"
+model = "gpt-5.2-codex"              # metadata only; the -m argument below picks the model
+billing = "subscription"             # saved login (codex login); no api_key_env needed
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-"]
+timeout_seconds = 600                # the whole CLI run's deadline (default 600)
+prompt_via = "stdin"                 # "stdin" (default), "file" (needs {prompt_file}) or "arg"
+usage_format = "codex-jsonl"         # sum turn.completed usage from stdout JSONL; "none" (default) leaves usage unknown
+pass_env = []                        # extra env NAMES passed through (default []); the allowlist applies first
+limit_patterns = []                  # regexes; a match on the bounded stderr/final output tries the next fallback
+
+[roles]
+implementer = "codex"
+```
+
+The same CLI on an invocation-scoped API key instead of the saved login:
+
+```toml
+[profiles.codex-api]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "api"                      # requires api_key_env, passed through pass_env
+api_key_env = "CODEX_API_KEY"
+pass_env = ["CODEX_API_KEY"]         # the key reaches the CLI; no other secret does
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-o", "{last_message_file}", "-"]
+usage_format = "codex-jsonl"
+timeout_seconds = 900
+```
+
+A `cli` profile refuses the API-loop keys (`base_url`, `max_turns`, `max_cost_usd`,
+`max_context`, `retries`, `retry_base_seconds`, `request_timeout_seconds`,
+`command_timeout_seconds`, `temperature`, `max_output_tokens`, `max_tokens_param`,
+`extra_body`, `post_edit`): the CLI owns its internal loop, and `timeout_seconds` is its
+deadline — `max_turns`, per-request retries, `post_edit` hooks and live cost/context caps
+cannot govern it. `billing = "api"` requires `api_key_env`; `billing = "subscription"`
+refuses one.
+
+Setup and a manual smoke test (codex-cli 0.166.0; `--full-auto` no longer exists — use
+the flags below, verified against `codex exec --help`):
+
+1. `codex login` in the environment Claude Code starts from (the saved login lives under
+   `CODEX_HOME`/`~/.codex`, which the runner's allowlist passes through);
+2. in any scratch git repository, one non-interactive run with the prompt on stdin
+   (`-`), the sandbox, a fresh ephemeral session, JSONL events and the final message
+   written to a file:
+
+```
+echo "List the repository's changed files, change nothing, and answer OK" | codex exec --sandbox workspace-write --json --ephemeral -m gpt-5.2-codex -o codex-last-message.txt -
+```
+
+The prompt goes in on stdin and the trailing `-` is the only positional argument; the
+final message lands in `codex-last-message.txt` in the scratch repository (a relative
+path, so the same line works in a POSIX shell and in PowerShell or `cmd`).
+
+No authenticated run was performed for this plugin's own tests; the flags and the
+JSONL/final-message behaviour above are the documented, help-verified interface of
+codex-cli 0.166.0, not a promise about your subscription's capacity — check the
+provider's terms for what your plan includes.
+
+Outcomes: exit 0 is a successful round unless the final message (the last
+`item.completed` agent message, or the `{last_message_file}` when the command names
+one; with `usage_format = "none"` the final plain stdout) starts with `BLOCKED:`, which
+exits 3 and writes the usual `BLOCKED:` Log line. A timeout, a non-zero exit or an
+explicit failure event (`turn.failed`/`error`) exits 1 with no Log mutation. A missing
+executable or a `limit_patterns` match on the bounded stderr/final output makes that
+attempt unavailable and advances the `fallback` chain — exhausted chains end as the usual
+failed round, never silently as Claude. Configuration/preflight refusals stay exit 2.
+While the process runs, `impl-<n>.progress.jsonl` gets one bounded record per parsed
+event, or heartbeat records when `usage_format = "none"`.
+
+Accounting: with `usage_format = "codex-jsonl"`, every `turn.completed` event's usage is
+summed once per event (input, cached input, output, and optional reasoning output counted
+separately — never double-counted), across turns. `impl-<n>.json` keeps every existing
+key and adds a `cli` section with the redacted argv, `prompt_via`, `billing`,
+`usage_available` and per-run `cost_usd`: `cost_usd` is null for a `subscription` profile
+(its cost is not measurable) and for unknown usage, and for a `billing = "api"` CLI it is
+computed from the reported usage and the configured `price_*` keys when available,
+otherwise null. Unknown stays unknown — never zero: `tokens` and `cost_usd` are null, the
+known-cost subtotal is in `cost_known_usd`, and the stdout line renders `$unknown`. The
+autopilot records a null `cost_usd` as `unknown` in the `External USD` column (sticky,
+summed as `at least`), not as a number.
+
+Staging after a CLI round is the same as after an API round, plus one recovery: because a
+CLI owns its tools it may commit, and when it left a descendant commit on the same task
+branch, `implement.py` verifies the ancestry and restores the initial HEAD with
+`git reset --soft` before staging, so the CLI's result stays visible to
+`git diff --cached`; incompatible history movement (another branch, a non-ancestor HEAD)
+fails the round explicitly with the observed head and branch as recovery evidence — no
+hard reset, no clean. Pre-existing untracked files and build artifacts stay excluded;
+the runner cannot attribute edits to pre-existing untracked files, so they stay
+unstaged.
 
 ## Post-edit feedback and prompt extras
 
@@ -414,7 +549,13 @@ successful or not, excluding backoff waits), `retry_wait_seconds` (sum of the ba
 `null`) and `slowest_command` (`turn`, `command`, `seconds`, `timed_out`, or `null`); every
 `fallback_chain` entry also carries `retries`, one `turn`, `reason`, `attempt_seconds`,
 `wait_seconds` object per failed attempt that was followed by another one on the same
-profile (`[]` when none).
+profile (`[]` when none). A `driver = "cli"` round additionally carries a `cli` object —
+`driver`, the per-run list (redacted expanded `command`, `shim`, `prompt_via`,
+`usage_format`, `billing`, `usage_available`, `cost_usd`, `timed_out`, `exit_code`,
+`failure_event`) and `usage_available` — while `tokens`/`cache_tokens`/`reasoning_tokens`
+are null when the CLI reported no recognizable usage, `cost_usd` is null when any used
+profile's cost is unknown (a `subscription` CLI always), and `cost_known_usd` keeps the
+known subtotal next to that null.
 
 While it runs, stderr shows one line per tool call and one for the final message, each
 starting `[implement] turn N (<req> s, <in> in / <out> out, $<cost> total):` — `<req>` the
@@ -424,15 +565,22 @@ prompt/completion tokens (`12.3k` from 1000 on), `<cost>` the running total — 
 logs `waiting for <profile> ... <elapsed> s` while a request is in flight and
 `running <command> ... <elapsed> s` while a `run_command` runs, so a slow round is
 distinguishable from a hung one. `--verbose` additionally logs `turn N text: <content>` for
-each response whose content is a non-empty string.
+each response whose content is a non-empty string. A `driver = "cli"` round instead logs
+one `cli <profile>: exit <n>, <s> s, usage known|unknown` line per process, plus
+`running <profile> ... <elapsed> s` heartbeats on stderr while the CLI runs.
 
 Each counted turn also appends one compact JSON line to
 `<task-dir>/impl-<n>.progress.jsonl` — `turn`, `profile`, `tools`, `request_seconds`,
 `retries`, `command_seconds`, `tokens` (`input`, `cached`, `output`), `cost_usd`,
 `elapsed_seconds` — opened, written, flushed and closed per line, so a killed round still
-leaves its complete turns behind. The file is created empty only after the preconditions
-pass (a refusal writes nothing) and a re-run of the same round starts it afresh. It is
-scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
+leaves its complete turns behind. A `driver = "cli"` round appends one bounded record per
+parsed CLI event (`event`, `elapsed_seconds`, plus `usage` on `turn.completed`), or
+`heartbeat` records while no structured events are available (`usage_format = "none"`),
+each with `profile` and `elapsed_seconds`. The file is created empty only after the
+preconditions pass (a refusal writes nothing) and a re-run of the same round starts it
+afresh. It is scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
+The inlined prompt itself is never persisted in any artifact; known secret values are
+redacted from diagnostics, progress records, final reasons and the recorded command.
 
 ## Limits, stated plainly
 
@@ -450,11 +598,25 @@ scratch: `/task-finish` deletes it, because prune keeps only `impl-*.json`.
 - The network access of commands is not blocked.
 - `post_edit` commands run only after the file tools (`write_file` / `edit_file`), never
   after `run_command`.
-- The code in the worktree, and the task files, are sent to the provider you configured.
+- The code in the worktree, and the task files, are sent to the provider you configured —
+  and to a `driver = "cli"` profile, the whole prompt goes to the CLI process, which may
+  forward it to its own provider.
 - Commands get only an allowlist of the environment: `PATH`, `PATHEXT`, `SYSTEMROOT`,
   `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
-  `LANG`, `LC_*`, `TERM`, `CI`, `VIRTUAL_ENV`, `UV_*` and `PYTHON*`. Tokens, cloud
-  credentials and API keys of any other name never reach them.
+  `LANG`, `LC_*`, `TERM`, `CI`, `VIRTUAL_ENV`, `UV_*`, `PYTHON*` and `CODEX_HOME`. Tokens,
+  cloud credentials and API keys of any other name never reach them; a `cli` profile's
+  `pass_env` adds named variables on top of that allowlist (e.g. `CODEX_API_KEY`), and a
+  passed credential may reach the CLI's child commands.
+- A `driver = "cli"` agent owns its tools and its sandbox: `rules.py` cannot police its
+  commits, pushes, network activity or child processes. The runner controls only its
+  environment (allowlist + `pass_env`), its working directory (the worktree), its
+  deadline (`timeout_seconds`, enforced by killing the process tree) and its result
+  capture; `--sandbox workspace-write` in the example `command` is the CLI's own
+  confinement, chosen by you, not by task-flow. On your own machine, with your own
+  subscription, that is the intended use — check the provider's terms for what your plan
+  includes; task-flow makes no capacity guarantee. The doctor never launches the CLI and
+  sends no `/models` request for a `cli` profile, so a saved login stays unverified until
+  you run the CLI yourself.
 - `implement.py` stages only what the round produced (see above): pre-existing untracked
   files and build artifacts such as `__pycache__/` are never staged. The Claude
   `implementer` subagent still runs `git add -A` (`agents/implementer.md` step 8), so in a

@@ -97,7 +97,9 @@ class ModelsTest(unittest.TestCase):
 
     def test_invalid_values_rejected(self):
         cases = {
-            'driver = "cli"': "driver",
+            # "cli" is a valid driver now, but this profile has no command and
+            # sets API-only keys, so it is rejected for the missing command
+            'driver = "cli"': "command",
             'billing = "free"': "billing",
             'base_url = "ftp://x"': "base_url",
             "price_input_per_mtok = -1": "price_input_per_mtok",
@@ -166,7 +168,21 @@ class ModelsTest(unittest.TestCase):
 
     def test_required_keys(self):
         self.assertRejected(
-            '[profiles.x]\ndriver = "openai-loop"\n', "profiles.x.base_url", "required"
+            '[profiles.x]\ndriver = "openai-loop"\nmodel = "m"\nbilling = "api"\n',
+            "profiles.x.base_url",
+            "required",
+        )
+        self.assertRejected(
+            '[profiles.x]\ndriver = "openai-loop"\nmodel = "m"\nbase_url = "https://x/v1"\n'
+            'billing = "api"\n',
+            "profiles.x.api_key_env",
+            "required",
+        )
+        # a cli profile needs no base_url, only its command
+        self.assertRejected(
+            '[profiles.x]\ndriver = "cli"\nmodel = "m"\nbilling = "subscription"\n',
+            "profiles.x.command",
+            "required",
         )
         self.assertRejected(
             BASE.replace('api_key_env = "MISTRAL_API_KEY"\n', ""), "api_key_env"
@@ -372,7 +388,12 @@ class ModelsTest(unittest.TestCase):
         raw = tomllib.loads(text)
         self.assertEqual(len(raw["profiles"]), 1)
         profile = next(iter(raw["profiles"].values()))
-        self.assertEqual(set(profile), set(models.PROFILE_KEYS))
+        # the example profile is an API one, so it carries every non-CLI key; the
+        # CLI-only keys live in the commented cli example below it and are checked
+        # as text, because setting them on an API profile is an error
+        self.assertEqual(set(profile), set(models.PROFILE_KEYS) - models.CLI_ONLY_KEYS)
+        for key in sorted(models.CLI_ONLY_KEYS):
+            self.assertIn(key, text, f"template: the cli example must name {key}")
         self.assertEqual(set(raw["roles"]), set(models.ROLES))
         self.assertEqual(set(raw["gates"]), set(models.GATES_KEYS))
         self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
@@ -537,6 +558,189 @@ billing = "api"
         self.assertIn("profiles.claude", lines[0])
         self.assertIn("ANTHROPIC_API_KEY", lines[0])
         self.assertIn("subscription", lines[0])
+
+    # ------------------------------------------------------------- cli driver
+
+    CLI_SUBSCRIPTION = """
+[profiles.codex]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "subscription"
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "-"]
+"""
+
+    CLI_API = """
+[profiles.codex-api]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "api"
+api_key_env = "CODEX_API_KEY"
+pass_env = ["CODEX_API_KEY"]
+command = ["codex", "exec", "--json", "-o", "{last_message_file}", "-"]
+prompt_via = "stdin"
+usage_format = "codex-jsonl"
+timeout_seconds = 900
+limit_patterns = ["rate limit reached"]
+"""
+
+    def test_cli_subscription_profile_loads_with_defaults(self):
+        self.project(self.CLI_SUBSCRIPTION)
+        profile = models.load(self.repo)[0]["codex"]
+        self.assertEqual(profile["driver"], "cli")
+        self.assertIsNone(profile["base_url"])
+        self.assertIsNone(profile["api_key_env"])
+        self.assertEqual(profile["timeout_seconds"], 600)
+        self.assertEqual(profile["prompt_via"], "stdin")
+        self.assertEqual(profile["usage_format"], "none")
+        self.assertEqual(profile["pass_env"], [])
+        self.assertEqual(profile["limit_patterns"], [])
+        self.assertEqual(profile["command"][-1], "-")
+        self.assertIn("api_key: none needed", models.show_text(profile))
+
+    def test_cli_api_profile_loads_and_shows_key_state(self):
+        self.project(self.CLI_API)
+        profile = models.load(self.repo)[0]["codex-api"]
+        self.assertEqual(profile["pass_env"], ["CODEX_API_KEY"])
+        self.assertEqual(profile["usage_format"], "codex-jsonl")
+        self.assertEqual(profile["timeout_seconds"], 900)
+        self.assertEqual(profile["limit_patterns"], ["rate limit reached"])
+        self.assertIn("api_key: missing", models.show_text(profile))
+
+    def test_cli_placeholders_worktree_prompt_file_last_message(self):
+        self.project(
+            self.CLI_SUBSCRIPTION.replace(
+                'command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "-"]',
+                'command = ["codex", "exec", "--json", "-o", "{last_message_file}", '
+                '"--cd", "{worktree}", "{prompt_file}"]\nprompt_via = "file"',
+            )
+        )
+        profile = models.load(self.repo)[0]["codex"]
+        self.assertEqual(profile["prompt_via"], "file")
+        self.assertIn("{worktree}", profile["command"][-2])
+
+    def test_cli_rejects_bad_keys_and_values(self):
+        no_command = "\n".join(
+            ln
+            for ln in self.CLI_SUBSCRIPTION.splitlines()
+            if not ln.startswith("command =")
+        )
+        cases = {
+            "command = []": "command",
+            'command = "codex"': "command",
+            'command = [""]': "command",
+            "timeout_seconds = 0": "timeout_seconds",
+            'prompt_via = "env"': "prompt_via",
+            'usage_format = "claude-json"': "usage_format",
+            'pass_env = ["not a name"]': "pass_env",
+            'pass_env = "CODEX_API_KEY"': "pass_env",
+            'limit_patterns = ["("]': "limit_patterns",
+            'limit_patterns = "x"': "limit_patterns",
+        }
+        for line, needle in cases.items():
+            with self.subTest(line=line):
+                base = (
+                    no_command if line.startswith("command") else self.CLI_SUBSCRIPTION
+                )
+                self.assertRejected(base + "\n" + line + "\n", needle)
+
+    def test_cli_rejects_unknown_placeholders(self):
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION.replace('"-"]', '"{prompt}"]'),
+            "command",
+            "unknown placeholder",
+            "{prompt}",
+        )
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION.replace('"-"]', '"{env.HOME}"]'),
+            "placeholder",
+            "{env.HOME}",
+        )
+
+    def test_cli_prompt_via_file_requires_prompt_file_placeholder(self):
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION + 'prompt_via = "file"\n',
+            "prompt_via",
+            "{prompt_file}",
+        )
+        # stdin and arg transport must not name {prompt_file}
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION.replace('"-"]', '"{prompt_file}"]'),
+            "command",
+            "prompt_via",
+        )
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION.replace('"-"]', '"{prompt_file}"]')
+            + 'prompt_via = "arg"\n',
+            "prompt_via",
+        )
+
+    def test_cli_rejects_api_loop_keys_set_explicitly(self):
+        for key, value in {
+            "base_url": '"https://api.openai.com/v1"',
+            "max_turns": "5",
+            "max_cost_usd": "1.0",
+            "max_context": "1000",
+            "retries": "1",
+            "retry_base_seconds": "0",
+            "request_timeout_seconds": "5",
+            "command_timeout_seconds": "5",
+            "temperature": "0.5",
+            "max_output_tokens": "100",
+            "max_tokens_param": '"max_completion_tokens"',
+            "extra_body": "{}",
+            "post_edit": '["true"]',
+        }.items():
+            with self.subTest(key=key):
+                self.assertRejected(
+                    self.CLI_SUBSCRIPTION + f"{key} = {value}\n", key, '"cli"'
+                )
+
+    def test_cli_api_billing_requires_api_key_env(self):
+        self.assertRejected(
+            self.CLI_API.replace('api_key_env = "CODEX_API_KEY"\n', "").replace(
+                'pass_env = ["CODEX_API_KEY"]\n', ""
+            ),
+            "api_key_env",
+            "api",
+        )
+        # a subscription or local cli profile must not name a key variable
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION + 'api_key_env = "CODEX_API_KEY"\n',
+            "api_key_env",
+            "subscription",
+        )
+        self.project(self.CLI_SUBSCRIPTION.replace('"subscription"', '"local"'))
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION.replace('"subscription"', '"local"')
+            + 'api_key_env = "CODEX_API_KEY"\n',
+            "api_key_env",
+        )
+
+    def test_api_profile_rejects_cli_only_keys(self):
+        for key, value in {
+            "command": '["codex"]',
+            "timeout_seconds": "60",
+            "prompt_via": '"file"',
+            "usage_format": '"codex-jsonl"',
+            "pass_env": '["CODEX_API_KEY"]',
+            "limit_patterns": '["x"]',
+        }.items():
+            with self.subTest(key=key):
+                self.assertRejected(BASE + f"{key} = {value}\n", key, '"cli"')
+
+    def test_cli_project_overrides_user_per_key(self):
+        self.user(
+            self.CLI_SUBSCRIPTION.replace(
+                '"--json", "-"]', '"--json", "-o", "{last_message_file}", "-"]'
+            )
+            + 'timeout_seconds = 111\nusage_format = "codex-jsonl"\n'
+        )
+        self.project('[profiles.codex]\ntimeout_seconds = 222\nprompt_via = "stdin"\n')
+        profile = models.load(self.repo)[0]["codex"]
+        self.assertEqual(profile["timeout_seconds"], 222)  # project wins
+        self.assertEqual(profile["usage_format"], "codex-jsonl")  # kept from user
+        self.assertEqual(profile["prompt_via"], "stdin")  # project wins
+        self.assertIn("{last_message_file}", profile["command"][-2])  # kept from user
 
     def test_show_warns_on_anthropic_api_key_env(self):
         self.project(

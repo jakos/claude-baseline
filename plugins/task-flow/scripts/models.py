@@ -18,18 +18,27 @@ not pass silently. With neither file present there are no profiles and no roles.
   command_timeout_seconds     number > 0, per verification command run by
                               scripts/gates.py (default 600)
 
-[profiles.<name>] keys (required: driver, base_url, model, billing; api_key_env is
-required unless billing = "local"):
+[profiles.<name>] keys (required: driver, model, billing; base_url on the API
+drivers, api_key_env unless billing = "local" on the API drivers and unless
+billing = "subscription" on driver "cli"):
 
-  driver                      "openai-loop" | "anthropic-loop"
+  driver                      "openai-loop" | "anthropic-loop" | "cli"
   base_url                    http(s) URL; "/chat/completions" is appended on
                               "openai-loop", "/messages" on "anthropic-loop"
-  model                       model id string
+                              (required on the API drivers; refused on "cli")
+  model                       model id string (required on every driver; on "cli" it
+                              is metadata only — the model is chosen by the CLI's
+                              own -m argument in `command`)
   api_key_env                 NAME of an environment variable holding the key
+                              (required unless billing = "local", and on "cli"
+                              only with billing = "api")
   billing                     "subscription" | "api" | "local"
-  max_turns                   int > 0                       (default 60)
-  max_cost_usd                number >= 0                   (default: no limit)
-  max_context                 int > 0, prompt tokens        (default: no limit)
+  max_turns                   int > 0                       (default 60; refused when
+                              set on "cli": the CLI owns its internal loop)
+  max_cost_usd                number >= 0                   (default: no limit; refused
+                              when set on "cli" — see timeout_seconds)
+  max_context                 int > 0, prompt tokens        (default: no limit; refused
+                              when set on "cli")
   price_input_per_mtok        number >= 0, USD per 1M tokens (default 0)
   price_cached_input_per_mtok number >= 0                   (default 0)
   price_output_per_mtok       number >= 0                   (default 0)
@@ -37,30 +46,59 @@ required unless billing = "local"):
                               (default: price_input_per_mtok)
   fallback                    list of other profile names   (default [])
   enabled                     bool                          (default true)
-  retries                     int >= 0                      (default 3)
-  retry_base_seconds          number >= 0                   (default 2)
-  request_timeout_seconds     number > 0                    (default 300)
-  command_timeout_seconds     number > 0                    (default 600)
+  retries                     int >= 0                      (default 3; refused when
+                              set on "cli": there are no per-request retries)
+  retry_base_seconds          number >= 0                   (default 2; refused on "cli")
+  request_timeout_seconds     number > 0                    (default 300; refused on "cli")
+  command_timeout_seconds     number > 0                    (default 600; refused when
+                              set on "cli": the CLI's deadline is timeout_seconds)
   temperature                 number 0..2                   (default: provider's;
-                              rejected on "anthropic-loop", whose pinned API
-                              version refuses it on every model)
+                              rejected on "anthropic-loop" and on "cli")
   max_output_tokens           int > 0                       (default: provider's;
                               "anthropic-loop" sends it as max_tokens and
-                              defaults to 16000 when unset)
+                              defaults to 16000 when unset; refused on "cli")
   max_tokens_param            "max_tokens" | "max_completion_tokens", the body key
                               max_output_tokens is sent under (default
-                              "max_tokens"; only "max_tokens" on "anthropic-loop")
+                              "max_tokens"; only "max_tokens" on "anthropic-loop";
+                              refused on "cli")
   extra_body                  table merged into the request body; the reserved
                               keys are per driver — "openai-loop": model,
                               messages, tools, tool_choice; "anthropic-loop":
                               those plus system, max_tokens, stream, temperature,
-                              top_p, top_k
+                              top_p, top_k; refused on "cli"
   post_edit                   list of commands run by scripts/implement.py after each
                               successful write_file/edit_file call, with "{path}"
-                              replaced by the written file (default [])
+                              replaced by the written file (default []; refused when
+                              set on "cli": a CLI uses its own tools, so there are no
+                              write_file/edit_file calls to hook)
   prompt_extras               list of files scripts/implement.py reads before the round
-                              and appends to the system prompt before the runner
-                              adapter (default [])
+                              and appends to the prompt (default [])
+
+  "cli" driver keys (only valid on driver "cli"; `command` is required there):
+
+  command                     list of non-empty strings: the program and its
+                              arguments. Only the placeholders {worktree},
+                              {prompt_file} and {last_message_file} are expanded
+                              (each argument is expanded on its own; no shell,
+                              no other interpolation)
+  timeout_seconds             number > 0, the whole CLI run's deadline
+                              (default 600)
+  prompt_via                  "stdin" | "file" | "arg" (default "stdin"): how the
+                              prompt reaches the CLI — on stdin, in a temporary
+                              file whose path replaces {prompt_file} (required
+                              when prompt_via = "file"), or appended as one final
+                              argument (prompt_via = "arg")
+  usage_format                "codex-jsonl" | "none" (default "none"): stdout is
+                              parsed as one JSON event per line and turn.completed
+                              usage is summed ("codex-jsonl"), or only the final
+                              plain stdout message is used ("none")
+  pass_env                    list of environment-variable NAMES whose values are
+                              additionally passed to the CLI (default []); the
+                              runner's allowlist still applies first
+  limit_patterns              list of regular expressions; a match against the
+                              bounded stderr or final output makes this attempt
+                              unavailable and advances the fallback chain
+                              (default [])
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
 "claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (implementer
@@ -91,12 +129,43 @@ import sys
 import tomllib
 from pathlib import Path
 
-DRIVERS = {"openai-loop", "anthropic-loop"}
+DRIVERS = {"openai-loop", "anthropic-loop", "cli"}
 BILLINGS = {"subscription", "api", "local"}
 ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
 GATES_KEYS = {"command_timeout_seconds"}
 GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
+PROMPT_VIAS = {"stdin", "file", "arg"}
+USAGE_FORMATS = {"codex-jsonl", "none"}
+# Placeholders a "cli" profile's command arguments may contain; nothing else is
+# expanded, and there is no shell interpolation of any kind.
+CLI_PLACEHOLDERS = {"worktree", "prompt_file", "last_message_file"}
+# Keys that only make sense on driver "cli" (they are refused on the API drivers).
+CLI_ONLY_KEYS = {
+    "command",
+    "timeout_seconds",
+    "prompt_via",
+    "usage_format",
+    "pass_env",
+    "limit_patterns",
+}
+# Keys of the API wire loop that cannot govern a CLI's own internal loop; setting any
+# of them explicitly on a "cli" profile is an error (their defaults are fine).
+CLI_INCOMPATIBLE_KEYS = {
+    "base_url",
+    "max_turns",
+    "max_cost_usd",
+    "max_context",
+    "retries",
+    "retry_base_seconds",
+    "request_timeout_seconds",
+    "command_timeout_seconds",
+    "temperature",
+    "max_output_tokens",
+    "max_tokens_param",
+    "extra_body",
+    "post_edit",
+}
 # Reserved extra_body keys per driver, checked on the merged profile (the driver and
 # extra_body may come from different files), after the user/project merge.
 RESERVED_BODY_KEYS = {
@@ -213,6 +282,23 @@ def _check_str_list(value):
         raise ValueError("must be a list of non-empty strings")
 
 
+def _check_env_name_list(value):
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("must be a list of environment-variable names")
+    for name in value:
+        _check_env_name(name)
+
+
+def _check_regex_list(value):
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise ValueError("must be a list of non-empty regular-expression strings")
+    for pattern in value:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"invalid regular expression {pattern!r}: {exc}") from exc
+
+
 def _check_extra_body(value):
     if not isinstance(value, dict):
         raise TypeError(f"must be a table, got {value!r}")
@@ -223,7 +309,9 @@ def _check_extra_body(value):
 # key -> (validator, required, default)
 PROFILE_KEYS = {
     "driver": (_check_choice(DRIVERS), True, None),
-    "base_url": (_check_url, True, None),
+    # base_url is required on the API drivers and refused on "cli"; both are checked
+    # after the merge, when the driver is known (it may come from the other file)
+    "base_url": (_check_url, False, None),
     "model": (_check_text, True, None),
     "api_key_env": (_check_env_name, False, None),
     "billing": (_check_choice(BILLINGS), True, None),
@@ -250,6 +338,12 @@ PROFILE_KEYS = {
     "extra_body": (_check_extra_body, False, None),
     "post_edit": (_check_str_list, False, []),
     "prompt_extras": (_check_str_list, False, []),
+    "command": (_check_str_list, False, None),
+    "timeout_seconds": (_check_num(0, strict=True), False, 600),
+    "prompt_via": (_check_choice(PROMPT_VIAS), False, "stdin"),
+    "usage_format": (_check_choice(USAGE_FORMATS), False, "none"),
+    "pass_env": (_check_env_name_list, False, []),
+    "limit_patterns": (_check_regex_list, False, []),
 }
 
 
@@ -312,6 +406,60 @@ def _validate_gates(path: Path, gates) -> dict:
     return gates
 
 
+def _validate_cli_profile(name, table, full, key_where, where) -> None:
+    """The post-merge checks of a driver "cli" profile.
+
+    `table` is the merged raw key set (so "explicitly set" means "set in either
+    file"), `full` the profile with defaults filled in, `key_where(key)` the provenance
+    prefix for a key-specific error and `where` the profile's file list.
+    """
+    if "command" not in table:
+        raise ConfigError(f"{where}: profiles.{name}.command: required key is missing")
+    if not full["command"]:
+        raise ConfigError(
+            f"{key_where('command')}profiles.{name}.command: must not be empty"
+        )
+    for argument in full["command"]:
+        for match in re.finditer(r"\{([^{}]*)\}", argument):
+            placeholder = match.group(1)
+            if placeholder not in CLI_PLACEHOLDERS:
+                raise ConfigError(
+                    f"{key_where('command')}profiles.{name}.command: unknown "
+                    f"placeholder {{{placeholder}}} in {argument!r}; allowed: "
+                    f"{sorted(CLI_PLACEHOLDERS)}"
+                )
+    has_prompt_file = any("{prompt_file}" in arg for arg in full["command"])
+    if full["prompt_via"] == "file" and not has_prompt_file:
+        raise ConfigError(
+            f'{key_where("prompt_via")}profiles.{name}.prompt_via: "file" requires '
+            "{prompt_file} in command"
+        )
+    if full["prompt_via"] in ("stdin", "arg") and has_prompt_file:
+        raise ConfigError(
+            f"{key_where('command')}profiles.{name}.command: must not contain "
+            f"{{prompt_file}} with prompt_via = {full['prompt_via']!r} (that transport "
+            "sends the prompt on stdin, or appends it as one final argument)"
+        )
+    for key in CLI_INCOMPATIBLE_KEYS:
+        if key in table:
+            raise ConfigError(
+                f'{key_where(key)}profiles.{name}.{key}: not allowed on driver "cli" '
+                "(the CLI owns its internal loop; its deadline is timeout_seconds)"
+            )
+    if full["billing"] == "api":
+        if "api_key_env" not in table:
+            raise ConfigError(
+                f'{where}: profiles.{name}.api_key_env: required when driver = "cli" '
+                'and billing = "api"'
+            )
+    elif "api_key_env" in table:
+        raise ConfigError(
+            f"{key_where('api_key_env')}profiles.{name}.api_key_env: only valid on "
+            'driver "cli" with billing = "api" (a subscription or local CLI uses the '
+            "CLI's saved login and needs no key)"
+        )
+
+
 def load(project_root: Path | None = None) -> tuple[dict, dict]:
     """Return (profiles, roles): merged, validated, defaults filled in profiles."""
     sources = [user_file()]
@@ -343,21 +491,42 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
             }
         )
         where = " + ".join(files)
+
+        def key_where(key: str, name=name, where=where) -> str:
+            """The file that set this key, for a key-specific error message."""
+            path = origin.get(("profiles", name, key))
+            return f"{path}: " if path is not None else f"{where}: "
+
         for key, (_, required, _default) in PROFILE_KEYS.items():
             if required and key not in table:
                 raise ConfigError(
                     f"{where}: profiles.{name}.{key}: required key is missing"
                 )
-        if table["billing"] != "local" and "api_key_env" not in table:
-            raise ConfigError(
-                f'{where}: profiles.{name}.api_key_env: required unless billing = "local"'
-            )
         full = {}
         for key, (_, _required, default) in PROFILE_KEYS.items():
             value = table.get(key, _ABSENT)
             if value is _ABSENT:
                 value = list(default) if isinstance(default, list) else default
             full[key] = value
+        if full["driver"] == "cli":
+            _validate_cli_profile(name, table, full, key_where, where)
+        else:
+            if "base_url" not in table:
+                raise ConfigError(
+                    f"{where}: profiles.{name}.base_url: required key is missing on "
+                    f"driver {full['driver']!r}"
+                )
+            for key in CLI_ONLY_KEYS:
+                if key in table:
+                    raise ConfigError(
+                        f"{key_where(key)}profiles.{name}.{key}: only valid on driver "
+                        '"cli"'
+                    )
+            if table["billing"] != "local" and "api_key_env" not in table:
+                raise ConfigError(
+                    f"{where}: profiles.{name}.api_key_env: required unless "
+                    'billing = "local"'
+                )
         if full["driver"] == "anthropic-loop":
             if full["temperature"] is not None:
                 raise ConfigError(
@@ -373,7 +542,7 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
                 )
         if full["extra_body"]:
             reserved = sorted(
-                RESERVED_BODY_KEYS[full["driver"]] & set(full["extra_body"])
+                RESERVED_BODY_KEYS.get(full["driver"], set()) & set(full["extra_body"])
             )
             if reserved:
                 raise ConfigError(
