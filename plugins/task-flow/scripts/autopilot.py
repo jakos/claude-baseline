@@ -89,6 +89,7 @@ It also exposes `verification_commands(plan)`, the shared parser of a plan's fir
 import argparse
 import fnmatch
 import itertools
+import json
 import math
 import os
 import re
@@ -293,28 +294,20 @@ def usd_value(value: str, what: str) -> float | None:
 
 
 def verification_commands(plan: str) -> list[str]:
-    """The stripped command lines of the first fenced block under `## Verification commands`.
+    """Use the producer contract's verification block parser."""
+    import role_contracts
 
-    Blank lines and lines starting with `#` are skipped; the closing fence of the first
-    block ends the list, so later blocks and trailing text are ignored. These are exactly
-    the lines `plan_counts` counts.
-    """
-    tracker = FenceTracker()
-    seen_block = False
-    commands: list[str] = []
-    for line in sections(plan).get("verification commands", []):
-        if tracker.is_fence(line):
-            if tracker.opening is None:
-                break
-            seen_block = True
-            continue
-        if seen_block and line.strip() and not line.lstrip().startswith("#"):
-            commands.append(line.strip())
-    return commands
+    return role_contracts.parse_verification_commands(
+        plan, body=sections(plan).get("verification commands", [])
+    )
 
 
 def plan_counts(plan: str) -> tuple[int, int, int]:
-    parts = sections(plan)
+    import role_contracts
+
+    parts = {
+        key: role_contracts.unfenced(lines) for key, lines in sections(plan).items()
+    }
     steps = sum(1 for line in parts.get("steps", []) if re.match(r"\d+\.\s", line))
     criteria = {
         m.group(1)
@@ -335,6 +328,47 @@ def estimates(
     return check + one_round + FINISH, check + 3 * one_round + FINISH
 
 
+ROUTING_PREVIEW = "routing-preview "
+
+
+def routing_preview(task_id: str, evidence: dict | None) -> dict | None:
+    """The versioned overview identity, independent of preview/pin state."""
+    if evidence is None:
+        return None
+    return {
+        "schema": "routing-preview/1",
+        "task": task_id,
+        **{
+            key: evidence[key]
+            for key in (
+                "plan_digest",
+                "rule_digest",
+                "profile_digest",
+                "selected_profile",
+            )
+        },
+    }
+
+
+def routing_previews(history: list[str]) -> dict[str, dict]:
+    previews = {}
+    for line in history:
+        if ROUTING_PREVIEW not in line:
+            continue
+        try:
+            record = json.loads(line.split(ROUTING_PREVIEW, 1)[1])
+            if record.get("schema") != "routing-preview/1" or not isinstance(
+                record.get("task"), str
+            ):
+                raise ValueError("invalid routing overview schema")
+            previews[record["task"]] = record
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise Refusal(
+                "run.md: malformed routing overview; repeat overview/start gate"
+            ) from exc
+    return previews
+
+
 def load_run(
     run_dir_arg: str,
     for_next: bool,
@@ -348,6 +382,7 @@ def load_run(
         raise Refusal(f"{run_dir_arg} is not inside .work/_autopilot/")
     work = run_dir.parent.parent
     parts = sections(read_text(run_dir / "run.md"))
+    previews = routing_previews(parts.get("history", []))
     fields = header_fields(parts[""])
     for key in ("mode", "budget", "planning-tokens", "continue-past", "bootstrap"):
         if key not in fields:
@@ -422,8 +457,38 @@ def load_run(
             raise Refusal(f"{task_id} has unrecognised phase {phase!r}")
         if for_next and phase in UNAPPROVED:
             raise Refusal(f"{task_id} is not approved (phase {phase})")
-        counts = plan_counts(read_text(plan))
-        one_round, maximum = estimates(*counts, external=external)
+        plan_text = read_text(plan)
+        counts = plan_counts(plan_text)
+        import models
+
+        try:
+            selection = models.resolve_implementer(work.parent, task_dir)
+            routing = selection.get("routing")
+            task_external = (
+                selection["value"] not in models.CLAUDE_VALUES
+                if selection["configured"]
+                else external
+            )
+        except models.ConfigError as exc:
+            raise Refusal(str(exc)) from exc
+        if (
+            for_next
+            and phase not in FINISHED_OK | FAILED
+            and (routing or task_id in previews)
+            and previews.get(task_id) != routing_preview(task_id, routing)
+        ):
+            raise Refusal(
+                f"{task_id}: routing preview changed or missing; repeat overview/start gate before execution"
+            )
+        default_inputs = None
+        if selection["configured"] and not routing:
+            try:
+                default_inputs = models.measure_plan(plan_text)
+            except models.ConfigError:
+                # Legacy fixed-profile plans need not satisfy the new routing contract.
+                default_inputs = dict(zip(("steps", "criteria", "commands"), counts))
+                default_inputs["declared_paths"] = None
+        one_round, maximum = estimates(*counts, external=task_external)
         tasks.append(
             {
                 "id": task_id,
@@ -432,6 +497,9 @@ def load_run(
                 "usd": usd,
                 "phase": phase,
                 "counts": counts,
+                "routing": routing,
+                "default_inputs": default_inputs,
+                "implementer": selection["value"],
                 "one_round": one_round,
                 "max": maximum,
             }
@@ -716,6 +784,20 @@ def estimate(run: dict) -> str:
     total_one = sum(t["one_round"] for t in run["tasks"])
     total_max = sum(t["max"] for t in run["tasks"])
     rows.append(f"| total | | | | | {total_one} | {total_max} |")
+    for task in run["tasks"]:
+        routing = task.get("routing")
+        if routing:
+            rows.append(
+                f"routing {task['id']}: {routing['state']}; band {routing['band'] or 'unclassified/default'}; inputs {json.dumps(routing['inputs'], sort_keys=True)}; profile {task['implementer']}"
+            )
+            rows.append(
+                ROUTING_PREVIEW
+                + json.dumps(routing_preview(task["id"], routing), sort_keys=True)
+            )
+        elif task.get("default_inputs") is not None:
+            rows.append(
+                f"routing {task['id']}: unclassified/default; inputs {json.dumps(task['default_inputs'], sort_keys=True)}; profile {task['implementer']}"
+            )
     total, unknown = spent(run)
     rows.append(f"spent: {'at least ' if unknown else ''}{total} tokens")
     budget = run["budget"]

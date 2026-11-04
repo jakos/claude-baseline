@@ -23,6 +23,7 @@ diagram_block to copy the diagrams onto the front page.
 
 import json
 import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -180,6 +181,7 @@ KEPT = [
     (BENCH_README, "Re-running over time and the suite fingerprint"),
     (BENCH_README, "Durability"),
     (BENCH_README, "Limits, stated plainly"),
+    (BENCH_README, "Promoting routing evidence manually"),
 ]
 # Fenced code blocks (info string "mermaid" excluded), measured on the base and after
 # the split; a later task that adds or removes one updates BLOCKS_AFTER here.
@@ -1176,6 +1178,35 @@ class DocsTest(unittest.TestCase):
             )
             resolved = ((ROOT / PLUGIN_README).parent / target).resolve()
             self.assertTrue(resolved.is_file(), f"plugin README: broken link {target}")
+
+
+class RoutingDocsTest(unittest.TestCase):
+    def test_routing_contract_and_disabled_defaults_documented(self) -> None:
+        text = (ROOT / "docs/task-flow/configuration.md").read_text(encoding="utf-8")
+        for needle in (
+            "declared_paths",
+            "nonnegative integers",
+            "task-dependent",
+            "inclusive",
+            "no enabled bands",
+        ):
+            self.assertIn(needle, text)
+        template = (ROOT / "plugins/task-flow/templates/models.toml").read_text(
+            encoding="utf-8"
+        )
+        parsed = tomllib.loads(template)
+        self.assertIsInstance(parsed["roles"]["implementer"], str)
+        self.assertIn("uncalibrated", template)
+        for rel in ("docs/task-flow/benchmark.md", "plugins/task-flow/bench/README.md"):
+            evidence = (ROOT / rel).read_text(encoding="utf-8")
+            for needle in (
+                "ranking",
+                "minimum is not established",
+                "protocol fingerprints",
+                "hidden-pass",
+                "median and spread",
+            ):
+                self.assertIn(needle, evidence)
 
 
 if __name__ == "__main__":

@@ -128,10 +128,9 @@ internal loop; `model` stays required and is metadata only):
 implementer `scripts/implement.py`), `script` for `checker` only (see
 [Deterministic gates](gates.md#deterministic-gates-scriptsgatespy)). The `implementer` key
 also accepts a table form instead of the scalar — `[roles.implementer]` with
-`default = "<profile>"` as its sole accepted key today; a scalar and a table never mix
-across the user and project files (the file that sets the key last replaces the other
-form entirely), and unknown keys inside the table are errors, so future routing keys
-fail loudly until implemented. `models.py select <role> [--override <profile>]
+`default = "<profile>"` (required), optional `bands` and `thresholds`. Two tables merge
+by leaf across user and project files; scalar/table changes replace the whole value.
+Unknown keys are errors. The default-only table preserves the scalar behavior. `models.py select <role> [--override <profile>]
 [--project <repo-root>]` resolves one role for one invocation and prints `kind`,
 `method` (`claude` | `api` | `cli`), `profile`, `model` and `billing`; the override must
 name an enabled configured profile, never a free-form model or command.
@@ -269,3 +268,47 @@ valid `plan.md` is never silently replanned. In an autopilot run the planner's U
 lands in each task's `External USD` cell (recomputed from the invocation files on
 resume), and `autopilot.py estimate` shows per-stage Claude and external subtotals with
 `--planner-kind`.
+
+## Deterministic implementer routing
+
+The shipped default disables size routing: no enabled bands, numeric thresholds or
+recommended numeric defaults. Keep `[roles] implementer = "<profile>"` for a fixed
+choice, or replace that scalar with `[roles.implementer] default = "<profile>"`.
+Never declare both alternatives in one file. Table targets (including the default)
+must name enabled external profiles, never Claude or script aliases. Scalar Claude
+choices continue to work.
+
+A nonempty `[roles.implementer.bands]` may map only `S`, `M`, `L` to profiles.
+It requires both `[roles.implementer.thresholds.S]` and
+`[roles.implementer.thresholds.M]`, each with exactly `steps`, `criteria`, `commands`
+and `declared_paths`: nonnegative integers, never booleans. Every S bound must be
+less than or equal to M, with at least one strictly smaller. Thresholds without bands,
+unknown keys, incomplete bounds and disabled targets fail with file/key provenance.
+
+All four measurements must fit the inclusive S bounds; otherwise all must fit M;
+otherwise the band is L. An unmapped band uses `default`. Numbered Steps and column-zero
+`AC<n>:` lines exclude fenced examples. Commands use the verification parser and gate
+command validation. Declared paths count unique comma-delimited entries after profile
+colons, with whitespace/backticks trimmed and slashes normalized. A glob is one entry;
+Unicode and spaces are preserved. This measures declarations, never actual changed
+files or difficulty, and does not expand paths against repository contents.
+
+`uv run --script plugins/task-flow/scripts/models.py roles --project .` validates
+configuration and displays the default with task-dependent routing unresolved.
+Add `--task-dir <absolute-task-directory>` to preview one planned task; no approval,
+History write or pin occurs. Task artifacts remain in root `.work/`; the repository
+root supplies project configuration, including for tasks with a worktree. A missing
+or malformed supplied plan is a refusal, never a silent default. Other role JSON fields
+remain compatible.
+
+```mermaid
+flowchart TD
+  config["Scalar or implementer table"] --> rules{"Active bands?"}
+  rules -->|"no"| fixed["Existing fixed selection"]
+  rules -->|"yes"| plan["Read and validate plan declarations"]
+  plan --> bounds["All dimensions fit S, then M, otherwise L"]
+  bounds --> selected["Mapped profile or default; preview before gate"]
+  selected --> approved["Ordinary plan approval"]
+  approved --> pin["History pin for this attempt"]
+  pin --> execute["Rounds reuse starting profile; existing fallback chain"]
+```

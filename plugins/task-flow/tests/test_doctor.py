@@ -978,5 +978,21 @@ class ChangesNothingTest(DoctorTest):
         self.assertEqual(dict(os.environ), before_env)
 
 
+class RoutingDiagnosticsTest(unittest.TestCase):
+    def test_taskless_routing_is_explicitly_unresolved(self) -> None:
+        result = doctor.check_roles(
+            {
+                "implementer": {
+                    "value": "small",
+                    "kind": "profile",
+                    "model": None,
+                    "routing": {"state": "task-dependent"},
+                }
+            }
+        )
+        self.assertIn("task-dependent", result.detail)
+        self.assertIn("showing default", result.detail)
+
+
 if __name__ == "__main__":
     unittest.main()

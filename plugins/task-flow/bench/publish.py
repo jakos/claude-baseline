@@ -363,6 +363,7 @@ def summarize(meta: dict, rows: list) -> dict:
         "task_flow_version": meta.get("task_flow_version")
         or "unknown (not recorded by this run)",
         "sizes": sizes,
+        "routing": bench.routing_summary(rows, meta),
         "tables": tables,
         "all": all_cells,
         "profile_info": profile_info,
@@ -524,6 +525,7 @@ def render_latest(summary: dict, prev: dict | None) -> str:
             )
     else:
         lines.append("none")
+    lines.extend(bench.routing_report(summary["rows"], summary))
     return "\n".join(lines) + "\n"
 
 

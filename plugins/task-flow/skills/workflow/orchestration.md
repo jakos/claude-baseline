@@ -168,11 +168,21 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 2. Round 1 requires `checks-0.md`; if it is missing, run **Phase: baseline** first.
 3. Pick the implementer.
    - (a) Resolve the roles from the repository root with `models.py roles`:
-     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`.
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root> --task-dir <abs .work/<id>>`.
+     Use the returned implementer value and routing evidence, never a taskless default
+     when routing is active. Preview does not approve or pin; implementation preflight
+     publishes the attempt History event. Reuse the pin on later rounds and resumes.
      Exit 2: show its stderr and end the command without changing `status.md` (a
      precondition, like the uncommitted-changes check, not a stop). Read the
      `implementer` entry of the JSON (as in "Choosing each role's model").
-   - (b) Set round n, phase `implementing`.
+   - (b) For active routing with no current attempt pin, while status is still round 0
+     (after ordinary plan approval and baseline), run
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/implement.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round 1 --profile <value> --prepare-routing`.
+     This performs the same preflight and publishes only the selection History event;
+     no model runs and no round advances. Exit 2: show the resumable refusal and leave
+     phase/round unchanged. On success, or when the attempt is already pinned, set
+     round n, phase `implementing`. Never prepare a new pin on a started unpinned attempt;
+     it requires an explicitly authorized restart/retry.
    - (c) Kind `claude` (value `claude` or `claude:*`, also the result with no config):
      run subagent `task-flow:implementer` with the paths, and for n > 1 the path of
      `review-<n-1>.md`, passing the entry's `model` as the subagent call's `model`
@@ -384,6 +394,10 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    verbatim; the mode; and the sentence: estimates are coarse; the main session's own
    tokens are not counted; Claude cannot see your plan's session or weekly limit, check it
    with `/usage`.
+   Copy each `routing-preview <JSON>` line emitted by estimate verbatim into run.md
+   History as `- <timestamp> routing-preview <JSON>`. These versioned digest records
+   describe the shown overview, never approval or an attempt pin. Use task-aware
+   per-task selections; the taskless implementer kind is only a legacy estimate fallback.
 6. **Start gate.** Ask start / edit / cancel. Start: in every task's `status.md` set
    `plan-approved: yes (user, <date>, autopilot <run-id>)` and phase `approved`. Edit: the
    change goes into that task's `task.md` (or `requirements.md` for backlog changes),
@@ -397,7 +411,10 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    precondition, not a stop) and read the implementer's `kind` and the planner's `kind`,
    then run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind>`
-   and obey it exactly; never pick another task or stop on your own judgment. The breaker
+   and obey it exactly; never pick another task or stop on your own judgment.
+   If `next` refuses because a routing preview changed or is missing, repeat overview
+   and the existing start gate (steps 5-6) before dispatch; preserve the existing
+   `--auto` question behavior. Never refresh digest records after the gate silently. The breaker
    counts Claude tokens only, so `--planner-kind` never changes its verdict.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
      `status.md` `base:` to the output of
@@ -722,3 +739,21 @@ live in `.claude/task-flow.release.toml` (override with `--config <path>`).
 5. `--online` adds one authenticated request per profile in use,
    `GET <base_url>/models` — the provider's model list, which costs no tokens — and says
    whether the configured `model` is among the listed ids.
+
+## Routing in the overview and dispatch
+
+For every planned task resolve `models.py roles --project <repo-root> --task-dir <abs .work/<id>>`
+using repository-root artifacts and configuration. Show the returned band
+(or unclassified/default), inputs and selected profile with `autopilot.py estimate`
+before the existing start gate. Distinguish a read-only preview from a pinned attempt.
+Use per-task implementer kinds for mixed-task estimates, including stacked and epic
+tasks. Do not use one run-wide model judgment. A plan/rule change regenerates the
+overview and returns through the existing start gate; a pinned incompatible attempt
+refuses and requires restoration or an explicitly authorized restart/retry.
+
+Keep ordinary approval, phase, round, three-round/no-progress and failure/resume
+handling unchanged. `--auto` skips only existing questions. Pass the task-aware selected
+starting profile to `implement.py`; it validates the pin before model contact and
+publishes selection only after successful preflight. Actual fallback profiles and
+nullable costs remain in round evidence; never reset or double-count External USD
+because selection changed. A preflight refusal does not advance a round.

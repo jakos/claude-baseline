@@ -69,6 +69,239 @@ class ModelsTest(unittest.TestCase):
         for needle in needles:
             self.assertIn(needle, message)
 
+    def routing(self, bands: str = 'S = "mistral"') -> str:
+        return (
+            BASE
+            + '\n[roles.implementer]\ndefault = "mistral"\n'
+            + f"[roles.implementer.bands]\n{bands}\n"
+            + """
+[roles.implementer.thresholds.S]
+steps = 2
+criteria = 2
+commands = 2
+declared_paths = 3
+[roles.implementer.thresholds.M]
+steps = 4
+criteria = 4
+commands = 4
+declared_paths = 5
+"""
+        )
+
+    def test_task_selection_uses_root_configuration_over_worktree(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        task = self.repo / ".work" / "t1"
+        worktree = task / "worktree"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "task-flow.models.toml").write_text(
+            '[roles]\nimplementer = "claude:sonnet"\n', encoding="utf-8"
+        )
+        (task / "status.md").write_text(
+            "- worktree: .work/t1/worktree\n- round: 0\n## History\n## Log\n",
+            encoding="utf-8",
+        )
+        (task / "plan.md").write_text(VALID_PLAN, encoding="utf-8")
+        for config in (
+            BASE + '[roles]\nimplementer = "mistral"\n',
+            BASE + '[roles.implementer]\ndefault = "mistral"\n',
+            self.routing(),
+        ):
+            with self.subTest(config=config):
+                self.project(config)
+                self.assertEqual(
+                    models.resolve_implementer(self.repo, task)["value"], "mistral"
+                )
+                self.assertEqual(
+                    models.resolve_roles(self.repo, task)["implementer"]["value"],
+                    "mistral",
+                )
+                self.assertEqual(
+                    models.resolve_roles(self.repo)["implementer"]["value"], "mistral"
+                )
+
+    def test_routing_strict_schema_and_provenance(self) -> None:
+        good = self.routing()
+        for old, new, key in [
+            ('S = "mistral"', 'X = "mistral"', "bands.X"),
+            ('S = "mistral"', 'S = "claude"', "bands.S"),
+            ("steps = 2", "steps = true", "thresholds.S.steps"),
+            ("steps = 2", "steps = -1", "thresholds.S.steps"),
+            ("steps = 2", "step = 2", "thresholds.S"),
+            ("steps = 2", "steps = 5", "thresholds"),
+            ('default = "mistral"', 'default = "script"', "default"),
+        ]:
+            with self.subTest(key=key):
+                self.assertRejected(good.replace(old, new), key)
+        self.assertRejected(
+            good.replace('billing = "api"', 'billing = "api"\nenabled = false'),
+            "disabled",
+        )
+        self.assertRejected(
+            good.replace('[roles.implementer.bands]\nS = "mistral"\n', ""), "thresholds"
+        )
+        self.assertRejected(
+            good.split("[roles.implementer.thresholds.S]")[0], "thresholds"
+        )
+        self.assertRejected(
+            good.replace("steps = 4", "steps = 2")
+            .replace("criteria = 4", "criteria = 2")
+            .replace("commands = 4", "commands = 2")
+            .replace("declared_paths = 5", "declared_paths = 3"),
+            "thresholds",
+        )
+
+    def test_routing_measurements_and_fences(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        plan = VALID_PLAN.replace(
+            "python: src/x.py, tests/test_x.py",
+            "python: `src\\x.py`, tests/test_x.py, `\u6587 \u4ef6/a.py`, src/*.py",
+        ).replace("docs: docs/x.md", "docs: src/x.py, \u6587 \u4ef6/a.py")
+        for heading, fake in [
+            ("Steps", "99. fake"),
+            ("Acceptance criteria", "AC99: fake"),
+            ("Profiles", "generic: fake"),
+        ]:
+            plan = plan.replace(
+                "## " + heading + "\n", "## " + heading + "\n~~~\n" + fake + "\n~~~\n"
+            )
+        self.assertEqual(
+            models.measure_plan(plan),
+            {"steps": 2, "criteria": 2, "commands": 2, "declared_paths": 4},
+        )
+        (self.repo / "unrelated.py").touch()
+        (self.repo / "src").mkdir()
+        (self.repo / "src/one.py").touch()
+        (self.repo / "src/two.py").touch()
+        self.assertEqual(models.measure_plan(plan)["declared_paths"], 4)
+        for broken in [
+            plan.replace("## Context", "## Missing"),
+            plan.replace("AC2:", "AC9:"),
+            plan + "\n~~~\nunclosed",
+            plan.replace("uvx ruff==0.17.3 check src", "echo x | shell"),
+        ]:
+            with self.assertRaises(models.ConfigError):
+                models.measure_plan(broken)
+
+    def test_routing_inclusive_each_dimension_and_default(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.project(self.routing('S = "mistral"\nM = "mistral"'))
+        task = self.repo / ".work" / "t"
+        task.mkdir(parents=True)
+        (task / "status.md").write_text(
+            "# Status: t\n- round: 0\n## History\n", encoding="utf-8"
+        )
+        (task / "plan.md").write_text(VALID_PLAN, encoding="utf-8")
+        for key in models.DIMENSIONS:
+            for value, band in [(1, "S"), (2, "S"), (3, "M"), (4, "M"), (5, "L")]:
+                inputs = dict.fromkeys(models.DIMENSIONS, 0)
+                inputs[key] = value + (1 if key == "declared_paths" else 0)
+                with (
+                    self.subTest(key=key, value=value),
+                    mock.patch.object(models, "measure_plan", return_value=inputs),
+                ):
+                    selection = models.resolve_implementer(self.repo, task)
+                    self.assertEqual(selection["routing"]["band"], band)
+                    self.assertEqual(selection["value"], "mistral")
+        unresolved = models.resolve_roles(self.repo)["implementer"]["routing"]
+        self.assertEqual(unresolved["state"], "task-dependent")
+        self.assertIsNone(unresolved["band"])
+        before = (task / "status.md").read_bytes()
+        self.assertEqual(
+            models.resolve_roles(self.repo, task)["implementer"]["routing"]["band"], "S"
+        )
+        self.assertEqual((task / "status.md").read_bytes(), before)
+        (task / "plan.md").unlink()
+        with self.assertRaises(models.ConfigError):
+            models.resolve_roles(self.repo, task)
+
+    def test_routing_mixed_dimensions_and_missing_mapping_selects_default(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        config = self.routing('S = "small"') + BASE.replace(
+            "profiles.mistral", "profiles.small"
+        )
+        self.project(config)
+        task = self.repo / ".work/t"
+        task.mkdir(parents=True)
+        (task / "status.md").write_text(
+            "# Status: t\n- round: 0\n## History\n", encoding="utf-8"
+        )
+        (task / "plan.md").write_text(VALID_PLAN, encoding="utf-8")
+        selection = models.resolve_implementer(self.repo, task)
+        self.assertEqual(selection["value"], "small")
+        inputs = {"steps": 1, "criteria": 3, "commands": 2, "declared_paths": 1}
+        with mock.patch.object(models, "measure_plan", return_value=inputs):
+            selection = models.resolve_implementer(self.repo, task)
+        self.assertEqual(selection["routing"]["band"], "M")
+        self.assertEqual(selection["value"], "mistral")
+        # Nested leaf provenance survives a partial project table merge.
+        bad = self.routing().replace("steps = 2", "step = 2")
+        self.user(bad)
+        self.project("[roles.implementer.thresholds.M]\nsteps = 8\n")
+        with self.assertRaises(models.ConfigError) as caught:
+            models.load(self.repo)
+        self.assertIn(str(self.home), str(caught.exception))
+        self.assertIn("thresholds.S.step", str(caught.exception))
+
+    def test_routing_table_merge_and_scalar_replacement(self) -> None:
+        self.user(self.routing())
+        self.project("[roles.implementer.thresholds.S]\nsteps = 1\n")
+        _, roles, rules = models.load(self.repo, with_rules=True)
+        self.assertEqual(roles["implementer"], "mistral")
+        self.assertEqual(rules["thresholds"]["S"]["steps"], 1)
+        self.project('[roles]\nimplementer = "claude"\n')
+        self.assertIsNone(models.load(self.repo, with_rules=True)[2])
+        self.project("[roles.implementer.thresholds.S]\nsteps = true\n")
+        with self.assertRaises(models.ConfigError) as caught:
+            models.load(self.repo)
+        self.assertIn(str(models.project_file(self.repo)), str(caught.exception))
+        self.assertIn("thresholds.S.steps", str(caught.exception))
+
+    def test_attempt_retry_history_requires_archive_and_preserves_old_pin(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.project(self.routing())
+        task = self.repo / ".work/t"
+        task.mkdir(parents=True)
+        status = "# Status: t\n- round: 0\n## History\n"
+        (task / "status.md").write_text(status, encoding="utf-8")
+        (task / "plan.md").write_text(VALID_PLAN, encoding="utf-8")
+        evidence = models.resolve_implementer(self.repo, task)["routing"]
+        initial = models.attempt_record(self.repo, task, evidence)
+        models.publish_attempt(task, initial)
+        models.publish_attempt(task, initial)
+        self.assertEqual(
+            (task / "status.md")
+            .read_text(encoding="utf-8")
+            .count(models.ROUTING_EVENT),
+            1,
+        )
+        with self.assertRaises(models.ConfigError):
+            models.attempt_record(self.repo, task, None)
+        history = (
+            (task / "status.md").read_text(encoding="utf-8")
+            + "- date approved ? round reset to 0 for attempt 1 of epic e (authorized by the user; --auto never authorizes)\n"
+        )
+        (task / "status.md").write_text(history, encoding="utf-8")
+        with self.assertRaises(models.ConfigError):
+            models.attempt_record(self.repo, task, evidence)
+        archive = self.repo / ".work/_epics/e/attempts/t/attempt-1"
+        archive.mkdir(parents=True)
+        (archive / "spend.md").write_text("snapshot", encoding="utf-8")
+        fresh = models.attempt_record(self.repo, task, evidence)
+        self.assertEqual(fresh["attempt"], "e/1")
+        models.publish_attempt(task, fresh)
+        self.assertEqual(
+            (task / "status.md")
+            .read_text(encoding="utf-8")
+            .count(models.ROUTING_EVENT),
+            2,
+        )
+        self.assertEqual(models.attempt_record(self.repo, task, evidence), fresh)
+
     def test_project_overrides_user_per_key(self):
         self.user(
             BASE
@@ -399,6 +632,44 @@ class ModelsTest(unittest.TestCase):
             self.assertEqual(
                 entry, {"kind": "claude", "model": None, "value": "claude"}
             )
+
+    def test_roles_cli_unreadable_status_exits_2(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        task = self.repo / ".work" / "t"
+        task.mkdir(parents=True)
+        (task / "plan.md").write_text(VALID_PLAN, encoding="utf-8")
+        status = task / "status.md"
+        for config in ("", self.routing()):
+            self.project(config)
+            for content in (None, b"\xff"):
+                with self.subTest(routing=bool(config), content=content):
+                    if content is not None:
+                        status.write_bytes(content)
+                    done = self.run_roles("--task-dir", str(task))
+                    self.assertEqual(done.returncode, 2, done.stderr)
+                    self.assertIn(str(status), done.stderr)
+                    self.assertNotIn("Traceback", done.stderr)
+                    self.assertEqual(done.stdout, "")
+                    self.assertEqual(status.exists(), content is not None)
+                    if content is not None:
+                        self.assertEqual(status.read_bytes(), content)
+                        status.unlink()
+
+    def test_attempt_status_read_errors_are_config_errors(self) -> None:
+        task = self.repo / ".work" / "t"
+        for error in (PermissionError("denied"), UnicodeError("invalid text")):
+            for call in (
+                lambda: models.attempt_record(self.repo, task, None),
+                lambda: models.publish_attempt(task, {"state": "pinned"}),
+            ):
+                with (
+                    self.subTest(error=error, call=call),
+                    mock.patch.object(Path, "read_text", side_effect=error),
+                    self.assertRaises(models.ConfigError) as caught,
+                ):
+                    call()
+                self.assertIn(str(task / "status.md"), str(caught.exception))
 
     def test_roles_cli_claude_variants_give_model(self):
         self.project(

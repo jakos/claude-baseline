@@ -109,7 +109,7 @@ prompt_extras = []                     # files whose contents are appended to th
 #   "script"                  only valid for checker: run scripts/gates.py instead of the checker agent
 # The implementer key also accepts a table form instead of the scalar:
 #   [roles.implementer]
-#   default = "codex"         # the sole accepted key today; it resolves to the scalar above
+#   default = "codex"         # required enabled external profile; default-only preserves scalar behavior
 # A scalar and a table never mix: whichever file (user or project) sets the key last
 # replaces the other form entirely, and unknown keys inside the table are errors.
 # Each key below is set to its agent's frontmatter default, so copying this file
@@ -122,3 +122,23 @@ backlog = "claude:opus"       # backlog agent's frontmatter default: opus
 
 [gates]
 command_timeout_seconds = 600           # per verification command run by scripts/gates.py (default 600)
+
+# Opt-in plan routing, disabled in the shipped template. Remove the scalar
+# implementer key before using [roles.implementer] in the same file.
+# Tables merge by leaf across files; a scalar replaces the whole table (and vice versa).
+# All targets must name enabled external profiles; profile-specific caps stay unchanged.
+# Numeric illustration ONLY, uncalibrated: these are not recommended thresholds.
+# [roles.implementer]
+# default = "codex"
+# [roles.implementer.bands]
+# S = "codex"
+# [roles.implementer.thresholds.S]
+# steps = 2
+# criteria = 2
+# commands = 2
+# declared_paths = 3
+# [roles.implementer.thresholds.M]
+# steps = 4
+# criteria = 4
+# commands = 4
+# declared_paths = 5

@@ -138,6 +138,22 @@ def _sections(text: str) -> tuple[dict[str, list[str]], list[str]]:
     return sections, order
 
 
+def unfenced(lines: list[str]) -> list[str]:
+    """Return declaration lines outside fenced examples."""
+    result = []
+    fence: tuple[str, int] | None = None
+    for line in lines:
+        match = FENCE.match(line)
+        if fence:
+            if match and match[1][0] == fence[0] and len(match[1]) >= fence[1]:
+                fence = None
+        elif match:
+            fence = (match[1][0], len(match[1]))
+        else:
+            result.append(line)
+    return result
+
+
 def _command_lines(body: list[str]) -> list[str]:
     """The non-blank, non-`#` lines of the first fenced block of a section body."""
     commands: list[str] = []
@@ -159,9 +175,13 @@ def _command_lines(body: list[str]) -> list[str]:
     return commands
 
 
-def parse_verification_commands(text: str) -> list[str]:
+def parse_verification_commands(
+    text: str, *, body: list[str] | None = None
+) -> list[str]:
     """The plan's first `## Verification commands` fenced block lines (gates format)."""
-    sections, _order = _sections(text)
+    sections, _order = (
+        _sections(text) if body is None else ({"Verification commands": body}, [])
+    )
     return _command_lines(sections.get("Verification commands", []))
 
 
@@ -222,12 +242,15 @@ def _check_sections(
             reasons.append(
                 f"a {heading.group(1)} heading is not allowed: {line[:60]!r}"
             )
+    if fence is not None:
+        reasons.append("the plan contains an unclosed code fence")
     if titles == 0:
         reasons.append("the artifact has no `# Plan:` title")
     return sections, order
 
 
 def _check_steps(body: list[str], blocked: bool, reasons: list[str]) -> None:
+    body = unfenced(body)
     steps = [line for line in body if line.strip()]
     if not steps:
         if not blocked:
@@ -245,6 +268,7 @@ def _check_steps(body: list[str], blocked: bool, reasons: list[str]) -> None:
 
 
 def _check_profiles(body: list[str], reasons: list[str]) -> None:
+    body = unfenced(body)
     names = []
     for line in body:
         if not line.strip():
@@ -267,6 +291,7 @@ def _check_profiles(body: list[str], reasons: list[str]) -> None:
 
 
 def _check_criteria(body: list[str], blocked: bool, reasons: list[str]) -> None:
+    body = unfenced(body)
     labels: list[int] = []
     for line in body:
         if not line.strip():

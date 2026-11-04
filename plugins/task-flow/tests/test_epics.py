@@ -697,6 +697,32 @@ class RetryTest(Fixture):
     def status_bytes(self, task_id="a"):
         return (self.root / ".work" / task_id / "status.md").read_bytes()
 
+    def test_routed_retry_gets_new_pin_with_archived_round_files(self) -> None:
+        import models
+
+        task = self.root / ".work/a"
+        evidence = {
+            "schema": "implementer-routing/1",
+            "band": "S",
+            "selected_profile": "small",
+            "rule_digest": "old",
+        }
+        initial = dict(evidence, state="pinned", attempt="initial")
+        models.publish_attempt(task, initial)
+        self.out("retry", ".", "demo", "a", "--authorized")
+        fresh = models.attempt_record(
+            self.root, task, dict(evidence, rule_digest="new")
+        )
+        self.assertEqual(fresh["attempt"], "demo/1")
+        self.assertEqual(fresh["rule_digest"], "new")
+        models.publish_attempt(task, fresh)
+        self.assertEqual(
+            models.attempt_record(self.root, task, dict(evidence, rule_digest="new")),
+            fresh,
+        )
+        self.assertIn('"attempt": "initial"', self.status_bytes().decode("utf-8"))
+        self.assertIn('"attempt": "demo/1"', self.status_bytes().decode("utf-8"))
+
     def test_retry_needs_authorization_and_changes_nothing(self):
         before = self.epic_bytes()
         status_before = self.status_bytes()

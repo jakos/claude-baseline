@@ -688,6 +688,8 @@ def check_roles(resolved: dict) -> Check:
         entry = resolved[role]
         value = entry["value"]
         suffix = " (profile)" if entry["kind"] == "profile" else ""
+        if entry.get("routing"):
+            suffix += " (task-dependent routing; showing default)"
         parts.append(f"{role} = {value}{suffix}")
     return Check("roles", "PASS", ", ".join(parts))
 

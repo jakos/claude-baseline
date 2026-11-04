@@ -409,5 +409,17 @@ class CliTest(unittest.TestCase):
         )
 
 
+class FencedDeclarationTest(unittest.TestCase):
+    def test_examples_do_not_become_declarations(self) -> None:
+        text = VALID_PLAN.replace(
+            "## Steps\n", "## Steps\n```\n99. Example\n```\n"
+        ).replace(
+            "## Acceptance criteria\n",
+            "## Acceptance criteria\n~~~\nAC99: Example\n~~~\n",
+        )
+        result = role_contracts.validate_plan(text)
+        self.assertTrue(result.ok, result.reasons)
+
+
 if __name__ == "__main__":
     unittest.main()

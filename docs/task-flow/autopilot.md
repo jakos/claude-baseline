@@ -171,3 +171,36 @@ task belongs to at most one non-completed epic.
 - **Delivery is intent only.** `delivery: per-task | epic` records a preference until
   `agent-pr-path` merges; epics never push, open a PR, merge or make an aggregate
   integration commit, and a branched forest reports all of its branches.
+
+## Per-task routing preview
+
+The overview uses the shared `models.py roles --task-dir <absolute-task-directory>`
+resolver for each planned task, including stacked and epic tasks. `autopilot.py estimate`
+shows band (or unclassified/default), `steps`, `criteria`, `commands`, `declared_paths`
+and selected profile before the start gate. A preview does not approve or pin anything;
+a previously selected attempt is marked pinned. Inputs are declarations, not measured
+changed-file counts. Mixed bands can select different profiles in one run.
+
+External selections contribute zero implementer Claude tokens per task. Subscription
+usage and unknown costs stay unknown; External USD continues to sum round and role
+evidence, including actual fallbacks, without resetting or counting resumes twice.
+A changed plan or routing rule must regenerate the overview and return through the
+existing start gate before execution. `--auto` skips only its existing question.
+A pinned attempt rejects incompatible changes rather than rerouting.
+
+```mermaid
+flowchart TD
+  plans["Plan every task, stacked or epic"] --> preview["Resolve each task: inputs, band, profile"]
+  preview --> overview["Overview and per-task estimates"]
+  overview --> gate["Existing start gate; auto skips question"]
+  gate --> execute["Approved attempts pin their selections"]
+  execute --> rounds["Existing task loop and accounting"]
+  overview -->|"plan or rules changed"| preview
+```
+
+Estimate also emits versioned `routing-preview/1` digest records. At the overview the
+orchestrator copies them into run History before the existing start gate. `next`
+compares current plan/rule/profile digests with that saved overview and refuses with
+an instruction to repeat overview/start gate if they changed or are missing. This
+resumable precondition prevents a changed choice from inheriting stale approval;
+it creates no new workflow phase or stop and never pins a preview in task status.

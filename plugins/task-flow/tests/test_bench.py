@@ -335,6 +335,36 @@ class SettingsForTest(BenchFixture):
         )
         return bench.models.load(gen)[0][name]
 
+    def test_fixed_experiment_replaces_user_routing(self) -> None:
+        from unittest import mock
+
+        server = self.server([])
+        self.add_profile("fake", server)
+        profiles, _ = bench.models.load(self.project)
+        stub = type(
+            "Stub",
+            (),
+            {
+                "settings_for": lambda _self, _name, _remaining: (
+                    bench.Runner.settings_for(
+                        type("Profiles", (), {"profiles": profiles})(), "fake", None
+                    )
+                )
+            },
+        )()
+        run = self.root / "fixed"
+        bench.Runner.write_models(stub, run, "fake", None)
+        user = self.root / "user.toml"
+        # Invalid/unavailable routing is irrelevant once the experiment's explicit
+        # scalar replaces it, and cannot change this fixed profile selection.
+        user.write_text(
+            '[roles.implementer]\ndefault = "missing"\n[roles.implementer.bands]\nS = "missing"\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(bench.models, "user_file", return_value=user):
+            self.assertEqual(bench.models.resolve_implementer(run)["value"], "fake")
+            self.assertNotIn("routing", bench.models.resolve_implementer(run))
+
     def test_api_profile_drops_cli_only_keys(self):
         server = self.server([reply(content="done")])
         self.add_profile("fake", server)
@@ -1796,6 +1826,60 @@ class LogTest(BenchFixture):
         log = (self.results_dir / "log.md").read_text(encoding="utf-8")
         self.assertIn("$0.0200", log)
         self.assertNotIn("$0.0049", log)
+
+
+class RoutingEvidenceTest(unittest.TestCase):
+    def test_routing_groups_preserve_protocol_rules_and_unknown_cost(self) -> None:
+        evidence = {
+            "schema": "implementer-routing/1",
+            "band": "S",
+            "selected_profile": "small",
+            "rule_digest": "rules-a",
+        }
+        rows = [
+            {
+                "n": i,
+                "case": "large-case",
+                "size": "L",
+                "profile": "small",
+                "repeat": i,
+                "routing": evidence,
+                "fingerprint": "protocol-a",
+                "review": False,
+                "outcome": "accepted" if i < 3 else "failed",
+                "hidden": "pass" if i < 3 else "fail",
+                "cost_usd": float(i),
+                "cost_known": True,
+            }
+            for i in range(1, 4)
+        ]
+        groups = bench.routing_summary(rows, {})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["band"], "S")
+        self.assertEqual(groups[0]["repeats"], 3)
+        self.assertEqual(groups[0]["accepted"], 2)
+        self.assertEqual(groups[0]["hidden_pass"], 2)
+        self.assertEqual(groups[0]["cost_median"], 2.0)
+        self.assertEqual(groups[0]["cost_spread"], [1.0, 3.0])
+        for change in [
+            {"fingerprint": "protocol-b"},
+            {"review": True},
+            {"routing": dict(evidence, rule_digest="rules-b")},
+        ]:
+            self.assertEqual(
+                len(bench.routing_summary(rows + [dict(rows[0], **change)], {})), 2
+            )
+        unknown = bench.routing_summary(
+            rows + [dict(rows[0], cost_usd=None, cost_known=False)], {}
+        )[0]
+        self.assertIsNone(unknown["cost_median"])
+        legacy = bench.routing_summary([dict(rows[0], routing=None)], {})[0]
+        self.assertIsNone(legacy["band"])
+        self.assertIsNone(legacy["selected_profile"])
+        self.assertIn(
+            "missing routing evidence is unknown",
+            "\n".join(bench.routing_report(rows, {})),
+        )
 
 
 if __name__ == "__main__":

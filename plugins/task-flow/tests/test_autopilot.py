@@ -7,12 +7,14 @@
 Run: uv run --script plugins/task-flow/tests/test_autopilot.py
 """
 
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "autopilot.py"
@@ -39,6 +41,13 @@ class RunFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
+        home = self.root / "home"
+        home.mkdir()
+        environment = mock.patch.dict(
+            os.environ, {"HOME": str(home), "USERPROFILE": str(home)}
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
         self.run_dir = self.root / ".work" / "_autopilot" / "r1"
         self.run_dir.mkdir(parents=True)
 
@@ -1282,6 +1291,86 @@ class BaseTest(RunFixture):
         result = self.call_base("a")
         self.assertEqual((result.returncode, result.stdout), (2, b""))
         self.assertTrue(result.stderr)
+
+
+class RoutingTest(RunFixture):
+    def test_mixed_task_routing_preview(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.run_md([("a", "-", "0", "planned"), ("b", "a", "0", "planned")])
+        config = self.root / ".claude" / "task-flow.models.toml"
+        config.parent.mkdir()
+        config.write_text(
+            '\n[profiles.small]\ndriver = "cli"\nmodel = "small"\nbilling = "subscription"\ncommand = ["fake"]\n[profiles.large]\ndriver = "cli"\nmodel = "large"\nbilling = "subscription"\ncommand = ["fake"]\n[roles.implementer]\ndefault = "large"\n[roles.implementer.bands]\nS = "small"\n[roles.implementer.thresholds.S]\nsteps = 2\ncriteria = 2\ncommands = 2\ndeclared_paths = 3\n[roles.implementer.thresholds.M]\nsteps = 4\ncriteria = 4\ncommands = 4\ndeclared_paths = 5\n',
+            encoding="utf-8",
+        )
+        self.task("a", "planned", VALID_PLAN)
+        self.task(
+            "b",
+            "planned",
+            VALID_PLAN.replace(
+                "2. Add a test (python).",
+                "2. Add a test (python).\n3. More work (python).",
+            ),
+        )
+        run = autopilot.load_run(str(self.run_dir), for_next=False)
+        self.assertEqual([t["implementer"] for t in run["tasks"]], ["small", "large"])
+        self.assertEqual([t["routing"]["band"] for t in run["tasks"]], ["S", "M"])
+        text = autopilot.estimate(run)
+        self.assertIn("routing a: preview; band S", text)
+        self.assertIn("routing b: preview; band M", text)
+        self.assertIn("declared_paths", text)
+        self.assertNotIn(
+            "implementer-routing ",
+            (self.root / ".work/a/status.md").read_text(encoding="utf-8"),
+        )
+
+        # The orchestrator copies estimate's read-only preview records into the
+        # run History at the overview, before the existing approval gate.
+        for task_id in ("a", "b"):
+            path = self.root / ".work" / task_id / "status.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "phase: planned", "phase: approved"
+                ),
+                encoding="utf-8",
+            )
+        with self.assertRaisesRegex(autopilot.Refusal, "overview/start gate"):
+            autopilot.load_run(str(self.run_dir), for_next=True)
+        run_path = self.run_dir / "run.md"
+        events = [
+            line
+            for line in text.splitlines()
+            if line.startswith(autopilot.ROUTING_PREVIEW)
+        ]
+        run_path.write_text(
+            run_path.read_text(encoding="utf-8")
+            + "".join("- " + event + "\n" for event in events),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            autopilot.next_step(autopilot.load_run(str(self.run_dir), for_next=True)),
+            "run a",
+        )
+        plan_path = self.root / ".work/a/plan.md"
+        original = plan_path.read_text(encoding="utf-8")
+        plan_path.write_text(original + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(autopilot.Refusal, "overview/start gate"):
+            autopilot.load_run(str(self.run_dir), for_next=True)
+        plan_path.write_text(original, encoding="utf-8")
+        config.write_text(
+            config.read_text(encoding="utf-8").split("[roles.implementer]", 1)[0]
+            + '[roles]\nimplementer = "large"\n',
+            encoding="utf-8",
+        )
+        fixed = autopilot.load_run(str(self.run_dir), for_next=False)
+        self.assertIn("unclassified/default; inputs", autopilot.estimate(fixed))
+        self.assertTrue(
+            all(
+                t["one_round"] == autopilot.estimates(*t["counts"], external=True)[0]
+                for t in fixed["tasks"]
+            )
+        )
 
 
 if __name__ == "__main__":

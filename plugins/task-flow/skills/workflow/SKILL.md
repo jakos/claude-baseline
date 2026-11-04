@@ -320,3 +320,28 @@ A hook enforces these; do not try to work around a denial — record the problem
 
 - No push, no PR, no deploy, no `git commit`. Changes stay staged until `/task-finish`.
 - Planner, checker and reviewer write only under `.work/`.
+
+## Implementer routing evidence
+
+Optional `roles.implementer` bands select from validated plan declarations: numbered
+Steps, column-zero AC labels, verification commands and unique declared profile paths.
+Fenced examples do not count; globs count once without disk expansion. S and M bounds
+are inclusive in every dimension; L is overflow, unmapped bands use the enabled
+external default. Routing ships disabled, with no recommended numeric thresholds.
+
+`models.py roles --project <repo-root> --task-dir <absolute-task-directory>` previews
+the task without approval or mutation. Taskless roles show task-dependent/default.
+Execution still requires the ordinary approved plan. After preflight `implement.py`
+publishes one `implementer-routing/1` JSON History event for the attempt and copies it
+under `routing` in every impl JSON. It includes inputs, thresholds, band, starting
+profile, plan/rule digests and attempt identity; actual profile/model/fallback remain
+separate. Resume reuses the pin; incompatible drift refuses before model contact.
+Existing authorized epic retry History and archived spend identify a fresh attempt;
+old selection events remain. Never escalate a model on failure or enable routing on
+an already-started unpinned attempt without an explicit restart/retry.
+
+The orchestrator runs `implement.py --prepare-routing` with the ordinary task,
+worktree, round and selected profile arguments while status is still round 0. This
+validates preflight and publishes the pin without model contact before entering
+phase `implementing`. It distinguishes a fresh attempt from an already-started,
+unpinned round 1, which is refused rather than silently changing its model.

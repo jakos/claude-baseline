@@ -375,6 +375,26 @@ class RoundFixture(unittest.TestCase):
         )
         self.assertFalse(list(self.task.glob("impl-*.json")), label)
 
+    def test_root_scalar_implementer_wins_over_worktree_configuration(self) -> None:
+        server = self.server([reply(content="done")])
+        self.configure(
+            self.profile("fake", server) + '\n[roles]\nimplementer = "fake"\n'
+        )
+        directory = self.worktree / ".claude"
+        directory.mkdir()
+        (directory / "task-flow.models.toml").write_text(
+            '[roles]\nimplementer = "claude:sonnet"\n', encoding="utf-8"
+        )
+        self.write_task(
+            "status.md",
+            STATUS.replace("## History", f"- worktree: {self.worktree}\n## History"),
+        )
+        done = self.run_round(profile=None)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(server.requests), 1)
+        metrics = json.loads((self.task / "impl-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(metrics["profile"], "fake")
+
     # ------------------------------------------------------- observability
 
     TURN_LINE = re.compile(
@@ -2370,6 +2390,150 @@ class CliDriverTest(RoundFixture):
         )
         self.assertEqual(self.metrics()["status"], "failed")
         self.assertIn("other-branch", self.metrics()["reason"])
+
+
+class RoutingTest(RoundFixture):
+    def routed(self, server: FakeServer) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.write_task("plan.md", VALID_PLAN)
+        self.write_task(
+            "status.md",
+            STATUS.replace("phase: implementing", "phase: baseline").replace(
+                "round: 1", "round: 0"
+            ),
+        )
+        self.configure(
+            self.profile("fake", server)
+            + '\n[roles.implementer]\ndefault = "fake"\n[roles.implementer.bands]\nS = "fake"\n[roles.implementer.thresholds.S]\nsteps = 2\ncriteria = 2\ncommands = 2\ndeclared_paths = 3\n[roles.implementer.thresholds.M]\nsteps = 4\ncriteria = 4\ncommands = 4\ndeclared_paths = 5\n'
+        )
+
+    def test_preflight_pins_before_entering_first_round_without_model_contact(
+        self,
+    ) -> None:
+        server = self.server([reply(content="done")])
+        self.routed(server)
+        done = self.run_round(extra=("--prepare-routing",))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(server.requests, [])
+        self.assertFalse((self.task / "impl-1.json").exists())
+        text = (self.task / "status.md").read_text(encoding="utf-8")
+        self.write_task(
+            "status.md",
+            text.replace("phase: baseline", "phase: implementing").replace(
+                "round: 0", "round: 1"
+            ),
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(server.requests), 1)
+        self.assertEqual(
+            (self.task / "status.md")
+            .read_text(encoding="utf-8")
+            .count("implementer-routing "),
+            1,
+        )
+
+    def test_routing_pin_resume_rounds_and_drift(self) -> None:
+        server = self.server([reply(content="done")] * 4)
+        self.routed(server)
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        routing = self.metrics()["routing"]
+        self.assertEqual(routing["band"], "S")
+        self.assertEqual(routing["selected_profile"], "fake")
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertEqual(status.count("implementer-routing "), 1)
+        self.assertEqual(self.run_round().returncode, 0)
+        self.write_task("review-1.md", REVIEW1)
+        self.assertEqual(self.run_round(round_no=2).returncode, 0)
+        self.assertEqual(self.metrics(2)["routing"], routing)
+        self.assertEqual(
+            (self.task / "status.md")
+            .read_text(encoding="utf-8")
+            .count("implementer-routing "),
+            1,
+        )
+        self.write_task(
+            "plan.md", (self.task / "plan.md").read_text(encoding="utf-8") + "\n"
+        )
+        before = (self.task / "status.md").read_bytes()
+        done = self.run_round()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("changed", done.stdout)
+        self.assertEqual(len(server.requests), 3)
+        self.assertEqual((self.task / "status.md").read_bytes(), before)
+
+    def test_routing_preflight_mismatch_and_missing_key_do_not_pin(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        before = (self.task / "status.md").read_bytes()
+        for options in [{"profile": "other"}, {"drop": ("FAKE_KEY",)}]:
+            done = self.run_round(**options)
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertEqual((self.task / "status.md").read_bytes(), before)
+        self.assertEqual(server.requests, [])
+
+    def test_routing_fallback_keeps_configured_starting_profile(self) -> None:
+        primary = self.server([503])
+        backup = self.server([reply(content="done")])
+        self.routed(primary)
+        path = self.repo / ".claude/task-flow.models.toml"
+        text = path.read_text(encoding="utf-8").replace(
+            "[roles.implementer]", 'fallback = ["backup"]\n[roles.implementer]', 1
+        )
+        self.configure(text + self.profile("backup", backup))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        self.assertEqual(metrics["profile"], "backup")
+        self.assertEqual(metrics["routing"]["selected_profile"], "fake")
+        self.assertEqual(
+            [entry["profile"] for entry in metrics["fallback_chain"]],
+            ["fake", "backup"],
+        )
+
+    def test_routing_cli_keeps_nullable_usage(self) -> None:
+        self.routed(self.server([]))
+        path = self.repo / ".claude/task-flow.models.toml"
+        rules = (
+            "[roles.implementer]"
+            + path.read_text(encoding="utf-8").split("[roles.implementer]", 1)[1]
+        )
+        cli = (
+            '[profiles.fake]\ndriver = "cli"\nmodel = "cli-model"\nbilling = "subscription"\ncommand = '
+            + toml_value([sys.executable, "-c", "print('done')"])
+            + "\n"
+        )
+        self.configure(cli + rules)
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        self.assertEqual(metrics["routing"]["selected_profile"], "fake")
+        self.assertEqual(metrics["cli"]["driver"], "cli")
+        self.assertIsNone(metrics["tokens"])
+        self.assertIsNone(metrics["cost_usd"])
+
+    def test_unreadable_routing_plan_is_resumable_without_mutation(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        before = (self.task / "status.md").read_bytes()
+        (self.task / "plan.md").write_bytes(b"\xff")
+        done = self.run_round()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("cannot read plan.md", done.stdout)
+        self.assertEqual((self.task / "status.md").read_bytes(), before)
+        self.assertEqual(server.requests, [])
+
+    def test_routing_started_unpinned_refused(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        self.write_task("status.md", STATUS)
+        self.write_task("review-1.md", REVIEW1)
+        done = self.run_round(round_no=2)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("restart/retry", done.stdout)
+        self.assertEqual(server.requests, [])
 
 
 if __name__ == "__main__":

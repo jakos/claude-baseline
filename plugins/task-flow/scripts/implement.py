@@ -574,6 +574,7 @@ class Context:
         self.extras: list
         self.heartbeat: float
         self.verbose: bool
+        self.routing: dict | None = None
         self.progress_path: Path
 
 
@@ -585,6 +586,11 @@ def parse_args(argv):
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--round", required=True, type=int)
     parser.add_argument("--profile")
+    parser.add_argument(
+        "--prepare-routing",
+        action="store_true",
+        help="preflight and pin before entering round 1; do not invoke a model",
+    )
     parser.add_argument(
         "--heartbeat",
         type=float,
@@ -636,7 +642,10 @@ def prepare(args) -> Context:
     for name in names:
         path = ctx.task_dir / name
         if path.is_file():
-            ctx.files[path] = path.read_text(encoding="utf-8")
+            try:
+                ctx.files[path] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise Refusal(f"cannot read {path.name}: {exc}") from exc
     if not approved(ctx.files[ctx.task_dir / "status.md"]):
         raise Refusal("status.md does not say plan-approved: yes")
 
@@ -655,9 +664,21 @@ def prepare(args) -> Context:
 
     try:
         ctx.profiles, roles = models.load(ctx.repo_root)
+        selection = models.resolve_implementer(ctx.repo_root, ctx.task_dir)
+        ctx.routing = models.attempt_record(
+            ctx.repo_root, ctx.task_dir, selection.get("routing")
+        )
+        if ctx.routing and args.profile and args.profile != selection["value"]:
+            raise models.ConfigError(
+                "--profile must match the pinned routing starting profile"
+            )
     except models.ConfigError as exc:
         raise Refusal(f"invalid configuration: {exc}") from exc
-    name = args.profile or roles.get("implementer")
+    name = (
+        args.profile or selection["value"]
+        if ctx.routing
+        else args.profile or roles.get("implementer")
+    )
     if not name:
         raise Refusal("no --profile given and [roles] implementer is not set")
     if name not in ctx.profiles:
@@ -1807,6 +1828,8 @@ def write_metrics(
         "slowest_request": session.slowest_request,
         "slowest_command": session.slowest_command,
     }
+    if ctx.routing is not None:
+        data["routing"] = ctx.routing
     if session.cli_used:
         data["cli"] = {
             "driver": "cli",
@@ -1820,17 +1843,26 @@ def write_metrics(
 
 def main(argv=None) -> int:
     try:
-        ctx = prepare(parse_args(argv))
+        args = parse_args(argv)
+        ctx = prepare(args)
         before, untracked_before = snapshot(ctx.worktree)
         initial_head = git(ctx.worktree, "rev-parse", "HEAD").strip()
         initial_branch = branch_name(ctx.worktree)
         initial_tracked = {path for _mode, path in index_paths(ctx.worktree)}
+        try:
+            models.publish_attempt(ctx.task_dir, ctx.routing)
+        except (OSError, models.ConfigError) as exc:
+            raise Refusal(str(exc)) from exc
     except Refusal as exc:
         print(f"refused: {one_line(exc)}")
         return 2
     except GitError as exc:
         print(f"refused: {one_line(exc)}")
         return 2
+
+    if args.prepare_routing:
+        print(f"ok: routing preflight for {ctx.profile_name}; no model invoked")
+        return 0
 
     start = ctx.profiles[ctx.profile_name]
     watched = {n: ctx.profiles[n] for n in [ctx.profile_name, *start["fallback"]]}

@@ -113,7 +113,7 @@ not built.
 ```mermaid
 flowchart TD
   subgraph avail["availability cascade"]
-    prof["profile"]
+    prof["Starting profile: fixed or plan-routed attempt pin"]
     retries["retries: 408, 429, 5xx, timeouts, connection errors"]
     climiss["cli: missing executable or a limit_patterns match"]
     fb["fallback profiles, in order; a disabled one is skipped"]
@@ -128,7 +128,7 @@ flowchart TD
   end
   subgraph qual["quality cascade"]
     review["review: CHANGES_REQUESTED"]
-    next["next round on the same implementer"]
+    next["next round reuses pinned starting profile"]
     esc["round 3 or no progress: escalate to you"]
     strong["stronger model (planned)"]
     review --> next
@@ -745,3 +745,31 @@ to the whole catalog: `dev-baseline` is held at the same tag. To return to the l
 version, add `jakos/claude-baseline` again without `#<ref>` and update the plugin the
 same way. Do not use `/plugin marketplace remove` for this: removing a marketplace
 uninstalls every plugin installed from it.
+
+## Fixed selection for an attempt
+
+Opt-in deterministic routing uses the approved plan, with the schema and disabled
+threshold default described in [Configuration](configuration.md#deterministic-implementer-routing).
+Before dispatch use `models.py roles --project <repo-root> --task-dir <absolute-task-directory>`;
+taskless diagnostics show only the default and an explicit task-dependent indication.
+
+After approval and successful preflight, `implement.py` publishes one machine-readable
+`implementer-routing/1` History event in root `status.md`. It records the band, inputs,
+thresholds, configured starting profile, approved-plan digest and rule digest. Every
+round's `impl-<n>.json` copies this evidence under `routing`; existing `profile`, `model`
+and `fallback_chain` still describe execution. `--profile` must match the pin. Resume
+and subsequent rounds reuse it. Plan, rules or selected profile settings that drift
+are refused before model contact. Preflight refusal leaves status unchanged.
+
+No max-turns, cost-cap or no-progress failure promotes a model or advances a round.
+Existing API/CLI limits and within-round fallbacks apply. Enabling routing on an
+already-started unpinned attempt requires an explicit restart/retry. An authorized epic
+retry archives prior round evidence and resets round 0; its existing retry History
+and archive identify a new pin, while previous History stays intact. Legacy attempts
+without active routing retain their previous behavior.
+
+The orchestrator runs `implement.py --prepare-routing` with the ordinary task,
+worktree, round and selected profile arguments while status is still round 0. This
+validates preflight and publishes the pin without model contact before entering
+phase `implementing`. It distinguishes a fresh attempt from an already-started,
+unpinned round 1, which is refused rather than silently changing its model.

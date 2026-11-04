@@ -1115,6 +1115,57 @@ def _size_table(rows: list, size: str) -> list[str]:
     return lines
 
 
+def routing_summary(rows: list[dict], meta: dict) -> list[dict]:
+    """Harness evidence only; labels never stand in for measured decisions."""
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        evidence = row.get("routing") or {}
+        key = (
+            row.get("fingerprint", meta.get("fingerprint")),
+            row.get("review", meta.get("review")),
+            evidence.get("schema"),
+            evidence.get("rule_digest"),
+            evidence.get("band"),
+            evidence.get("selected_profile"),
+        )
+        groups.setdefault(key, []).append(row)
+    result = []
+    for key, group in sorted(groups.items(), key=lambda pair: str(pair[0])):
+        costs = [r.get("cost_usd") for r in group]
+        known = all(
+            r.get("cost_known", False) and isinstance(c, (float, int))
+            for r, c in zip(group, costs)
+        )
+        result.append(
+            {
+                "fingerprint": key[0],
+                "review": key[1],
+                "schema": key[2],
+                "rule_digest": key[3],
+                "band": key[4],
+                "selected_profile": key[5],
+                "repeats": len(group),
+                "accepted": sum(r.get("outcome") == "accepted" for r in group),
+                "hidden_pass": sum(r.get("hidden") == "pass" for r in group),
+                "cost_median": median(costs) if known else None,
+                "cost_spread": [min(costs), max(costs)] if known else None,
+            }
+        )
+    return result
+
+
+def routing_report(rows: list[dict], meta: dict) -> list[str]:
+    lines = [
+        "## Computed routing evidence",
+        "",
+        "Case size is declared; missing routing evidence is unknown.",
+        "",
+    ]
+    for group in routing_summary(rows, meta):
+        lines.append("- " + json.dumps(group, sort_keys=True))
+    return lines + [""]
+
+
 def render_report(rows: list, meta: dict) -> str:
     """The deterministic report.md for one run's rows (D10)."""
     rows = sorted(rows, key=lambda r: r["n"])
@@ -1128,6 +1179,7 @@ def render_report(rows: list, meta: dict) -> str:
         f"- cases: {', '.join(meta['cases'])}",
         "",
     ]
+    lines.extend(routing_report(rows, meta))
     sizes = [s for s in SIZES if any(r["size"] == s for r in rows)]
     for size in [*sizes, "All"]:
         lines.append(f"## {size}")
@@ -1340,7 +1392,7 @@ class Runner:
 
     def write_models(self, run_dir: Path, name: str, remaining: float | None) -> dict:
         settings = self.settings_for(name, remaining)
-        lines = [f"[profiles.{name}]"]
+        lines = [f'[roles]\nimplementer = "{name}"\n', f"[profiles.{name}]"]
         for key, value in settings.items():
             lines.append(f"{key} = {toml_value(value)}")
         write_text(
@@ -1563,6 +1615,7 @@ class Runner:
         review_cost = 0.0
         review_tokens = {"input": 0, "cached": 0, "output": 0}
         implement_seconds = 0.0
+        routing = None
         settings = self.settings_for(name, self.remaining_budget())
 
         for round_n in range(1, 4):
@@ -1576,6 +1629,7 @@ class Runner:
                 metrics_path = task / f"impl-{round_n}.json"
                 if metrics_path.exists():
                     metrics = read_json(metrics_path)
+                    routing = metrics.get("routing", routing)
                     metrics_tokens = metrics.get("tokens") or {}
                     for key in tokens:
                         tokens[key] += metrics_tokens.get(key, 0)
@@ -1683,6 +1737,7 @@ class Runner:
             review_tokens=review_tokens,
             implement_seconds=implement_seconds,
             settings=settings,
+            routing=routing,
         )
 
     def out_of_scope(self, code: Path, plan_text: str) -> list[str]:
@@ -1733,10 +1788,13 @@ class Runner:
         implement_seconds=0.0,
         accepted_round=None,
         settings=None,
+        routing: dict | None = None,
     ) -> dict:
         profile = self.profiles[name]
         row = {
             "run_id": self.run_id,
+            "routing": routing,
+            "review": bool(self.args.review),
             "n": n,
             "case": case["id"],
             "size": case["size"],

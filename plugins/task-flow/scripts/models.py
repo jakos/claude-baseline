@@ -113,8 +113,8 @@ billing = "subscription" on driver "cli"):
 "claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (planner and
 implementer only), "script" (checker only: run scripts/gates.py instead of the checker
 agent). The implementer key also accepts a table form, [roles.implementer] with
-`default = "<profile>"` as its sole accepted key; it normalizes to the same scalar
-value. A scalar and a table never merge across the user and project files: whichever
+`default = "<profile>"`, optional bands and complete S/M thresholds. The default
+normalizes to the same scalar value; resolve_implementer applies task-aware rules. A scalar and a table never merge across the user and project files: whichever
 file sets the key last (the project file wins) replaces the other form entirely, and
 unknown keys inside the table are errors, so future routing keys fail loudly until
 they are implemented.
@@ -129,14 +129,17 @@ CLI:
   models.py role <role> [--project <repo-root>]
     Print the resolved value of [roles] <role>, or `claude` when it is unset or no
     config exists. Exit 2 with the reason on stderr for invalid config or an unknown role.
-  models.py roles [--project <repo-root>]
+  models.py roles [--project <repo-root>] [--task-dir <path>]
     Print the resolved [roles] mapping as one JSON object with sorted keys: each of the
     five roles maps to {"value": <configured value, or "claude" when unset>, "kind":
     "claude" | "profile" | "script", "model": <opus|sonnet|haiku suffix of claude:<m>,
-    or null>}. Exit 2 with the reason on stderr for invalid config.
+    or null>}. Active implementer rules add versioned routing evidence; --task-dir
+    resolves the task, otherwise the default is explicitly task-dependent. Previews
+    are read-only. Exit 2 with the reason on stderr for invalid config or plan.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -152,9 +155,9 @@ ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
 # publishes, so a "cli" profile serving it needs a verified read_only_command.
 PROFILE_ROLES = {"planner", "implementer"}
 PRODUCER_ROLES = {"planner"}
-# The sole key the alternative [roles.implementer] table accepts today; later tasks
-# (implementer-model-routing) add strict rule keys here. Unknown keys stay errors.
-ROLE_TABLE_KEYS = {"implementer": {"default"}}
+# Strict keys of the alternative implementer table. Unknown keys remain errors.
+ROLE_TABLE_KEYS = {"implementer": {"default", "bands", "thresholds"}}
+DIMENSIONS = ("steps", "criteria", "commands", "declared_paths")
 GATES_KEYS = {"command_timeout_seconds"}
 GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
@@ -423,18 +426,16 @@ def _validate_profiles(path: Path, profiles) -> dict:
     return profiles
 
 
-def _validate_roles(path: Path, roles) -> dict:
-    """Validate [roles] and normalize the alternative table form to its scalar value.
+def _validate_roles(path: Path, roles: object) -> dict:
+    """Validate role forms before merging; retain implementer table leaves.
 
-    A role value is either a non-empty string or — only for the roles that accept a
-    table (implementer today) — a table whose sole accepted key is `default`. The
-    normalized mapping maps every role to a plain string, so the user/project merge
-    below replaces a scalar with a table (or the reverse) wholesale instead of mixing
-    the two incompatible forms.
+    The scalar/table form replaces the other form across configuration files.
+    Two tables merge by leaf before required defaults, targets and bounds are checked.
+    load returns scalar role values for compatibility and optionally exposes rules.
     """
     if not isinstance(roles, dict):
         raise ConfigError(f"{path}: roles: must be a table")
-    normalized: dict[str, str] = {}
+    normalized: dict[str, str | dict] = {}
     for role, value in roles.items():
         if role not in ROLES:
             raise ConfigError(
@@ -454,17 +455,7 @@ def _validate_roles(path: Path, roles) -> dict:
                     f"(accepted: {sorted(accepted)}; future rule keys are errors "
                     "until they are implemented)"
                 )
-            if "default" not in value:
-                raise ConfigError(
-                    f"{path}: roles.{role}: the table form requires "
-                    f'default = "<profile>"'
-                )
-            default = value["default"]
-            if not isinstance(default, str) or not default:
-                raise ConfigError(
-                    f"{path}: roles.{role}.default: must be a non-empty profile name"
-                )
-            normalized[role] = default
+            normalized[role] = value
             continue
         if not isinstance(value, str) or not value:
             raise ConfigError(f"{path}: roles.{role}: must be a non-empty string")
@@ -554,13 +545,15 @@ def _validate_cli_profile(name, table, full, key_where, where) -> None:
         )
 
 
-def load(project_root: Path | None = None) -> tuple[dict, dict]:
+def load(
+    project_root: Path | None = None, *, with_rules: bool = False
+) -> tuple[dict, dict] | tuple[dict, dict, dict | None]:
     """Return (profiles, roles): merged, validated, defaults filled in profiles."""
     sources = [user_file()]
     if project_root is not None:
         sources.append(project_file(project_root))
     raw_profiles: dict[str, dict] = {}
-    raw_roles: dict[str, str] = {}
+    raw_roles: dict[str, str | dict] = {}
     origin: dict[tuple, Path] = {}
     for path in sources:
         data = _read(path)
@@ -572,7 +565,14 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
             for key in table:
                 origin[("profiles", name, key)] = path
         for role, value in roles.items():
-            raw_roles[role] = value
+            if isinstance(value, dict) and isinstance(raw_roles.get(role), dict):
+                merge_rule(raw_roles[role], value)
+            else:
+                for key in list(origin):
+                    if key[:2] == ("roles", role):
+                        del origin[key]
+                raw_roles[role] = value
+            record_origins(value, ("roles", role), path, origin)
             origin[("roles", role)] = path
 
     resolved: dict[str, dict] = {}
@@ -657,6 +657,12 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
                     f"{path}: profiles.{name}.fallback: unknown profile {target!r}"
                 )
 
+    rules = raw_roles.get("implementer")
+    if isinstance(rules, dict):
+        validate_rules(rules, resolved, origin)
+        raw_roles["implementer"] = rules["default"]
+    else:
+        rules = None
     for role, value in raw_roles.items():
         path = origin[("roles", role)]
         if value in CLAUDE_VALUES:
@@ -675,7 +681,266 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
             )
         if value not in resolved:
             raise ConfigError(f"{path}: roles.{role}: unknown profile {value!r}")
-    return resolved, raw_roles
+    return (resolved, raw_roles, rules) if with_rules else (resolved, raw_roles)
+
+
+def merge_rule(target: dict, source: dict) -> None:
+    """Merge table leaves; scalar/table replacements are handled by the caller."""
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            merge_rule(target[key], value)
+        else:
+            target[key] = value
+
+
+def record_origins(value: object, prefix: tuple, path: Path, origins: dict) -> None:
+    origins[prefix] = path
+    if isinstance(value, dict):
+        for key, child in value.items():
+            record_origins(child, (*prefix, key), path, origins)
+
+
+def validate_rules(rules: dict, profiles: dict, origins: dict) -> None:
+    def fail(key: str, message: str) -> None:
+        parts = ("roles", "implementer", *key.split("."))
+        while parts not in origins:
+            parts = parts[:-1]
+        raise ConfigError(f"{origins[parts]}: roles.implementer.{key}: {message}")
+
+    def target(key: str, value: object) -> None:
+        if not isinstance(value, str) or value not in profiles:
+            fail(key, f"unknown profile {value!r}; required enabled external profile")
+        if not profiles[value]["enabled"]:
+            fail(key, f"profile {value!r} is disabled")
+
+    target("default", rules.get("default"))
+    bands = rules.get("bands", {})
+    if not isinstance(bands, dict):
+        fail("bands", "must be a table")
+    for band, value in bands.items():
+        if band not in {"S", "M", "L"}:
+            fail(f"bands.{band}", "unknown band")
+        target(f"bands.{band}", value)
+    bounds = rules.get("thresholds")
+    if not bands:
+        if bounds is not None:
+            fail("thresholds", "requires nonempty bands")
+        return
+    if isinstance(bounds, dict) and set(bounds) - {"S", "M"}:
+        fail("thresholds." + min(set(bounds) - {"S", "M"}), "unknown bound band")
+    if not isinstance(bounds, dict) or set(bounds) != {"S", "M"}:
+        fail("thresholds", "requires exactly S and M upper-bound tables")
+    for band, table in bounds.items():
+        if isinstance(table, dict) and set(table) - set(DIMENSIONS):
+            fail(
+                f"thresholds.{band}." + min(set(table) - set(DIMENSIONS)),
+                "unknown bound key",
+            )
+        if not isinstance(table, dict) or set(table) != set(DIMENSIONS):
+            fail(f"thresholds.{band}", f"requires exactly {DIMENSIONS}")
+        for key, value in table.items():
+            if not _is_int(value) or value < 0:
+                fail(f"thresholds.{band}.{key}", "must be a nonnegative integer")
+    if (
+        any(bounds["S"][k] > bounds["M"][k] for k in DIMENSIONS)
+        or bounds["S"] == bounds["M"]
+    ):
+        fail(
+            "thresholds",
+            "S must be componentwise <= M and differ in at least one bound",
+        )
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def measure_plan(text: str) -> dict[str, int]:
+    """Count declarations, never files on disk. Refuse invalid approved artifacts."""
+    import role_contracts
+
+    verdict = role_contracts.validate_plan(text)
+    if not verdict.ok or verdict.blocked:
+        raise ConfigError("plan.md: " + "; ".join(verdict.reasons or ["blocked plan"]))
+    parts, _ = role_contracts._sections(text)
+    paths = set()
+    for line in role_contracts.unfenced(parts["Profiles"]):
+        if line.strip():
+            for entry in line.split(":", 1)[1].split(","):
+                entry = entry.strip().strip("`").strip().replace("\\", "/")
+                if not entry:
+                    raise ConfigError("plan.md: Profiles: empty declared path")
+                paths.add(entry)
+    return {
+        "steps": sum(
+            bool(role_contracts.STEP.match(line))
+            for line in role_contracts.unfenced(parts["Steps"])
+        ),
+        "criteria": sum(
+            bool(role_contracts.AC_LINE.match(line))
+            for line in role_contracts.unfenced(parts["Acceptance criteria"])
+        ),
+        "commands": len(verdict.commands),
+        "declared_paths": len(paths),
+    }
+
+
+ROUTING_EVENT = "implementer-routing "
+
+
+def read_status(task_dir: Path) -> str:
+    """Read the attempt status, reporting artifact errors as resumable refusals."""
+    path = task_dir / "status.md"
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def attempt_record(
+    project_root: Path, task_dir: Path, evidence: dict | None
+) -> dict | None:
+    """Read and validate the current attempt pin without publishing it."""
+    text = read_status(task_dir)
+    history = text.split("## History", 1)[-1].split("## Log", 1)[0]
+    if evidence is None and ROUTING_EVENT not in history:
+        return None
+    retry = None
+    archive = None
+    pin = None
+    for line in history.splitlines():
+        match = re.search(r"round reset to 0 for attempt (\d+) of epic ([\w-]+) ", line)
+        if match and "authorized by the user" in line:
+            archive = (
+                project_root
+                / ".work"
+                / "_epics"
+                / match[2]
+                / "attempts"
+                / task_dir.name
+                / f"attempt-{match[1]}"
+            )
+            if not (archive / "spend.md").is_file():
+                raise ConfigError("routing retry has no archived spend evidence")
+            retry = f"{match[2]}/{match[1]}"
+            pin = None
+        if ROUTING_EVENT in line:
+            try:
+                pin = json.loads(line.split(ROUTING_EVENT, 1)[1])
+            except ValueError as exc:
+                raise ConfigError(
+                    "status.md: malformed implementer routing History event"
+                ) from exc
+    if pin is not None:
+        expected = dict(evidence or {}, state="pinned", attempt=retry or "initial")
+        if pin != expected:
+            raise ConfigError(
+                "implementer routing plan/configuration changed; restore the pinned inputs or start an authorized restart/retry"
+            )
+        return pin
+    if evidence is None:
+        return None
+    round_match = re.search(r"^- round: (\d+)$", text, re.MULTILINE)
+    started = (round_match and int(round_match[1]) > 0) or any(
+        task_dir.glob("impl-*.json")
+    )
+    # Epic retries copy old round files before resetting status; those exact archived
+    # files do not mean the new attempt has already started.
+    archived_retry = bool(
+        retry
+        and archive
+        and round_match
+        and round_match[1] in {"0", "1"}
+        and all(
+            (archive / path.name).is_file()
+            and (archive / path.name).read_bytes() == path.read_bytes()
+            for path in task_dir.glob("impl-*.json")
+        )
+    )
+    if started and not archived_retry:
+        raise ConfigError(
+            "routing enabled on a started unpinned attempt; start an authorized restart/retry"
+        )
+    return dict(evidence, state="pinned", attempt=retry or "initial")
+
+
+def publish_attempt(task_dir: Path, evidence: dict | None) -> None:
+    """Publish once in History after all implementation preflight succeeds."""
+    if evidence is None:
+        return
+    path = task_dir / "status.md"
+    text = read_status(task_dir)
+    entry = (
+        "- " + ROUTING_EVENT + json.dumps(evidence, sort_keys=True, ensure_ascii=False)
+    )
+    if entry in text.splitlines():
+        return
+    if "## History" not in text:
+        raise ConfigError("status.md: missing History")
+    before, sep, after = text.partition("## Log")
+    updated = before.rstrip() + "\n" + entry + "\n" + (sep + after if sep else "")
+    temporary = path.with_suffix(".routing.tmp")
+    temporary.write_text(updated, encoding="utf-8", newline="\n")
+    temporary.replace(path)
+
+
+def resolve_implementer(project_root: Path, task_dir: Path | None = None) -> dict:
+    profiles, roles, rules = load(project_root, with_rules=True)
+    result = {
+        "value": roles.get("implementer", "claude"),
+        "configured": "implementer" in roles,
+    }
+    if not rules or not rules.get("bands"):
+        if task_dir is not None:
+            # Removing rules must not dispatch a pinned external attempt to Claude.
+            attempt_record(project_root, task_dir, None)
+        return result
+    evidence = {
+        "schema": "implementer-routing/1",
+        "rule_digest": digest(rules),
+        "selected_profile": rules["default"],
+        "thresholds": rules["thresholds"],
+        "band": None,
+        "inputs": None,
+        "plan_digest": None,
+        "state": "task-dependent",
+    }
+    if task_dir is not None:
+        try:
+            text = (task_dir / "plan.md").read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ConfigError(f"{task_dir}/plan.md: {exc}") from exc
+        inputs = measure_plan(text)
+        band = next(
+            (
+                b
+                for b in ("S", "M")
+                if all(inputs[k] <= rules["thresholds"][b][k] for k in DIMENSIONS)
+            ),
+            "L",
+        )
+        evidence.update(
+            inputs=inputs,
+            band=band,
+            selected_profile=rules["bands"].get(band, rules["default"]),
+            plan_digest=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            state="preview",
+        )
+        chosen = evidence["selected_profile"]
+        evidence["profile_digest"] = digest(
+            {name: profiles[name] for name in [chosen, *profiles[chosen]["fallback"]]}
+        )
+        result["value"] = chosen
+    if task_dir is not None:
+        history = read_status(task_dir)
+        if ROUTING_EVENT in history:
+            pin = attempt_record(project_root, task_dir, evidence)
+            if pin and json.dumps(pin, sort_keys=True, ensure_ascii=False) in history:
+                evidence = pin
+    result["routing"] = evidence
+    return result
 
 
 def verify_read_only_command(command: list[str]) -> str | None:
@@ -824,9 +1089,11 @@ def show(profile_name: str, project_root: Path) -> str:
     return show_text(profiles[profile_name])
 
 
-def resolve_roles(project_root: Path) -> dict:
+def resolve_roles(project_root: Path, task_dir: Path | None = None) -> dict:
     """Resolve every role to {"value", "kind", "model"}; unset roles are bare "claude"."""
     _profiles, roles = load(project_root)
+    selection = resolve_implementer(project_root, task_dir)
+    roles["implementer"] = selection["value"]
     resolved = {}
     for role in sorted(ROLES):
         value = roles.get(role, "claude")
@@ -838,6 +1105,8 @@ def resolve_roles(project_root: Path) -> dict:
         else:
             kind, model = "profile", None
         resolved[role] = {"value": value, "kind": kind, "model": model}
+    if "routing" in selection:
+        resolved["implementer"]["routing"] = selection["routing"]
     return resolved
 
 
@@ -960,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
     roles_parser.add_argument(
         "--project", default=".", help="repository root (default: .)"
     )
+    roles_parser.add_argument("--task-dir", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "role":
@@ -968,7 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
             _profiles, roles = load(Path(args.project).resolve())
             print(roles.get(args.role, "claude"))
         elif args.command == "roles":
-            mapping = resolve_roles(Path(args.project).resolve())
+            mapping = resolve_roles(Path(args.project).resolve(), args.task_dir)
             print(json.dumps(mapping, sort_keys=True))
         elif args.command == "select":
             selection = resolve_role_profile(
