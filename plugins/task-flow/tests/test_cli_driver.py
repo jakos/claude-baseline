@@ -240,6 +240,7 @@ class CliDriverTest(unittest.TestCase):
         tool = self.tmp / "tools" / "mytool.cmd"
         tool.parent.mkdir()
         tool.write_text("@echo off\r\n", encoding="utf-8", newline="")
+        tool.chmod(0o755)  # POSIX `which` only finds executable files
         env = {"PATH": str(self.tmp / "tools")}
         self.assertEqual(
             cli_driver.find_program("mytool.cmd", self.worktree, env), str(tool)

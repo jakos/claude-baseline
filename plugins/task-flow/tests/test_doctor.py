@@ -578,7 +578,17 @@ class StageTableTest(DoctorTest):
         self.write_full_settings()
         self.commit(".claude/settings.json")
         self.project_models(STAGE_TOML)
-        code, out, err = self.run_doctor(["--project", str(self.repo)])
+        # STAGE_TOML's cli profile runs `codex`; a clean CI runner has none, so the
+        # program check must not depend on what is installed on the host.
+        real_which = shutil.which
+
+        def which(name, *args, **kwargs):
+            if name == "codex":
+                return "/usr/bin/codex"
+            return real_which(name, *args, **kwargs)
+
+        with mock.patch("shutil.which", which):
+            code, out, err = self.run_doctor(["--project", str(self.repo)])
         self.assertEqual(code, 0, out + err)
         self.assertIn("## Stages\n| Stage | Method | Model | Billing |", out)
         self.assertIn("| planner | api | mistral-large | api |", out)

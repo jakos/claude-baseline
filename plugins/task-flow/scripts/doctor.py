@@ -1249,7 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
         checks.append(check_roles(resolved))
         stages = stage_rows(resolved, profiles, plugin_root)
         rows, targets = check_implementer_profiles(
-            profiles, roles, env, windows_user_env
+            profiles, roles, env, windows_user_env, which
         )
         checks += rows
         if args.online:
