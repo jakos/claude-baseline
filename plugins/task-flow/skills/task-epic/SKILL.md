@@ -1,7 +1,7 @@
 ---
 name: task-epic
 description: Create a persistent epic (one id for a group of tasks with declared dependencies), mutate its membership while idle, run or resume it through the ordinary autopilot loop, and inspect its status and report; retry of a failed member needs your explicit authorization.
-argument-hint: "<new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] | add <epic-id> --tasks <id>[,<id>...] [--depends-on <row-id>|-] | remove <epic-id> --tasks <id>[,<id>...] | run <epic-id> | status <epic-id> | retry <epic-id> <task-id> --authorized | sync-run <epic-id>> [--full | --semi] [--budget <tokens>] [--auto]"
+argument-hint: "<new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] | add <epic-id> --tasks <id>[,<id>...] [--depends-on <row-id>|-] | remove <epic-id> --tasks <id>[,<id>...] | run <epic-id> | status <epic-id> | retry <epic-id> <task-id> --authorized | sync-run <epic-id>> [--full | --semi] [--budget <tokens>] [--auto] [--planner <profile>]"
 disable-model-invocation: true
 ---
 
@@ -30,7 +30,9 @@ Arguments: `$ARGUMENTS`
   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/epics.py" link . <epic-id> <run-id>`,
   then follow **Autopilot** in orchestration.md unchanged — same role resolution,
   estimates, overview/start gate, task loop and circuit breaker. `--auto` skips only the
-  start question.
+  start question. `--planner <profile>` (with `run`) plans every newly planned member
+  task with that enabled configured profile for this invocation; the run's History
+  records it, and resuming without the flag uses the current configuration.
 - `status <epic-id>`: the deterministic status report (phases, rounds, verdicts, risk,
   tokens/USD, blocker chains, next actions, Mermaid diagram).
 - `retry <epic-id> <task-id> --authorized`: archive the failed member's round evidence

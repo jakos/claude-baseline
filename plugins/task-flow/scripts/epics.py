@@ -107,6 +107,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import role_runtime
+
 EPICS_DIRNAME = "_epics"
 EPIC_FILENAME = "epic.md"
 REPORT_FILENAME = "report.md"
@@ -782,12 +784,31 @@ def epic_spend(
     for row in epic.tasks:
         task_id = row.task_id
         if task_id in rows:
-            per_task[task_id] = rows[task_id]
+            per_task[task_id] = _invocation_row(work_dir(root) / task_id, rows[task_id])
         elif task_id in archived:
             per_task[task_id] = _sum_cells(archived[task_id])
         else:
             per_task[task_id] = ("unknown", None)
     return planning, per_task
+
+
+def _invocation_row(
+    task_dir: Path, cell: tuple[str, str | None]
+) -> tuple[str, str | None]:
+    """A run row's (tokens, USD) cells, with the USD recomputed from invocation ids.
+
+    When the task folder carries invocation files (impl-<n>.json implementer
+    rounds, role-*.json external producer invocations such as the planner), the
+    USD cell is recomputed from those files — planner USD included — so a resume
+    recomputes the same total instead of double counting; the cell is the
+    fallback when no invocation file exists. Unknown (null) cost stays unknown.
+    """
+    if not task_dir.is_dir():
+        return cell
+    if not any(task_dir.glob("impl-*.json")) and not any(task_dir.glob("role-*.json")):
+        return cell
+    total, unknown = role_runtime.invocation_usd(task_dir)["total"]
+    return cell[0], "unknown" if unknown else f"{total:.6f}"
 
 
 # ---------------------------------------------------------------- mutations

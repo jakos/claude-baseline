@@ -207,21 +207,94 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(profiles["mistral"]["fallback"], ["b"])
 
     def test_roles_values_validated(self):
-        self.assertRejected(BASE + '[roles]\nplanner = "mistral"\n', "roles.planner")
+        # planner and implementer may name a profile; backlog and reviewer may not
+        self.assertRejected(BASE + '[roles]\nbacklog = "mistral"\n', "roles.backlog")
+        self.assertRejected(BASE + '[roles]\nreviewer = "mistral"\n', "roles.reviewer")
         self.assertRejected(
             BASE + '[roles]\nimplementer = "missing"\n', "unknown profile"
         )
+        self.assertRejected(BASE + '[roles]\nplanner = "missing"\n', "unknown profile")
         self.assertRejected(BASE + '[roles]\nimplementer = "script"\n', "checker")
         self.assertRejected(
             BASE + '[roles]\nboss = "claude"\n', "roles.boss", "unknown role"
         )
         self.assertRejected(BASE + '[roles]\nchecker = "claude:gpt"\n', "roles.checker")
         self.project(
-            BASE
-            + '[roles]\nimplementer = "mistral"\nchecker = "script"\nbacklog = "claude:opus"\n'
+            BASE + '[roles]\nplanner = "mistral"\nimplementer = "mistral"\n'
+            'checker = "script"\nbacklog = "claude:opus"\n'
         )
         _, roles = models.load(self.repo)
+        self.assertEqual(roles["planner"], "mistral")
         self.assertEqual(roles["implementer"], "mistral")
+        resolved = models.resolve_roles(self.repo)
+        self.assertEqual(resolved["planner"]["kind"], "profile")
+        self.assertEqual(resolved["backlog"]["kind"], "claude")
+        self.assertEqual(resolved["checker"]["kind"], "script")
+
+    def test_implementer_table_form_normalizes_to_scalar(self):
+        self.project(BASE + '[roles.implementer]\ndefault = "mistral"\n')
+        _profiles, roles = models.load(self.repo)
+        self.assertEqual(roles, {"implementer": "mistral"})
+        self.assertEqual(
+            models.resolve_roles(self.repo)["implementer"],
+            {"value": "mistral", "kind": "profile", "model": None},
+        )
+        # the table and the scalar resolve identically
+        scalar = BASE + '[roles]\nimplementer = "mistral"\n'
+        self.project(scalar)
+        self.assertEqual(models.load(self.repo)[1], {"implementer": "mistral"})
+
+    def test_implementer_table_rejects_unknown_and_missing_keys(self):
+        self.assertRejected(
+            BASE + '[roles.implementer]\nrouting = "x"\ndefault = "mistral"\n',
+            "roles.implementer.routing",
+            "unknown key",
+        )
+        self.assertRejected(
+            BASE + '[roles.implementer]\nrouting = "x"\n',
+            "roles.implementer.routing",
+        )
+        self.assertRejected(
+            BASE + "[roles.implementer]\n", "roles.implementer", "default"
+        )
+        self.assertRejected(
+            BASE + "[roles.implementer]\ndefault = 5\n", "roles.implementer.default"
+        )
+        self.assertRejected(
+            BASE + '[roles.implementer]\ndefault = "missing"\n', "unknown profile"
+        )
+        # a table is only valid for implementer
+        self.assertRejected(
+            BASE + '[roles.planner]\ndefault = "mistral"\n',
+            "roles.planner",
+            "table",
+        )
+
+    def test_scalar_table_replacement_across_user_and_project(self):
+        # user scalar + project table -> the project table wins, no mixing
+        self.user(BASE + '[roles]\nimplementer = "mistral"\n')
+        self.project(
+            BASE.replace("mistral", "other").replace("api.mistral.ai", "b.example")
+            + '[roles.implementer]\ndefault = "other"\n'
+        )
+        _p, roles = models.load(self.repo)
+        self.assertEqual(roles, {"implementer": "other"})
+        # user table + project scalar -> the project scalar wins
+        self.user(
+            BASE.replace("mistral", "other").replace("api.mistral.ai", "b.example")
+            + '[roles.implementer]\ndefault = "other"\n'
+        )
+        self.project(BASE + '[roles]\nimplementer = "mistral"\n')
+        _p, roles = models.load(self.repo)
+        self.assertEqual(roles, {"implementer": "mistral"})
+        # both tables: the project default wins wholesale
+        self.user(
+            BASE.replace("mistral", "other").replace("api.mistral.ai", "b.example")
+            + '[roles.implementer]\ndefault = "other"\n'
+        )
+        self.project(BASE + '[roles.implementer]\ndefault = "mistral"\n')
+        _p, roles = models.load(self.repo)
+        self.assertEqual(roles, {"implementer": "mistral"})
 
     def test_invalid_toml_reports_file(self):
         path = self.user("[profiles\nbroken")
@@ -741,6 +814,196 @@ limit_patterns = ["rate limit reached"]
         self.assertEqual(profile["usage_format"], "codex-jsonl")  # kept from user
         self.assertEqual(profile["prompt_via"], "stdin")  # project wins
         self.assertIn("{last_message_file}", profile["command"][-2])  # kept from user
+
+    # ------------------------------------------------------------- read_only_command
+
+    READ_ONLY_LINE = (
+        'read_only_command = ["codex", "exec", "--sandbox", "read-only", "--json", '
+        '"-o", "{last_message_file}", "-"]\n'
+    )
+    READ_ONLY_CODEX = (
+        'command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "-"]\n'
+        + READ_ONLY_LINE
+    )
+
+    def cli_profile(self, extra=""):
+        return (
+            "[profiles.codex]\n"
+            'driver = "cli"\n'
+            'model = "gpt-5.2-codex"\n'
+            'billing = "subscription"\n'
+            'command = ["codex", "exec", "--json", "-"]\n' + extra
+        )
+
+    def test_read_only_command_verified_codex_loads(self):
+        self.project(self.cli_profile(self.READ_ONLY_LINE))
+        profile = models.load(self.repo)[0]["codex"]
+        self.assertEqual(
+            profile["read_only_command"],
+            [
+                "codex",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--json",
+                "-o",
+                "{last_message_file}",
+                "-",
+            ],
+        )
+        self.assertIsNone(models.verify_read_only_command(profile["read_only_command"]))
+        # the long flag forms work too
+        self.assertIsNone(
+            models.verify_read_only_command(
+                [
+                    "codex",
+                    "exec",
+                    "--sandbox=read-only",
+                    "--output-last-message",
+                    "{last_message_file}",
+                    "-",
+                ]
+            )
+        )
+
+    def test_read_only_command_rejects_unsafe_or_unverified_forms(self):
+        base = self.cli_profile()
+        cases = {
+            # no explicit read-only sandbox
+            'read_only_command = ["codex", "exec", "--json", "-o", "{last_message_file}", "-"]': "sandbox",
+            # a workspace-write sandbox
+            'read_only_command = ["codex", "exec", "--sandbox", "workspace-write", '
+            '"-o", "{last_message_file}", "-"]': "not read-only",
+            # full-auto / approval bypass / config override
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", "--full-auto", '
+            '"-o", "{last_message_file}", "-"]': "conflicts",
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", '
+            '"--dangerously-bypass-approvals-and-sandbox", "-o", "{last_message_file}", "-"]': "conflicts",
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", "-c", '
+            '"sandbox = \\"workspace-write\\"", "-o", "{last_message_file}", "-"]': "conflicts",
+            # no host-captured final message
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", "-"]': "last_message_file",
+            # unverified CLI adapter
+            'read_only_command = ["aider", "--sandbox", "read-only", "-o", '
+            '"{last_message_file}", "-"]': "unverified CLI adapter",
+            # not exec
+            'read_only_command = ["codex", "chat", "--sandbox", "read-only", "-o", '
+            '"{last_message_file}", "-"]': "exec",
+            # unknown placeholder and shell metacharacter
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", "-o", '
+            '"{last_message_file}", "{prompt}"]': "unknown placeholder",
+            'read_only_command = ["codex", "exec", "--sandbox", "read-only", "-o", '
+            '"{last_message_file}", "a>b"]': "metacharacter",
+        }
+        for line, needle in cases.items():
+            with self.subTest(line=line):
+                self.assertRejected(base + line + "\n", needle)
+
+    def test_read_only_command_is_cli_only(self):
+        self.assertRejected(
+            BASE + 'read_only_command = ["codex", "exec", "--sandbox", "read-only", '
+            '"-o", "{last_message_file}", "-"]\n',
+            "read_only_command",
+            '"cli"',
+        )
+
+    # ------------------------------------------------------------- resolve_role_profile
+
+    def test_resolve_role_profile_claude_and_script(self):
+        self.project(BASE + '[roles]\nchecker = "script"\n')
+        claude = models.resolve_role_profile(self.repo, "planner")
+        self.assertEqual(claude["kind"], "claude")
+        self.assertEqual(claude["method"], "claude")
+        self.assertEqual(claude["billing"], "subscription (Claude Code)")
+        script = models.resolve_role_profile(self.repo, "checker")
+        self.assertEqual(script["kind"], "script")
+        self.assertEqual(script["method"], "script")
+        with self.assertRaises(models.ConfigError):
+            models.resolve_role_profile(self.repo, "nope")
+
+    def test_resolve_role_profile_override_rules(self):
+        self.project(BASE)
+        # an override must name an enabled configured profile
+        picked = models.resolve_role_profile(self.repo, "planner", override="mistral")
+        self.assertEqual(picked["kind"], "profile")
+        self.assertEqual(picked["profile"], "mistral")
+        self.assertEqual(picked["method"], "api")
+        self.assertEqual(picked["billing"], "api")
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner", override="nope")
+        self.assertIn("unknown profile", str(ctx.exception))
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner", override="claude:opus")
+        self.assertIn("not a profile name", str(ctx.exception))
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner", override="script")
+        self.assertIn("not a profile name", str(ctx.exception))
+        # a free-form model or command is never accepted as an override
+        with self.assertRaises(models.ConfigError):
+            models.resolve_role_profile(self.repo, "planner", override="gpt-9")
+        # reviewer may not name a profile, configured or overridden
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "reviewer", override="mistral")
+        self.assertIn("may name a profile", str(ctx.exception))
+        # a disabled profile is refused
+        self.project(BASE + "enabled = false\n")
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner", override="mistral")
+        self.assertIn("disabled", str(ctx.exception))
+
+    def test_resolve_role_profile_producer_needs_read_only_command(self):
+        cli = self.cli_profile()
+        codex2 = (
+            "[profiles.codex2]\n"
+            'driver = "cli"\nmodel = "m"\nbilling = "subscription"\n'
+            'command = ["codex", "exec", "-"]\n'
+        )
+        self.project(cli + '[roles]\nplanner = "codex"\n')
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner")
+        self.assertIn("read_only_command", str(ctx.exception))
+        # a fallback in the chain needs one too
+        self.project(
+            cli
+            + self.READ_ONLY_LINE
+            + 'fallback = ["codex2"]\n'
+            + codex2
+            + '[roles]\nplanner = "codex"\n'
+        )
+        with self.assertRaises(models.ConfigError) as ctx:
+            models.resolve_role_profile(self.repo, "planner")
+        self.assertIn("codex2", str(ctx.exception))
+        self.assertIn("read_only_command", str(ctx.exception))
+        # with both set, the cli producer role resolves
+        self.project(
+            cli
+            + self.READ_ONLY_LINE
+            + 'fallback = ["codex2"]\n'
+            + codex2
+            + self.READ_ONLY_LINE
+            + '[roles]\nplanner = "codex"\n'
+        )
+        picked = models.resolve_role_profile(self.repo, "planner")
+        self.assertEqual(picked["method"], "cli")
+        self.assertEqual(picked["fallback"], ["codex2"])
+        # the implementer may use the same profile without read_only_command
+        self.project(cli + '[roles]\nimplementer = "codex"\n')
+        picked = models.resolve_role_profile(self.repo, "implementer")
+        self.assertEqual(picked["kind"], "profile")
+        self.assertEqual(picked["method"], "cli")
+
+    def test_select_cli_subcommand(self):
+        self.project(BASE + '[roles]\nplanner = "mistral"\n')
+        done = self.run_cli("select", "planner", "--project", str(self.repo))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        payload = json.loads(done.stdout)
+        self.assertEqual(payload["kind"], "profile")
+        self.assertEqual(payload["profile"], "mistral")
+        done = self.run_cli(
+            "select", "planner", "--override", "nope", "--project", str(self.repo)
+        )
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown profile", done.stderr)
 
     def test_show_warns_on_anthropic_api_key_env(self):
         self.project(

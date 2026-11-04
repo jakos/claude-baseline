@@ -107,6 +107,25 @@ class PruneTaskTest(unittest.TestCase):
         self.assertIn("impl-3.json", lines[-1])
         self.assertNotIn("removed: impl-1.json", lines)
 
+    def test_keeps_role_json_metrics(self):
+        self.populate()
+        self.scratch()
+        (self.task / "role-planner-2026-01-01T00-00-00Z-ab12cd34.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        (self.task / "role-planner-old.progress.jsonl").write_text(
+            '{"turn": 1}\n', encoding="utf-8"
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (self.task / "role-planner-2026-01-01T00-00-00Z-ab12cd34.json").is_file()
+        )
+        self.assertFalse((self.task / "role-planner-old.progress.jsonl").exists())
+        lines = result.stdout.decode("utf-8").splitlines()
+        self.assertIn("role-planner-2026-01-01T00-00-00Z-ab12cd34.json", lines[-1])
+        self.assertIn("removed: role-planner-old.progress.jsonl", lines)
+
     def test_removes_progress_jsonl(self):
         self.populate()
         (self.task / "impl-1.json").write_text("{}", encoding="utf-8")

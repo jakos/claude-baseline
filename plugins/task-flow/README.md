@@ -57,3 +57,5 @@ usage_format = "codex-jsonl"
 [roles]
 implementer = "codex"
 ```
+
+The planner stage can run on an external profile the same way — `[roles] planner = "codex"` or a one-run `--planner codex` — see [External planner](../../docs/task-flow/external-implementer.md).

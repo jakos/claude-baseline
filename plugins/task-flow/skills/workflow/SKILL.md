@@ -28,6 +28,10 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
                    unknown, never zero
   impl-<n>.progress.jsonl  per-turn trail of an external round (per parsed CLI event or
                    heartbeat record for driver "cli"); scratch, deleted at /task-finish
+  role-<role>-<invocation-id>.json  metrics of one external producer-role invocation
+                   (the planner today), written by scripts/role_run.py next to the
+                   artifact; kept at /task-finish like impl-*.json, with `cost_usd`/
+                   `tokens` null when unknown — unknown, never zero
   summary.md       final summary, when done or escalated
   worktree/        the task's git worktree, when worktrees are used
 ```
@@ -45,9 +49,14 @@ like the other `.work/` artifacts.
 
 When an external profile implements (`[roles] implementer` in models.toml), the script
 `scripts/implement.py`, not an agent, writes the `round <n> implementer:` and `BLOCKED:`
-Log lines in `status.md`.
+Log lines in `status.md`. When an external profile plans (`[roles] planner`, or a
+`--planner <profile>` override of one invocation), the script `scripts/role_run.py`
+runs the same agent body through a read-only transport adapter, validates the returned
+artifact against the plan.md contract below (`scripts/role_contracts.py`), and publishes
+only the validated `plan.md` — the orchestrator alone updates `status.md` afterwards.
 
-After `/task-finish` only the `.md` files, the `impl-*.json` files and `worktree/` (if
+After `/task-finish` only the `.md` files, the `impl-*.json` files, the `role-*.json`
+files and `worktree/` (if
 kept) remain; any other file or directory in the folder is scratch and is deleted.
 
 Source changes happen **in the worktree** when `status.md` names one, otherwise in the

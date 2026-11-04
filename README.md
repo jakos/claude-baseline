@@ -132,7 +132,7 @@ flowchart TD
 
 - A [planner and an independent reviewer](docs/task-flow/overview.md) that see only files, never the implementer's reasoning.
 - [Your approval gate](docs/task-flow/commands.md) before anything is built — `--auto` skips it.
-- An optional, experimental [external implementer](docs/task-flow/external-implementer.md) on a cheaper per-token model or an agent CLI (Codex) on your subscription, via `models.toml`.
+- An optional, experimental [external role](docs/task-flow/external-implementer.md) — the implementer, and the planner via `--planner <profile>` — on a cheaper per-token model or an agent CLI (Codex) on your subscription, via `models.toml`.
 - [Autopilot](docs/task-flow/autopilot.md) for a whole list of tasks: `/task-flow:task-autopilot`.
 - A [benchmark](docs/task-flow/benchmark.md) that compares implementers on frozen cases.
 

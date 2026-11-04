@@ -480,6 +480,122 @@ class ModelsTest(DoctorTest):
         self.assertEqual((profiles, roles), ({}, {}))
 
 
+# --- the stage table (method, model, billing of all five stages) --------------------------------
+
+STAGE_TOML = """
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-large"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+fallback = ["backup"]
+
+[profiles.backup]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-small"
+api_key_env = "BACKUP_API_KEY"
+billing = "api"
+
+[profiles.codex]
+driver = "cli"
+command = ["codex", "exec"]
+read_only_command = ["codex", "exec", "--sandbox", "read-only", "-o", "{last_message_file}"]
+model = "codex-model"
+billing = "subscription"
+fallback = ["backup"]
+
+[roles]
+planner = "mistral"
+implementer = "codex"
+checker = "script"
+"""
+
+
+class StageTableTest(DoctorTest):
+    PLUGIN_ROOT = SCRIPTS.parent
+
+    def rows(self, toml=None):
+        if toml is not None:
+            self.project_models(toml)
+        profiles, _roles = models.load(self.repo)
+        return doctor.stage_rows(
+            models.resolve_roles(self.repo), profiles, self.PLUGIN_ROOT
+        )
+
+    def test_no_config_shows_frontmatter_claude_defaults(self):
+        rows = self.rows()
+        self.assertEqual([r[0] for r in rows], list(doctor.STAGES))
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"],
+            (
+                "planner",
+                "claude",
+                "opus (agent frontmatter default)",
+                "subscription (Claude Code)",
+            ),
+        )
+        self.assertEqual(
+            by_stage["implementer"][2], "sonnet (agent frontmatter default)"
+        )
+        self.assertEqual(by_stage["checker"][2], "haiku (agent frontmatter default)")
+        self.assertEqual(by_stage["reviewer"][2], "opus (agent frontmatter default)")
+        self.assertEqual(by_stage["backlog"][2], "opus (agent frontmatter default)")
+
+    def test_claude_model_suffix_and_script_checker(self):
+        rows = self.rows('[roles]\nplanner = "claude:haiku"\nchecker = "script"\n')
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"][1:],
+            ("claude", "claude:haiku", "subscription (Claude Code)"),
+        )
+        self.assertEqual(
+            by_stage["checker"], ("checker", "script", "-", "none (script)")
+        )
+
+    def test_external_profiles_and_fallbacks_get_rows(self):
+        rows = self.rows(STAGE_TOML)
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"], ("planner", "api", "mistral-large", "api")
+        )
+        self.assertEqual(
+            by_stage["implementer"],
+            ("implementer", "cli", "codex-model", "subscription"),
+        )
+        self.assertIn(
+            ("implementer fallback backup", "api", "mistral-small", "api"), rows
+        )
+        self.assertIn(("planner fallback backup", "api", "mistral-small", "api"), rows)
+        self.assertEqual(
+            by_stage["checker"], ("checker", "script", "-", "none (script)")
+        )
+
+    def test_stage_table_rendered_and_spends_no_capacity(self):
+        self.init_repo()
+        self.write_full_settings()
+        self.commit(".claude/settings.json")
+        self.project_models(STAGE_TOML)
+        code, out, err = self.run_doctor(["--project", str(self.repo)])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("## Stages\n| Stage | Method | Model | Billing |", out)
+        self.assertIn("| planner | api | mistral-large | api |", out)
+        self.assertIn("| implementer | cli | codex-model | subscription |", out)
+        self.assertIn(
+            "| implementer fallback backup | api | mistral-small | api |", out
+        )
+        self.assertIn("| checker | script | - | none (script) |", out)
+        self.assertIn(
+            "| reviewer | claude | opus (agent frontmatter default) | "
+            "subscription (Claude Code) |",
+            out,
+        )
+        # no --online: no HTTP request was made, only configuration was inspected
+        self.assertNotIn("HTTP", out)
+
+
 # --- AC11: profile key and enabled checks -----------------------------------------------------------
 
 

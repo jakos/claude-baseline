@@ -30,3 +30,11 @@ and a third can verify. You never change source files — only `.work/<task-id>/
 
 Return one paragraph: the plan's title, profiles, number of steps and criteria, and
 whether it is blocked.
+
+When `[roles] planner` (or a `--planner <profile>` override) names an external profile,
+this same agent body runs inside the trusted runner `scripts/role_run.py`: the runner
+gives you only read_file, list_files, grep and an argv-allowlisted read-only
+run_command, includes the workflow contract, the project rules, the task files and the
+actual base's verification gate in your first message, and publishes only the
+validated `plan.md` itself — in that mode return the complete plan.md as your final
+message instead of writing it, and never wrap it in a code fence.

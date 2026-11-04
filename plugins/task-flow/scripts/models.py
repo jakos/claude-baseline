@@ -81,6 +81,15 @@ billing = "subscription" on driver "cli"):
                               {prompt_file} and {last_message_file} are expanded
                               (each argument is expanded on its own; no shell,
                               no other interpolation)
+  read_only_command           same shape and placeholders as `command`, but used
+                              instead of `command` by producer roles that must not
+                              write (the planner): the argv is verified read-only
+                              (verify_read_only_command; initially only a Codex
+                              `exec --sandbox read-only` command that captures the
+                              final message with -o {last_message_file} passes),
+                              required when this profile serves such a role or is
+                              one of its fallbacks (default: none; never inferred
+                              from the profile name)
   timeout_seconds             number > 0, the whole CLI run's deadline
                               (default 600)
   prompt_via                  "stdin" | "file" | "arg" (default "stdin"): how the
@@ -101,8 +110,14 @@ billing = "subscription" on driver "cli"):
                               (default [])
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
-"claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (implementer
-only), "script" (checker only: run scripts/gates.py instead of the checker agent).
+"claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (planner and
+implementer only), "script" (checker only: run scripts/gates.py instead of the checker
+agent). The implementer key also accepts a table form, [roles.implementer] with
+`default = "<profile>"` as its sole accepted key; it normalizes to the same scalar
+value. A scalar and a table never merge across the user and project files: whichever
+file sets the key last (the project file wins) replaces the other form entirely, and
+unknown keys inside the table are errors, so future routing keys fail loudly until
+they are implemented.
 
 CLI:
   models.py show <profile> [--project <repo-root>]
@@ -132,6 +147,14 @@ from pathlib import Path
 DRIVERS = {"openai-loop", "anthropic-loop", "cli"}
 BILLINGS = {"subscription", "api", "local"}
 ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
+# Roles that may name a [profiles.<name>] instead of a Claude value. The planner is a
+# producer role: it only reads and returns artifact text, which the trusted runner
+# publishes, so a "cli" profile serving it needs a verified read_only_command.
+PROFILE_ROLES = {"planner", "implementer"}
+PRODUCER_ROLES = {"planner"}
+# The sole key the alternative [roles.implementer] table accepts today; later tasks
+# (implementer-model-routing) add strict rule keys here. Unknown keys stay errors.
+ROLE_TABLE_KEYS = {"implementer": {"default"}}
 GATES_KEYS = {"command_timeout_seconds"}
 GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
@@ -143,12 +166,31 @@ CLI_PLACEHOLDERS = {"worktree", "prompt_file", "last_message_file"}
 # Keys that only make sense on driver "cli" (they are refused on the API drivers).
 CLI_ONLY_KEYS = {
     "command",
+    "read_only_command",
     "timeout_seconds",
     "prompt_via",
     "usage_format",
     "pass_env",
     "limit_patterns",
 }
+# The only CLI adapter whose read-only execution is verified today: Codex `exec` with
+# an explicit read-only sandbox. A producer role's read_only_command must match this
+# shape; anything else is refused instead of guessed from the profile's name.
+VERIFIED_READ_ONLY_PROGRAMS = {"codex"}
+READ_ONLY_SANDBOX = "read-only"
+# Codex flags that would break the read-only guarantee (a workspace-write or full-auto
+# sandbox, approval bypass, or a -c/--config override that can change any of them).
+READ_ONLY_FORBIDDEN_ARGS = {
+    "--full-auto",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-c",
+    "--config",
+    "--ask-for-approval",
+    "--oss",
+}
+# Shell metacharacters are refused inside any read_only_command argument: on Windows a
+# .cmd/.bat shim runs through cmd.exe, where they would be live.
+SHELL_METACHARS = "&|<>^%!\n\r"
 # Keys of the API wire loop that cannot govern a CLI's own internal loop; setting any
 # of them explicitly on a "cli" profile is an error (their defaults are fine).
 CLI_INCOMPATIBLE_KEYS = {
@@ -339,6 +381,7 @@ PROFILE_KEYS = {
     "post_edit": (_check_str_list, False, []),
     "prompt_extras": (_check_str_list, False, []),
     "command": (_check_str_list, False, None),
+    "read_only_command": (_check_str_list, False, None),
     "timeout_seconds": (_check_num(0, strict=True), False, 600),
     "prompt_via": (_check_choice(PROMPT_VIAS), False, "stdin"),
     "usage_format": (_check_choice(USAGE_FORMATS), False, "none"),
@@ -381,16 +424,52 @@ def _validate_profiles(path: Path, profiles) -> dict:
 
 
 def _validate_roles(path: Path, roles) -> dict:
+    """Validate [roles] and normalize the alternative table form to its scalar value.
+
+    A role value is either a non-empty string or — only for the roles that accept a
+    table (implementer today) — a table whose sole accepted key is `default`. The
+    normalized mapping maps every role to a plain string, so the user/project merge
+    below replaces a scalar with a table (or the reverse) wholesale instead of mixing
+    the two incompatible forms.
+    """
     if not isinstance(roles, dict):
         raise ConfigError(f"{path}: roles: must be a table")
+    normalized: dict[str, str] = {}
     for role, value in roles.items():
         if role not in ROLES:
             raise ConfigError(
                 f"{path}: roles.{role}: unknown role (use {sorted(ROLES)})"
             )
+        if isinstance(value, dict):
+            accepted = ROLE_TABLE_KEYS.get(role)
+            if accepted is None:
+                raise ConfigError(
+                    f"{path}: roles.{role}: a table is only valid for "
+                    f"{sorted(ROLE_TABLE_KEYS)}; use a string value for {role!r}"
+                )
+            unknown = sorted(set(value) - accepted)
+            if unknown:
+                raise ConfigError(
+                    f"{path}: roles.{role}.{unknown[0]}: unknown key "
+                    f"(accepted: {sorted(accepted)}; future rule keys are errors "
+                    "until they are implemented)"
+                )
+            if "default" not in value:
+                raise ConfigError(
+                    f"{path}: roles.{role}: the table form requires "
+                    f'default = "<profile>"'
+                )
+            default = value["default"]
+            if not isinstance(default, str) or not default:
+                raise ConfigError(
+                    f"{path}: roles.{role}.default: must be a non-empty profile name"
+                )
+            normalized[role] = default
+            continue
         if not isinstance(value, str) or not value:
             raise ConfigError(f"{path}: roles.{role}: must be a non-empty string")
-    return roles
+        normalized[role] = value
+    return normalized
 
 
 def _validate_gates(path: Path, gates) -> dict:
@@ -419,15 +498,30 @@ def _validate_cli_profile(name, table, full, key_where, where) -> None:
         raise ConfigError(
             f"{key_where('command')}profiles.{name}.command: must not be empty"
         )
-    for argument in full["command"]:
-        for match in re.finditer(r"\{([^{}]*)\}", argument):
-            placeholder = match.group(1)
-            if placeholder not in CLI_PLACEHOLDERS:
+    for key in ("command", "read_only_command"):
+        for argument in full[key] or []:
+            for match in re.finditer(r"\{([^{}]*)\}", argument):
+                placeholder = match.group(1)
+                if placeholder not in CLI_PLACEHOLDERS:
+                    raise ConfigError(
+                        f"{key_where(key)}profiles.{name}.{key}: unknown "
+                        f"placeholder {{{placeholder}}} in {argument!r}; allowed: "
+                        f"{sorted(CLI_PLACEHOLDERS)}"
+                    )
+            if key == "read_only_command" and any(
+                char in SHELL_METACHARS for char in argument
+            ):
                 raise ConfigError(
-                    f"{key_where('command')}profiles.{name}.command: unknown "
-                    f"placeholder {{{placeholder}}} in {argument!r}; allowed: "
-                    f"{sorted(CLI_PLACEHOLDERS)}"
+                    f"{key_where(key)}profiles.{name}.{key}: shell metacharacter in "
+                    f"{argument!r}; the argv runs without a shell"
                 )
+    if full["read_only_command"]:
+        problem = verify_read_only_command(full["read_only_command"])
+        if problem is not None:
+            raise ConfigError(
+                f"{key_where('read_only_command')}profiles.{name}.read_only_command: "
+                f"{problem}"
+            )
     has_prompt_file = any("{prompt_file}" in arg for arg in full["command"])
     if full["prompt_via"] == "file" and not has_prompt_file:
         raise ConfigError(
@@ -573,14 +667,91 @@ def load(project_root: Path | None = None) -> tuple[dict, dict]:
                     f'{path}: roles.{role}: "script" is only valid for checker'
                 )
             continue
-        if role != "implementer":
+        if role not in PROFILE_ROLES:
             raise ConfigError(
-                f"{path}: roles.{role}: {value!r} is not valid; only implementer may name "
-                f"a profile (use one of {sorted(CLAUDE_VALUES)})"
+                f"{path}: roles.{role}: {value!r} is not valid; only "
+                f"{sorted(PROFILE_ROLES)} may name a profile "
+                f"(use one of {sorted(CLAUDE_VALUES)})"
             )
         if value not in resolved:
             raise ConfigError(f"{path}: roles.{role}: unknown profile {value!r}")
     return resolved, raw_roles
+
+
+def verify_read_only_command(command: list[str]) -> str | None:
+    """Check a producer role's read_only_command; return the problem or None.
+
+    Only a verified Codex read-only execution passes today: `codex exec` with an
+    explicit `--sandbox read-only` (no other sandbox value, no --full-auto, no approval
+    bypass, no -c/--config override) and a `-o {last_message_file}` final-message
+    capture, so the host — not the model — owns the artifact text. Unverified CLI
+    adapters are refused; read-only behavior is never inferred from a profile name.
+    """
+    if not command:
+        return "the command is empty"
+    program = command[0]
+    stem = program.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    name = stem.lower()
+    for suffix in (".exe", ".cmd", ".bat", ".com"):
+        name = name.removesuffix(suffix)
+    if name not in VERIFIED_READ_ONLY_PROGRAMS:
+        return (
+            f"unverified CLI adapter {program!r}: only "
+            f"{sorted(VERIFIED_READ_ONLY_PROGRAMS)} with a read-only sandbox is "
+            "supported for a producer role"
+        )
+    rest = command[1:]
+    if "exec" not in rest:
+        return "the verified read-only form is `codex exec ...`"
+    sandbox_values: list[str] = []
+    index = 0
+    while index < len(rest):
+        argument = rest[index]
+        if argument in ("--sandbox", "-s"):
+            if index + 1 >= len(rest):
+                return f"{argument} needs a value"
+            sandbox_values.append(rest[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--sandbox="):
+            sandbox_values.append(argument.split("=", 1)[1])
+        index += 1
+    if not sandbox_values:
+        return (
+            "must set the sandbox explicitly: --sandbox read-only (read-only behavior "
+            "is never inferred)"
+        )
+    for value in sandbox_values:
+        if value != READ_ONLY_SANDBOX:
+            return (
+                f"--sandbox {value!r} is not read-only; a producer role must use "
+                f"--sandbox {READ_ONLY_SANDBOX}"
+            )
+    for argument in rest:
+        if argument in READ_ONLY_FORBIDDEN_ARGS or argument.startswith("--config="):
+            return (
+                f"{argument!r} conflicts with the read-only guarantee (workspace-write "
+                "or full-auto sandbox, approval bypass, or a config override)"
+            )
+    output_captured = False
+    index = 0
+    while index < len(rest):
+        argument = rest[index]
+        if argument in ("-o", "--output-last-message"):
+            if index + 1 < len(rest) and "{last_message_file}" in rest[index + 1]:
+                output_captured = True
+            index += 2
+            continue
+        if argument.startswith("--output-last-message="):
+            output_captured = "{last_message_file}" in argument
+        index += 1
+    if not output_captured:
+        return (
+            "must capture the final message with -o {last_message_file} "
+            "(--output-last-message {last_message_file}); the host publishes the "
+            "validated artifact, not the CLI"
+        )
+    return None
 
 
 def gates(project_root: Path | None = None) -> dict:
@@ -670,6 +841,98 @@ def resolve_roles(project_root: Path) -> dict:
     return resolved
 
 
+def resolve_role_profile(
+    project_root: Path, role: str, override: str | None = None
+) -> dict:
+    """Resolve one role for one run, with an optional invocation-scoped override.
+
+    Returns {"role", "value", "kind", "profile", "method", "model", "billing",
+    "fallback"}: kind is "claude", "profile" or "script"; method is "claude",
+    "api", "cli" or "script"; profile is the profile name or None; billing is the
+    profile's billing or "subscription (Claude Code)" / "none (script)". The
+    override must name an enabled configured profile — never a free-form model or
+    command. A producer role (the planner) on a driver "cli" profile, and every
+    fallback in its chain, must carry a verified read_only_command. Raises
+    ConfigError with file/key diagnostics.
+    """
+    if role not in ROLES:
+        raise ConfigError(f"unknown role {role!r} (use {sorted(ROLES)})")
+    profiles, roles = load(project_root)
+    value = override if override is not None else roles.get(role, "claude")
+    source = "override" if override is not None else f"roles.{role}"
+    if override is not None and (value in CLAUDE_VALUES or value == "script"):
+        raise ConfigError(
+            f"override: {value!r} is not a profile name; an override must name an "
+            "enabled configured profile of models.toml, never a free-form model, "
+            "Claude value or command"
+        )
+    if value in CLAUDE_VALUES:
+        model = value.split(":", 1)[1] if value.startswith("claude:") else None
+        return {
+            "role": role,
+            "value": value,
+            "kind": "claude",
+            "profile": None,
+            "method": "claude",
+            "model": model,
+            "billing": "subscription (Claude Code)",
+            "fallback": [],
+        }
+    if value == "script":
+        if role != "checker":
+            raise ConfigError(f'{source}: "script" is only valid for checker')
+        return {
+            "role": role,
+            "value": value,
+            "kind": "script",
+            "profile": None,
+            "method": "script",
+            "model": None,
+            "billing": "none (script)",
+            "fallback": [],
+        }
+    if role not in PROFILE_ROLES:
+        raise ConfigError(
+            f"{source}: {value!r} is not valid; only {sorted(PROFILE_ROLES)} may name a "
+            f"profile (use one of {sorted(CLAUDE_VALUES)})"
+        )
+    if value not in profiles:
+        known = ", ".join(sorted(profiles)) or "none"
+        raise ConfigError(f"{source}: unknown profile {value!r} (known: {known})")
+    profile = profiles[value]
+    if not profile["enabled"]:
+        raise ConfigError(
+            f"{source}: profile {value!r} is disabled (enabled = false); an external "
+            "role must name an enabled profile"
+        )
+    chain = [value, *profile["fallback"]]
+    if role in PRODUCER_ROLES:
+        for name in chain:
+            candidate = profiles[name]
+            if candidate["driver"] != "cli":
+                continue
+            if not candidate["read_only_command"]:
+                raise ConfigError(
+                    f"profiles.{name}.read_only_command: required when this profile "
+                    f'serves the {role} role on driver "cli" (a producer role must '
+                    "not write; the runner publishes the validated artifact)"
+                )
+            problem = verify_read_only_command(candidate["read_only_command"])
+            if problem is not None:
+                raise ConfigError(f"profiles.{name}.read_only_command: {problem}")
+    method = "cli" if profile["driver"] == "cli" else "api"
+    return {
+        "role": role,
+        "value": value,
+        "kind": "profile",
+        "profile": value,
+        "method": method,
+        "model": profile["model"],
+        "billing": profile["billing"],
+        "fallback": list(profile["fallback"]),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect task-flow's models.toml")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -686,6 +949,14 @@ def main(argv: list[str] | None = None) -> int:
     roles_parser = sub.add_parser(
         "roles", help="print the resolved role mapping as JSON"
     )
+    select_parser = sub.add_parser(
+        "select", help="resolve one role for a run, with an optional override"
+    )
+    select_parser.add_argument("role")
+    select_parser.add_argument("--override", help="a profile name overriding [roles]")
+    select_parser.add_argument(
+        "--project", default=".", help="repository root (default: .)"
+    )
     roles_parser.add_argument(
         "--project", default=".", help="repository root (default: .)"
     )
@@ -699,6 +970,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "roles":
             mapping = resolve_roles(Path(args.project).resolve())
             print(json.dumps(mapping, sort_keys=True))
+        elif args.command == "select":
+            selection = resolve_role_profile(
+                Path(args.project).resolve(), args.role, override=args.override
+            )
+            print(json.dumps(selection, sort_keys=True))
         else:
             project = Path(args.project).resolve()
             profiles, _roles = load(project)

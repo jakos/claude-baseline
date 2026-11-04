@@ -107,6 +107,15 @@ Local checks, in fixed order (each is a plain function; every input is an argume
                           - driver: DRIVER_CHECKS has one entry per driver doctor knows;
                             a profile whose driver has no entry -> WARN.
 
+Between the check table and `## Fixes` the report has a `## Stages` table — one row per
+stage (planner, implementer, checker, reviewer, backlog) with its method, model and
+billing: a Claude entry shows `claude` plus the agent frontmatter's default model (or
+the `claude:<model>` suffix when configured) and billing `subscription (Claude Code)`;
+a `script` checker shows method `script`, billing `none (script)`; a profile entry shows
+the profile's method (`api` or `cli`), model and billing, and each of its fallbacks gets
+its own `... fallback <name>` row. The stage table inspects the configuration only: no
+CLI is executed and no request is sent, so it spends no model capacity.
+
 Online check (only with --online, only for the enabled API-driver profiles of check 14
 that have their key or need none; driver "cli" profiles are never online targets):
 GET {base_url}/models with the driver's auth headers
@@ -683,6 +692,66 @@ def check_roles(resolved: dict) -> Check:
     return Check("roles", "PASS", ", ".join(parts))
 
 
+# The five workflow stages, in table order.
+STAGES = ("planner", "implementer", "checker", "reviewer", "backlog")
+
+
+def agent_frontmatter_model(plugin_root: Path, role: str) -> str | None:
+    """The `model:` frontmatter default of agents/<role>.md, or None when absent."""
+    path = plugin_root / "agents" / f"{role}.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    for line in text[3:end].splitlines():
+        if line.startswith("model:"):
+            return line.partition(":")[2].strip() or None
+    return None
+
+
+def stage_rows(
+    resolved: dict, profiles: dict, plugin_root: Path
+) -> list[tuple[str, str, str, str]]:
+    """(stage, method, model, billing) rows for every stage, external fallbacks included.
+
+    Configuration inspection only: no CLI is executed, no request is sent, so the
+    stage table spends no model capacity. A Claude entry shows the agent
+    frontmatter's default model; a profile entry shows the profile's method (api or
+    cli), model and billing, and every fallback of its chain gets its own row.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+
+    def profile_row(stage: str, name: str) -> None:
+        profile = profiles.get(name)
+        if profile is None:
+            rows.append((stage, "profile", name, "unknown profile (config error)"))
+            return
+        method = "cli" if profile["driver"] == "cli" else "api"
+        rows.append((stage, method, profile["model"], profile["billing"]))
+        for fallback in profile["fallback"]:
+            profile_row(f"{stage} fallback {fallback}", fallback)
+
+    for role in STAGES:
+        entry = resolved[role]
+        if entry["kind"] == "claude":
+            if entry["model"]:
+                model = f"claude:{entry['model']}"
+            else:
+                default = agent_frontmatter_model(plugin_root, role) or "unset"
+                model = f"{default} (agent frontmatter default)"
+            rows.append((role, "claude", model, "subscription (Claude Code)"))
+        elif entry["kind"] == "script":
+            rows.append((role, "script", "-", "none (script)"))
+        else:
+            profile_row(role, entry["value"])
+    return rows
+
+
 def _prefix(name: str, is_primary: bool) -> str:
     return f"profile {name} ({'primary' if is_primary else 'fallback'})"
 
@@ -1091,12 +1160,24 @@ def cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
-def render(checks: list[Check], secrets: list[str]) -> str:
+def render(
+    checks: list[Check],
+    secrets: list[str],
+    stages: "list[tuple[str, str, str, str]] | None" = None,
+) -> str:
     lines = ["# task-flow doctor", "| # | Check | Result | Detail |"]
     for number, check in enumerate(checks, 1):
         lines.append(
             f"| {number} | {cell(check.name)} | {check.result} | {cell(check.detail)} |"
         )
+    if stages is not None:
+        lines.append("## Stages")
+        lines.append("| Stage | Method | Model | Billing |")
+        lines.append("| --- | --- | --- | --- |")
+        for stage, method, model, billing in stages:
+            lines.append(
+                f"| {cell(stage)} | {cell(method)} | {cell(model)} | {cell(billing)} |"
+            )
     lines.append("## Fixes")
     fixes = [
         f"{number}. {check.name}: {fix}"
@@ -1160,8 +1241,11 @@ def main(argv: list[str] | None = None) -> int:
     checks.append(check_anthropic_key(env))
     models_check, profiles, roles = check_models(project)
     checks.append(models_check)
+    stages = None
     if profiles is not None and roles is not None:
-        checks.append(check_roles(models.resolve_roles(project)))
+        resolved = models.resolve_roles(project)
+        checks.append(check_roles(resolved))
+        stages = stage_rows(resolved, profiles, plugin_root)
         rows, targets = check_implementer_profiles(
             profiles, roles, env, windows_user_env
         )
@@ -1175,7 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
     secrets = secret_values(
         env, [profile.get("api_key_env") for profile in (profiles or {}).values()]
     )
-    print(render(checks, secrets), end="")
+    print(render(checks, secrets, stages), end="")
     return 1 if any(check.result == "FAIL" for check in checks) else 0
 
 

@@ -39,7 +39,11 @@ flowchart TD
 
 The diagram cannot carry: the round cap and the no-progress rule are compared
 mechanically on the failing sets of two consecutive rounds; a failed external round
-leaves the phase `implementing`, so the same command runs it again. The finish node's
+leaves the phase `implementing`, so the same command runs it again. The plan node is
+the same artifact whoever writes it: with `[roles] planner` naming a profile (or a
+`--planner <profile>` override), `scripts/role_run.py` runs the planner agent body
+through a read-only transport, validates the result and publishes only the validated
+`plan.md` (see [External planner](external-implementer.md#external-planner-a-producer-role)). The finish node's
 SDLC status refresh is opt-in: it runs only when the worktree has
 `docs/task-flow/sdlc-status.toml` and the task's `task.md` declares
 `SDLC criteria closed by this task:` — otherwise `task-finish` changes no status file
@@ -54,16 +58,16 @@ Plugin commands are namespaced, so each is `/task-flow:<name>`:
 | Command | What it does |
 | --- | --- |
 | `task-new <description>` | Creates `.work/<id>/task.md` and `status.md`; asks at most 2 questions |
-| `task-plan [id]` | Runs the planner, shows the plan, asks you to approve, edit or cancel |
+| `task-plan [id] [--planner <profile>]` | Runs the planner (the subagent, or `role_run.py` on an external profile when `[roles] planner` names one; `--planner <profile>` overrides it for this invocation), shows the plan, asks you to approve, edit or cancel |
 | `task-implement [id]` | Requires approval; runs the baseline check first (creates the branch and worktree); runs the implementer: the subagent, or `implement.py` when `[roles] implementer` names a profile |
 | `task-check [id]` | Runs the checker for the current round |
 | `task-review [id]` | Runs the reviewer for the current round |
-| `task-run <description \| id> [--auto]` | All of the above, with the approval gate and the 3-round cap |
-| `task-autopilot [<requirements> \| <run-id> \| --tasks <id>[,<id>...]] [--from-repo] [--semi \| --full] [--budget <tokens>] [--auto]` | Gathers requirements, plans them as a stack of tasks, shows tasks and token estimates, then runs them one after another; `--tasks` runs existing prepared tasks stacked in the given order (see Autopilot) |
-| `task-epic <new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] \| add <epic-id> --tasks <id>[,<id>...] \| remove <epic-id> --tasks <id>[,<id>...] \| run <epic-id> \| status <epic-id> \| retry <epic-id> <task-id> --authorized \| sync-run <epic-id>>` | Creates a persistent epic (one id for a group of tasks with declared dependencies) before execution, mutates its membership while idle (regenerating the linked run's table), runs or resumes it through the ordinary autopilot loop (`source: epic`), and reports status; retry of a failed member needs your explicit authorization (see [Autopilot and epics](autopilot.md#epics)) |
+| `task-run <description \| id> [--auto] [--planner <profile>]` | All of the above, with the approval gate and the 3-round cap; `--planner` plans a new task with that enabled profile for this invocation |
+| `task-autopilot [<requirements> \| <run-id> \| --tasks <id>[,<id>...]] [--from-repo] [--semi \| --full] [--budget <tokens>] [--auto] [--planner <profile>]` | Gathers requirements, plans them as a stack of tasks (each newly planned task with `--planner <profile>` when given), shows tasks and token estimates, then runs them one after another; `--tasks` runs existing prepared tasks stacked in the given order (see Autopilot) |
+| `task-epic <new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] \| add <epic-id> --tasks <id>[,<id>...] \| remove <epic-id> --tasks <id>[,<id>...] \| run <epic-id> \| status <epic-id> \| retry <epic-id> <task-id> --authorized \| sync-run <epic-id>> [--planner <profile>]` | Creates a persistent epic (one id for a group of tasks with declared dependencies) before execution, mutates its membership while idle (regenerating the linked run's table), runs or resumes it through the ordinary autopilot loop (`source: epic`, `--planner` passed to newly planned member tasks), and reports status; retry of a failed member needs your explicit authorization (see [Autopilot and epics](autopilot.md#epics)) |
 | `task-list [--all] [--epic <epic-id>]` | Open tasks as a table, ordered by what to do next; `--all` includes done ones, `--epic` lists only that epic's member tasks |
 | `task-status [id]` | Phase, round and last verdict for one task or all |
-| `task-finish [id]` | After `APPROVED`: refreshes the AI-native SDLC status when the repository has `docs/task-flow/sdlc-status.toml` and `task.md` declares criteria (`scripts/sdlc_status.py finish`, before the commit); when the worktree's `.claude/task-flow.records.toml` enables records, also renders `docs/tasks/<id>.md` and the `Task-*` trailers (`scripts/task_record.py`, before the commit, stopped-on-error); then summary (fixed headings), commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md` and `impl-*.json` files (not asked) |
+| `task-finish [id]` | After `APPROVED`: refreshes the AI-native SDLC status when the repository has `docs/task-flow/sdlc-status.toml` and `task.md` declares criteria (`scripts/sdlc_status.py finish`, before the commit); when the worktree's `.claude/task-flow.records.toml` enables records, also renders `docs/tasks/<id>.md` and the `Task-*` trailers (`scripts/task_record.py`, before the commit, stopped-on-error); then summary (fixed headings), commit message, PR text; local commit; asks before push or PR; last, prunes `.work/<id>/` to its `.md`, `impl-*.json` and `role-*.json` files (not asked) |
 | `task-release [<version> \| --major \| --minor \| --patch] [--target <name>] [--since <ref>] [--dry-run]` | Releases one target: preconditions, version proposal, checks, changelog entry, one approval, version bump, release commit and annotated tag; push only after a separate question (see Releasing) |
 | `task-doctor [--online]` | Read-only check of the environment and configuration (uv, git, permissions, `models.toml`, keys); prints a fix for every WARN and FAIL (see Doctor) |
 

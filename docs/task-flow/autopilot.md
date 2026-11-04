@@ -66,7 +66,11 @@ but obeyed by procedure, not by a hook. An external round whose `impl-<n>.json` 
 `cost_usd` (a `driver = "cli"` subscription profile, or unknown usage) is not added
 numerically: its `External USD` cell is `unknown` (sticky — later numeric rounds add to
 the known subtotal and the total is reported `at least`), exactly like `autopilot.py`
-already reads it.
+already reads it. The planner's external USD counts into the same cell: a
+`role-planner-*.json` with a null `cost_usd` makes it `unknown` the same way, and when a
+task's folder carries invocation files (`impl-<n>.json`, `role-*.json`), `estimate` and
+the epic spend recompute the totals from those invocation ids, so a resume never double
+counts.
 
 **Estimates are coarse.** Per task: check = 15000 + 3000 x commands, implement = 30000 +
 12000 x steps, review = 30000 + 6000 x criteria, finish = 10000. A round is implement +
@@ -76,8 +80,15 @@ measured. With an external implementer, `autopilot.py estimate` and `next` take
 `--implementer-kind profile` and count the implement term as 0 — the external round's
 cost is measured in USD (the `External USD` column of `run.md`, totalled in `report.md`),
 not estimated; a null `cost_usd` (a CLI subscription round or unknown usage) is recorded
-as `unknown` in the column, not as 0. Tokens of your main session are not counted, and
-Claude cannot see your plan's
+as `unknown` in the column, not as 0. `estimate` and `next` also take `--planner-kind
+profile` when the planner is an external profile: the planner's cost is likewise measured
+per invocation (`role-planner-*.json`), never estimated, and the estimate prints a
+`planner: external profile; ...` line, a `spent by stage (Claude tokens): ...` line and,
+when invocation files exist, an `external by stage: planner: ..., implementer: ...`
+line. `task-autopilot --planner <profile>` plans every newly planned task of the run with
+that enabled profile (recorded once in the run's History); resuming without the flag uses
+the current configuration, and `planned`/`approved` tasks keep their plan. Tokens of your
+main session are not counted, and Claude cannot see your plan's
 session or weekly limit; check it with `/usage`.
 
 ## Epics

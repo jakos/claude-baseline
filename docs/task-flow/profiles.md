@@ -22,3 +22,9 @@ cost no context. Agents read them by path.
    allowed values under `plan.md → Profiles`.
 3. Run one `task-run` on a scratch repo with a file it should detect, and check that
    `plan.md → Profiles` names it.
+
+Separate from these detection profiles, a workflow *stage* can also be delegated to an
+external model profile from `models.toml` — today the planner, via
+`[roles] planner = "<profile>"` or a one-run `--planner <profile>` — see
+[External planner](external-implementer.md#external-planner-a-producer-role) and
+[Configuration](configuration.md#external-planner).

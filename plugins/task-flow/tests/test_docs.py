@@ -63,7 +63,9 @@ FRONT_PAGE = "README.md"
 FRONT_PAGE_MAX_LINES = 150
 # cli-implementer-driver added the Codex subscription/API example block under the plugin
 # README's Documentation section, so the README grew from 40 to 59 lines.
-PLUGIN_README_MAX_LINES = 60
+# external-role-delegation round 2 added the one-line external-planner pointer after that
+# block, so the cap grows to 61.
+PLUGIN_README_MAX_LINES = 61
 # readme-front-page: the bench:latest marker pair of the front page; must equal
 # README_START / README_END in plugins/task-flow/bench/publish.py.
 BENCH_LATEST = ("<!-- bench:latest:start -->", "<!-- bench:latest:end -->")
@@ -198,7 +200,7 @@ BLOCKS_AFTER = {
     "docs/task-flow/setup.md": 8,
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 1,
-    "docs/task-flow/configuration.md": 3,
+    "docs/task-flow/configuration.md": 4,
     "docs/task-flow/external-implementer.md": 16,
     "docs/task-flow/gates.md": 5,
     "docs/task-flow/enforcement.md": 0,
@@ -231,7 +233,9 @@ BLOCKS_ADDED = {
     "docs/task-flow/gates.md": 2,
     # Added by the task task-record-in-git: the records.toml example block in the new
     # "Task records (records.toml)" section of docs/task-flow/configuration.md.
-    "docs/task-flow/configuration.md": 1,
+    # Added by the task external-role-delegation: the planner-examples toml block in the
+    # new "External roles per stage" section of the same page.
+    "docs/task-flow/configuration.md": 2,
     # Added by the task task-epics: the strict epic.md example block in the new "Epics"
     # section of docs/task-flow/autopilot.md.
     "docs/task-flow/autopilot.md": 1,

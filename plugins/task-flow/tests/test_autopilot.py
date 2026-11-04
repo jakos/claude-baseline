@@ -454,6 +454,79 @@ class ExternalTest(RunFixture):
         self.assertEqual(self.out("next", "--implementer-kind", "profile"), "run b")
 
 
+class PlannerKindTest(RunFixture):
+    """The external planner: --planner-kind, per-stage subtotals, invocation-id USD."""
+
+    def test_planner_kind_profile_line_and_stage_subtotals(self):
+        self.run_md([("a", "-", "1000", "done")], planning="500")
+        out = self.out("estimate", "--planner-kind", "profile")
+        self.assertIn(
+            "planner: external profile; planning spends no Claude tokens; its cost "
+            "is measured in USD per invocation (role-planner-*.json), not estimated",
+            out,
+        )
+        self.assertIn(
+            "spent by stage (Claude tokens): planning: 500, rounds: 1000", out
+        )
+
+    def test_default_planner_kind_has_no_planner_line(self):
+        self.run_md([("a", "-", "0", "approved")])
+        out = self.out("estimate")
+        self.assertNotIn("planner:", out)
+        self.assertNotIn("spent by stage", out)
+        self.assertEqual(out, self.out("estimate", "--planner-kind", "claude"))
+
+    def test_next_accepts_planner_kind_and_still_counts_claude_only(self):
+        rows = [("a", "-", "10", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, budget="150")
+        # the planner kind never changes the breaker: it counts Claude tokens only
+        self.assertEqual(
+            self.out("next", "--planner-kind", "profile"),
+            self.out("next"),
+        )
+        self.assertEqual(
+            self.out(
+                "next", "--planner-kind", "profile", "--implementer-kind", "profile"
+            ),
+            self.out("next", "--implementer-kind", "profile"),
+        )
+
+    def write_metrics(self, task_id, name, payload):
+        import json
+
+        path = self.root / ".work" / task_id / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_external_usd_recomputed_from_invocation_ids(self):
+        rows = [("a", "-", "1000", "done"), ("b", "a", "0", "approved")]
+        self.run_md(rows, usd=["0", "0"])
+        # the cells say 0, but the invocation files carry the real spend: the
+        # planner's role-*.json counts into the task's External USD total
+        self.write_metrics(
+            "a",
+            "role-planner-2026-01-01T00-00-00Z-ab12cd34.json",
+            {"schema": "role-metrics/1", "role": "planner", "cost_usd": 0.5},
+        )
+        self.write_metrics("a", "impl-1.json", {"profile": "p", "cost_usd": 1.25})
+        self.write_metrics("b", "impl-2.json", {"profile": "p", "cost_usd": None})
+        out = self.out("estimate")
+        self.assertIn("external spent: at least 1.75 USD", out)
+        self.assertIn(
+            "external by stage: implementer: at least 1.250000 USD, "
+            "planner: 0.500000 USD (from invocation ids)",
+            out,
+        )
+        # idempotent across a resume: the same files give the same totals
+        self.assertIn("external spent: at least 1.75 USD", self.out("estimate"))
+
+    def test_cells_used_when_no_invocation_files_exist(self):
+        rows = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        self.run_md(rows, usd=["0.5", "unknown"])
+        out = self.out("estimate")
+        self.assertIn("external spent: at least 0.50 USD", out)
+        self.assertNotIn("external by stage", out)
+
+
 class MalformedTest(RunFixture):
     def test_malformed_run_exits_2(self):
         ok = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]

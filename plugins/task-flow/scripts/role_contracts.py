@@ -1,0 +1,488 @@
+# /// script
+# requires-python = ">=3.14"
+# dependencies = []
+# ///
+"""Bounded validation of a task-flow role artifact: plan.md today, later the backlog
+and review artifacts of external-review-backlog.
+
+The planner role (Claude subagent or external profile) must return exactly the plan.md
+contract of skills/workflow/SKILL.md, so the trusted runner — not the model — can check
+the artifact before publishing it. This module is that check, kept separate from the
+runner (scripts/role_run.py) so the contract is unit-testable without a model, a
+process or a repository.
+
+validate_plan(text, gate_commands=..., stack=...) returns a Validation(ok, blocked,
+reasons):
+
+- ok False means the artifact is invalid; reasons are bounded, human-readable strings
+  naming the broken rule (the runner feeds them back in its single repair attempt).
+- blocked True means the artifact is a legitimate `BLOCKED: yes` plan: the Risks /
+  open questions section starts with `BLOCKED: yes`, so the plan stopped on genuine
+  unresolved questions. A blocked plan still needs the exact section skeleton and a
+  non-empty Goal, but it does not invent ordinary completion criteria, so Steps,
+  Acceptance criteria and Verification commands may be empty. ok stays True: the
+  artifact is valid, the task is blocked.
+
+Rules enforced on plan.md (SKILL.md → plan.md):
+
+- one `# Plan: <title>` first line, then exactly the nine `##` sections, in order, no
+  duplicates and no extra ones; a fenced block wrapping the whole artifact, a missing
+  or duplicate section, an oversized artifact or a truncation marker are invalid;
+- `## Steps`: numbered `1.`, `2.`, ... lines, sequential, non-empty when not blocked;
+- `## Profiles`: one `<name>: <paths>` line per profile, names from the known set
+  (python, docs, config, generic), unique;
+- `## Acceptance criteria`: column-zero `AC<n>:` lines only — a list bullet or a
+  numbered item before an AC label (`- AC1:`, `1. AC1:`) is invalid — labels unique and
+  sequential from AC1, each ending in a non-empty `Verify: <test | command | manual: …>`
+  reference on the same line;
+- `## Verification commands`: every non-blank, non-`#` line of the first fenced block
+  must parse with gates.split_command (one program plus arguments, no shell);
+- when `gate_commands` is given (the actual stack base's project gate, as argv lists),
+  every inherited gate command must appear in the plan's verification list, so a plan
+  cannot drop inherited checks — including the earlier stack tasks' test files. A
+  blocked plan with an empty verification list is exempt (a BLOCKED: yes plan has no
+  ordinary completion criteria to verify); a blocked plan that does list commands is
+  still checked;
+- when `stack` is given (the machine-built dependency manifest, {"satisfied": [...]}),
+  the plan may not mark a satisfied earlier stack prerequisite as missing just because
+  its source is unmerged on the current checkout.
+
+Stdlib only (plus gates, imported from this directory), started by `uv run --script` or
+imported as a sibling module by scripts/role_run.py, so it runs on macOS, Linux and
+Windows without Git Bash.
+"""
+
+import re
+import sys
+from dataclasses import dataclass, field
+
+import gates
+
+# The nine `##` sections of plan.md, in the exact order SKILL.md requires.
+REQUIRED_SECTIONS = [
+    "Goal",
+    "Context",
+    "Profiles",
+    "Steps",
+    "Acceptance criteria",
+    "Verification commands",
+    "Project rules",
+    "Out of scope",
+    "Risks / open questions",
+]
+KNOWN_PROFILES = {"python", "docs", "config", "generic"}
+TITLE = re.compile(r"^# Plan: \S.*$")
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+STEP = re.compile(r"^(\d+)\.\s+\S")
+PROFILE_LINE = re.compile(r"^`?([A-Za-z][\w-]*)`?\s*:\s*\S")
+AC_LINE = re.compile(r"^AC(\d+):\s*(\S.*)$")
+# A list bullet or a numbered item in front of an AC label is not a column-zero label.
+BULLET_AC = re.compile(r"^\s*(?:[-*]|\d+\.)\s*AC\d+\s*:")
+VERIFY = "Verify:"
+MAX_ARTIFACT_CHARS = 200_000
+TRUNCATION_MARKERS = (
+    re.compile(r"\[\d+ characters truncated\]"),
+    re.compile(r"\.\.\.\[\d+ more (?:lines|characters)\]"),
+    re.compile(r"\[\d+ more lines\]"),
+)
+BLOCKED_LINE = "BLOCKED: yes"
+
+
+@dataclass
+class Validation:
+    """The verdict on one candidate artifact: ok, blocked and the bounded reasons."""
+
+    ok: bool
+    blocked: bool = False
+    reasons: list[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _sections(text: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Split into {section name: body lines}; "" is the text before the first `##`.
+
+    Heading lines themselves are not part of a body, and headings inside fenced code
+    blocks do not count, so a fenced example cannot fake a section. Returns (sections,
+    order) with every `##` heading in file order, duplicates included.
+    """
+    sections: dict[str, list[str]] = {"": []}
+    order: list[str] = []
+    fence: tuple[str, int] | None = None
+    current = ""
+    for line in text.splitlines():
+        match = FENCE.match(line)
+        if fence is not None:
+            if (
+                match
+                and match.group(1)[0] == fence[0]
+                and len(match.group(1)) >= fence[1]
+            ):
+                fence = None
+            sections[current].append(line)
+            continue
+        if match:
+            fence = (match.group(1)[0], len(match.group(1)))
+            sections[current].append(line)
+            continue
+        heading = HEADING.match(line)
+        if heading and heading.group(1) == "##":
+            current = heading.group(2)
+            order.append(current)
+            sections.setdefault(current, [])
+            continue
+        sections[current].append(line)
+    return sections, order
+
+
+def _command_lines(body: list[str]) -> list[str]:
+    """The non-blank, non-`#` lines of the first fenced block of a section body."""
+    commands: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in body:
+        match = FENCE.match(line)
+        if fence is not None:
+            if (
+                match
+                and match.group(1)[0] == fence[0]
+                and len(match.group(1)) >= fence[1]
+            ):
+                break
+            if line.strip() and not line.lstrip().startswith("#"):
+                commands.append(line.strip())
+            continue
+        if match:
+            fence = (match.group(1)[0], len(match.group(1)))
+    return commands
+
+
+def parse_verification_commands(text: str) -> list[str]:
+    """The plan's first `## Verification commands` fenced block lines (gates format)."""
+    sections, _order = _sections(text)
+    return _command_lines(sections.get("Verification commands", []))
+
+
+def _check_sections(
+    text: str, reasons: list[str]
+) -> tuple[dict[str, list[str]], list[str]]:
+    lines = text.splitlines()
+    if not lines or not TITLE.match(lines[0]):
+        reasons.append("the artifact must start with a `# Plan: <title>` first line")
+    if text.lstrip().startswith("```") or text.lstrip().startswith("~~~"):
+        reasons.append(
+            "the artifact is wrapped in a code fence; return the raw Markdown"
+        )
+    sections, order = _sections(text)
+    if order != REQUIRED_SECTIONS:
+        if set(order) == set(REQUIRED_SECTIONS) and len(order) == len(
+            REQUIRED_SECTIONS
+        ):
+            reasons.append(
+                "the `##` sections must appear in the exact order "
+                + " -> ".join(REQUIRED_SECTIONS)
+                + f"; got {' -> '.join(order)}"
+            )
+        else:
+            missing = [s for s in REQUIRED_SECTIONS if s not in order]
+            extra = [s for s in order if s not in REQUIRED_SECTIONS]
+            duplicate = [s for s in set(order) if order.count(s) > 1]
+            if missing:
+                reasons.append(f"missing section(s): {missing}")
+            if extra:
+                reasons.append(f"unknown section(s): {extra}")
+            if duplicate:
+                reasons.append(f"duplicate section(s): {duplicate}")
+    # exactly one `#` title, and no heading deeper than `##` outside fences
+    titles = 0
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        match = FENCE.match(line)
+        if fence is not None:
+            if (
+                match
+                and match.group(1)[0] == fence[0]
+                and len(match.group(1)) >= fence[1]
+            ):
+                fence = None
+            continue
+        if match:
+            fence = (match.group(1)[0], len(match.group(1)))
+            continue
+        heading = HEADING.match(line)
+        if not heading:
+            continue
+        if heading.group(1) == "#":
+            titles += 1
+            if index != 0:
+                reasons.append("a second `#` title line is not allowed")
+        elif len(heading.group(1)) >= 3:
+            reasons.append(
+                f"a {heading.group(1)} heading is not allowed: {line[:60]!r}"
+            )
+    if titles == 0:
+        reasons.append("the artifact has no `# Plan:` title")
+    return sections, order
+
+
+def _check_steps(body: list[str], blocked: bool, reasons: list[str]) -> None:
+    steps = [line for line in body if line.strip()]
+    if not steps:
+        if not blocked:
+            reasons.append("## Steps is empty; a plan needs numbered steps")
+        return
+    numbers = []
+    for line in steps:
+        match = STEP.match(line)
+        if not match:
+            reasons.append(f"## Steps: not a numbered step line: {line[:60]!r}")
+            continue
+        numbers.append(int(match.group(1)))
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        reasons.append(f"## Steps: step numbers must be 1..n in order, got {numbers}")
+
+
+def _check_profiles(body: list[str], reasons: list[str]) -> None:
+    names = []
+    for line in body:
+        if not line.strip():
+            continue
+        match = PROFILE_LINE.match(line)
+        if not match:
+            reasons.append(
+                f"## Profiles: not a `<profile>: <paths>` line: {line[:60]!r}"
+            )
+            continue
+        name = match.group(1)
+        if name not in KNOWN_PROFILES:
+            reasons.append(
+                f"## Profiles: unknown profile {name!r} (known: {sorted(KNOWN_PROFILES)})"
+            )
+        elif name in names:
+            reasons.append(f"## Profiles: duplicate profile {name!r}")
+        else:
+            names.append(name)
+
+
+def _check_criteria(body: list[str], blocked: bool, reasons: list[str]) -> None:
+    labels: list[int] = []
+    for line in body:
+        if not line.strip():
+            continue
+        if BULLET_AC.match(line):
+            reasons.append(
+                "## Acceptance criteria: an AC label must start at column zero, not as "
+                f"a list item or numbered line: {line.strip()[:60]!r}"
+            )
+            continue
+        match = AC_LINE.match(line)
+        if not match:
+            if line.startswith((" ", "\t")):
+                continue  # continuation of the previous criterion
+            reasons.append(
+                "## Acceptance criteria: expected a column-zero `AC<n>: ...` line, got "
+                f"{line[:60]!r}"
+            )
+            continue
+        number = int(match.group(1))
+        labels.append(number)
+        text = match.group(2)
+        verify_at = text.find(VERIFY)
+        if verify_at == -1:
+            reasons.append(f"AC{number}: missing a `Verify:` reference")
+        elif not text[verify_at + len(VERIFY) :].strip():
+            reasons.append(f"AC{number}: the `Verify:` reference is empty")
+    if not labels:
+        if not blocked:
+            reasons.append(
+                "## Acceptance criteria is empty; a plan needs AC1, AC2, ... "
+                "(a BLOCKED: yes plan may leave it empty)"
+            )
+        return
+    if labels != list(range(1, len(labels) + 1)):
+        reasons.append(
+            f"## Acceptance criteria: labels must be unique and sequential from AC1, "
+            f"got AC{labels[0]}..{labels[-1]} ({len(labels)} labels: {labels})"
+        )
+
+
+def _check_commands(body: list[str], blocked: bool, reasons: list[str]) -> list[str]:
+    commands = _command_lines(body)
+    if not commands:
+        if not blocked:
+            reasons.append("## Verification commands has no fenced command block")
+        return []
+    for line in commands:
+        try:
+            gates.split_command(line)
+        except ValueError as exc:
+            reasons.append(f"verification command {line!r} is refused: {exc}")
+    return commands
+
+
+def _check_gate(
+    commands: list[str], gate_commands: list[list[str]] | None, reasons: list[str]
+) -> None:
+    if not gate_commands:
+        return
+    plan_argvs = []
+    for line in commands:
+        try:
+            plan_argvs.append(tuple(gates.split_command(line)))
+        except ValueError:
+            continue
+    missing = [argv for argv in gate_commands if tuple(argv) not in set(plan_argvs)]
+    if missing:
+        shown = "; ".join(" ".join(argv) for argv in missing[:5])
+        reasons.append(
+            "the verification list omits inherited checks of the actual stack base's "
+            f"project gate ({len(missing)} missing, first: {shown}); retain every "
+            "inherited check, including earlier stack tasks' test files"
+        )
+
+
+def _check_stack(text: str, stack: dict | None, reasons: list[str]) -> None:
+    if not stack:
+        return
+    satisfied = stack.get("satisfied", [])
+    for prerequisite in satisfied:
+        pattern = re.compile(
+            rf"\b{re.escape(prerequisite)}\b[^.\n]{{0,80}}\bmissing\b"
+            rf"|\bmissing\b[^.\n]{{0,80}}\b{re.escape(prerequisite)}\b",
+            re.IGNORECASE,
+        )
+        if pattern.search(text):
+            reasons.append(
+                f"the plan marks the declared earlier stack prerequisite "
+                f"{prerequisite!r} as missing; the dependency manifest marks it "
+                "satisfied (unmerged on this checkout is not missing) — do not dismiss "
+                "it, and do not dismiss genuine unresolved design questions either"
+            )
+
+
+def validate_plan(
+    text: str,
+    *,
+    gate_commands: list[list[str]] | None = None,
+    stack: dict | None = None,
+) -> Validation:
+    """Validate one candidate plan.md artifact; see the module docstring for the rules."""
+    reasons: list[str] = []
+    if not isinstance(text, str) or not text.strip():
+        return Validation(False, reasons=["the artifact is empty"])
+    if len(text) > MAX_ARTIFACT_CHARS:
+        return Validation(
+            False,
+            reasons=[
+                (
+                    f"the artifact is {len(text)} characters, over the "
+                    f"{MAX_ARTIFACT_CHARS} limit"
+                )
+            ],
+        )
+    for marker in TRUNCATION_MARKERS:
+        if marker.search(text):
+            reasons.append("the artifact contains a truncation marker; return it whole")
+            break
+    sections, _order = _check_sections(text, reasons)
+    blocked = False
+    risks = sections.get("Risks / open questions", [])
+    risk_lines = [line for line in risks if line.strip()]
+    if risk_lines and risk_lines[0].strip() == BLOCKED_LINE:
+        blocked = True
+    if (
+        not blocked
+        and risk_lines
+        and risk_lines[0].strip().upper().startswith("BLOCKED:")
+    ):
+        reasons.append(
+            "a BLOCKED line under Risks / open questions must be exactly `BLOCKED: yes` "
+            f"on the first line, got {risk_lines[0].strip()[:60]!r}"
+        )
+    goal = [line for line in sections.get("Goal", []) if line.strip()]
+    if not goal:
+        reasons.append("## Goal is empty")
+    _check_profiles(sections.get("Profiles", []), reasons)
+    _check_steps(sections.get("Steps", []), blocked, reasons)
+    _check_criteria(sections.get("Acceptance criteria", []), blocked, reasons)
+    commands = _check_commands(
+        sections.get("Verification commands", []), blocked, reasons
+    )
+    if not blocked and not commands:
+        reasons.append("a non-blocked plan needs verification commands")
+    # A legitimate BLOCKED: yes plan may leave the verification list empty — it does
+    # not invent ordinary completion criteria — so the inherited gate is not enforced
+    # against an empty list; a blocked plan that does list commands is still checked.
+    if not (blocked and not commands):
+        _check_gate(commands, gate_commands, reasons)
+    _check_stack(text, stack, reasons)
+    return Validation(not reasons, blocked=blocked, reasons=reasons, commands=commands)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate one plan.md file: `role_contracts.py <plan.md> [--gate <task-flow.md>]`.
+
+    Exit 0 when the artifact is valid (blocked or not), 1 when invalid, 2 on usage
+    errors. The verdict and the bounded reasons go to stdout; nothing is written.
+    """
+    import argparse
+    import json
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="Validate a task-flow plan.md artifact against the workflow contract"
+    )
+    parser.add_argument("plan", help="the plan.md file to validate")
+    parser.add_argument(
+        "--gate",
+        help="a .claude/task-flow.md whose Verification commands are the inherited gate",
+    )
+    args = parser.parse_args(argv)
+    try:
+        text = Path(args.plan).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"role_contracts.py: cannot read {args.plan}: {exc}", file=sys.stderr)
+        return 2
+    gate_commands = None
+    if args.gate:
+        try:
+            gate_text = Path(args.gate).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"role_contracts.py: cannot read {args.gate}: {exc}", file=sys.stderr)
+            return 2
+        try:
+            gate_commands = _gate_argvs(gate_text)
+        except ValueError as exc:
+            print(
+                f"role_contracts.py: {args.gate}: refused command line: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+    verdict = validate_plan(text, gate_commands=gate_commands)
+    print(
+        json.dumps(
+            {
+                "ok": verdict.ok,
+                "blocked": verdict.blocked,
+                "reasons": verdict.reasons,
+                "commands": len(verdict.commands),
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0 if verdict.ok else 1
+
+
+def _gate_argvs(gate_md_text: str) -> list[list[str]]:
+    """The Verification commands block of a .claude/task-flow.md as argv lists."""
+    sections, _order = _sections(gate_md_text)
+    return [
+        gates.split_command(line)
+        for line in _command_lines(sections.get("Verification commands", []))
+    ]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

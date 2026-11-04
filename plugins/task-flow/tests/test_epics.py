@@ -1022,6 +1022,46 @@ class SpendTest(Fixture):
         out = self.out("status", ".", "demo")
         self.assertIn("- external USD: at least 1.50", out)
 
+    def test_status_usd_recomputed_from_invocation_ids_planner_included(self):
+        import json
+
+        self.run_md(
+            state="paused",
+            rows=(("1", "a", "-", "1000", "0"), ("2", "b", "a", "0", "0")),
+        )
+        task_dir = self.root / ".work" / "a"
+        # the planner's role-*.json counts into the task's External USD next to
+        # the implementer's impl-<n>.json, recomputed from the invocation ids
+        (task_dir / "role-planner-2026-01-01T00-00-00Z-ab12cd34.json").write_text(
+            json.dumps(
+                {"schema": "role-metrics/1", "role": "planner", "cost_usd": 0.5}
+            ),
+            encoding="utf-8",
+        )
+        (task_dir / "impl-1.json").write_text(
+            json.dumps({"profile": "p", "cost_usd": 1.5}), encoding="utf-8"
+        )
+        out = self.out("status", ".", "demo")
+        self.assertIn("- external USD: 2.00", out)
+        # idempotent across repeated status calls (a resume never double counts)
+        self.assertIn("- external USD: 2.00", self.out("status", ".", "demo"))
+
+    def test_status_usd_invocation_null_stays_unknown(self):
+        import json
+
+        self.run_md(
+            state="paused",
+            rows=(("1", "a", "-", "1000", "3.00"), ("2", "b", "a", "0", "0")),
+        )
+        (self.root / ".work" / "a" / "role-planner-x.json").write_text(
+            json.dumps(
+                {"schema": "role-metrics/1", "role": "planner", "cost_usd": None}
+            ),
+            encoding="utf-8",
+        )
+        out = self.out("status", ".", "demo")
+        self.assertIn("- external USD: at least 0.00", out)
+
     def test_retry_spend_is_counted_once_and_survives_unlink(self):
         self.run_md(
             state="paused",

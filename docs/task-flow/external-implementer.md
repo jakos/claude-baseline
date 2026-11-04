@@ -22,6 +22,45 @@ Mistral API has been exercised) — or on an agent CLI (`driver = "cli"`, see
 [Agent CLI driver](#agent-cli-driver-cli-codex)) — while Claude still plans, checks and
 reviews. A `models.toml` turns it on.
 
+## External planner (a producer role)
+
+The planner role can also name a profile (`[roles] planner = "<profile>"`, or a
+`--planner <profile>` override on one invocation of `task-plan`, `task-run`,
+`task-autopilot` or `task-epic run`). `scripts/role_run.py` then runs the same planner
+agent body and contract as the Claude subagent, but through a transport adapter: the
+model gets only `read_file`, `list_files`, `grep` and an argv-list `run_command` held to
+`rules.READ_ONLY_PROGRAMS` (checked with `scripts/rules.py` under the real
+`external-planner` role: read-only git subcommands and flags only, no `find`/`rg`
+action that deletes, executes, preprocesses or writes) — no write or edit tools, no
+shell syntax, no redirects, no interpreter execution, no arbitrary commands, and every
+resolved path and symlink, in the file tools and in every path-looking argv word alike,
+is contained to the selected repository roots. The runner validates the returned artifact
+with `scripts/role_contracts.py` against the plan.md contract and the actual stack base's
+verification gate, makes exactly one repair attempt on an invalid result, and atomically
+publishes only the validated `plan.md` (rejecting unsafe destinations and symlink
+escapes); exit 0 published, 3 a valid `BLOCKED: yes` plan, 1 validation/runtime
+exhaustion, 2 a usage/config/preflight refusal — 1 and 2 preserve the previous artifact
+bytes, phase, round and approval, and never fall back to Claude silently. A
+`driver = "cli"` producer profile must carry a verified `read_only_command` (today only
+`codex exec --sandbox read-only ... -o {last_message_file}`, with no `--full-auto`,
+approval bypass or `-c` override) and its fallbacks too; the final message is captured
+by the host, not written by the model. The read-only sandbox is the CLI's own boundary,
+not a task-flow guarantee: task-flow refuses unsupported or conflicting producer
+commands, but it does not claim complete isolation of every CLI setting or platform.
+
+Each invocation — successful, repaired or failed — writes exactly one bounded
+`role-planner-<invocation-id>.json` next to the task artifacts (kept at `/task-finish`;
+only scratch/progress is pruned), with the actual profile/model/billing, the
+attempt/retry/fallback chain, repair usage, timestamps/duration and nullable
+tokens/cost. A `driver = "cli"` subscription round's cost stays `unknown` (null), never
+`0`; known subtotals remain additive next to it. In an autopilot or epic run the totals
+are recomputed from these invocation ids on resume (idempotent), the planner's USD counts
+into each task's existing `External USD` cell, and `autopilot.py estimate` shows the
+per-stage Claude and external subtotals (`--planner-kind`). See
+[Configuration](configuration.md#external-planner) for examples and override/resume
+semantics, and the doctor's `## Stages` table for the method, model and billing of all
+five stages.
+
 ## Billing modes
 
 What `billing` changes at run time: who pays, and what a failure does. Only the effects
@@ -642,6 +681,34 @@ redacted from diagnostics, progress records, final reasons and the recorded comm
 - The provider decides a model's status: a model can be in public preview, renamed or
   retired without task-flow knowing. Check the provider's model list (`GET /v1/models`)
   and documentation before you set `model`, and give the profile a `fallback`.
+
+## Comparing planner variants manually (frozen cases)
+
+There is no paid or automated benchmark for the planner, and none is claimed here. To
+compare two planner configurations (e.g. the Claude subagent vs. an external profile)
+by hand, keep the comparison frozen and fair:
+
+1. Fix the case set: a handful of real past requests from this repository (their
+   `task.md` Goal/Context/Constraints), stored once, never edited between runs.
+2. Fix the implementer and the checker for every run — the same role configuration for
+   them in all variants, and the same verification commands (the plan's list must retain
+   the project gate's inherited checks, which `role_contracts.py` enforces).
+3. Fix the probes: run the same hidden checks on every produced `plan.md` — e.g. "every
+   acceptance criterion has a `Verify:` reference", "the verification list retains every
+   inherited check", "no step edits files outside its declared paths" — plus your own
+   acceptance of the plan quality.
+4. Repeat each variant at least twice (three times when the verdicts disagree) on the
+   frozen inputs, alternating the order, and record every run: profile, model, method,
+   turns, tokens, cost or `unknown`, duration, repairs, and the `role-*.json` /
+   `impl-*.json` metrics task-flow writes.
+5. Accept a variant only when it passes the hidden probes and your acceptance on every
+   repeat, and record costs as measured when known and `unknown` when not — never as 0.
+   A single run, or a run on inputs edited between variants, is not evidence.
+
+No paid runs are required for acceptance of this feature: the offline suites
+(`test_role_run.py`, `test_role_contracts.py`, `test_models.py`) cover the runner,
+validation and role resolution with fakes; the protocol above is for a human who wants a
+measured quality comparison.
 
 ## Rolling back
 
