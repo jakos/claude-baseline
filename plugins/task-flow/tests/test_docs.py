@@ -1209,5 +1209,59 @@ class RoutingDocsTest(unittest.TestCase):
                 self.assertIn(needle, evidence)
 
 
+class ExternalBacklogReviewDocsTest(unittest.TestCase):
+    def test_commands_configuration_and_routing_documented(self) -> None:
+        root = ROOT / "plugins/task-flow"
+        runner = (root / "scripts/role_run.py").read_text(encoding="utf-8")
+        orchestration = (root / "skills/workflow/orchestration.md").read_text(
+            encoding="utf-8"
+        )
+        configuration = (ROOT / "docs/task-flow/configuration.md").read_text(
+            encoding="utf-8"
+        )
+        template = tomllib.loads(
+            (root / "templates/models.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(template["gates"]["reviewer_independence"], "warn")
+        for flag in ("--run-dir", "--from-repo", "--round"):
+            self.assertIn(f'"{flag}"', runner)
+            self.assertIn(flag, orchestration)
+        for value in ("warn", "different-model", "different-provider"):
+            self.assertIn(value, configuration)
+            self.assertIn(
+                value, (root / "scripts/models.py").read_text(encoding="utf-8")
+            )
+        for phrase in (
+            "select backlog",
+            "select reviewer",
+            "goal-only",
+            "approval",
+            "never silently",
+            "budget-scope",
+        ):
+            self.assertIn(phrase.lower(), orchestration.lower())
+        for page in ("autopilot.md", "external-implementer.md"):
+            text = (ROOT / "docs/task-flow" / page).read_text(encoding="utf-8")
+            self.assertIn("```mermaid", text)
+            self.assertIn("backlog", text)
+            self.assertIn("reviewer", text)
+        trust = (ROOT / "docs/task-flow/external-implementer.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("not an OS-level", trust)
+        protocol = (root / "bench/reviewer-evaluation.md").read_text(encoding="utf-8")
+        for phrase in (
+            "implementation-defect",
+            "missing-acceptance",
+            "out-of-scope",
+            "clean-control",
+            "explicit user confirmation",
+            "Contract accepted",
+            "USD known / unknown",
+            "No authorized live reviewer comparison",
+        ):
+            self.assertIn(phrase, protocol)
+
+
 if __name__ == "__main__":
     unittest.main()

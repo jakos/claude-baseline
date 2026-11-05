@@ -124,10 +124,10 @@ subcommand resolves any role with `--override` (`models.py select <role> [--over
    line names the planner: `claude`, `claude:<model>`, or `planner <profile> (external,
    <method>/<model>): published plan.md` — recorded only when planning succeeded, so a
    failed or refused external run leaves `status.md` untouched. After a successful
-   external planner run, read `.work/<id>/role-planner-*.json` and add its `cost_usd`
-   to the task's `External USD` cell when the run table has the column (adding the
-   column with `0` everywhere when a cost must be recorded and it is absent); a null
-   cost writes `unknown` (sticky), exactly like an external implementer round.
+   external planner run, recompute the task's External USD from all invocation records
+   (`impl-*.json` and `role-*.json`), including reviewer usage. Add the column with 0
+   cells when needed. Null totals display unknown with known subtotals preserved in
+   reports; never increment a prior total on resume.
 4. **Approval gate.** Ask: approve / edit / cancel (with `AskUserQuestion` when
    available). Do not continue without an explicit approve. "Edit" means the user's
    changes go into `task.md` as constraints and the planner runs again.
@@ -230,9 +230,19 @@ current round is 0 (approved, no round run yet), run **Phase: baseline** instead
 1. Refuse when the current round is 0. Round 0 is the baseline and has no reviewer; tell
    the user to run `/task-flow:task-implement`.
 2. Refuse when `checks-<n>.md` for the current round n >= 1 does not exist.
-3. Phase `reviewing`. Run subagent `task-flow:reviewer` (its model as in "Choosing each
-   role's model"). Read the Verdict line of
-   `review-<n>.md` and set `last-verdict`.
+3. Resolve `models.py select reviewer --project <repo-root>`. Kind `claude`: set
+   phase `reviewing` and run `task-flow:reviewer` with the configured Claude model
+   override, or its frontmatter default. Kind `profile`: run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/role_run.py" --role reviewer --task-dir <abs .work/<id>> --project <repo-root> --worktree <abs worktree | none> --round <n>`.
+   The runner verifies current-round checks, base, complete inputs and
+   `gates.reviewer_independence` before contact. It excludes status Log, implementer
+   narratives and earlier reviews. It validates raw review Markdown and permits one
+   artifact repair. Exit 1 or 2: show the diagnostic and end the command without
+   changing phase, round or verdict; resume invokes the same role again. Never silently
+   fall back to Claude. Only exit 0 publishes a valid `review-<n>.md`: set phase
+   `reviewing`, read its Verdict and set `last-verdict`. Recompute task External USD
+   from all `impl-*.json` and `role-*.json` invocation records, including reviewer
+   repairs and failed billable attempts. Do not add previous totals again.
 
 ## The loop — /task-flow:task-run
 
@@ -287,6 +297,8 @@ and runs the unchanged loop above. The run lives in `.work/_autopilot/<run-id>/`
 - mode: semi | full
 - base: <branch the run starts from>
 - budget: <integer tokens> | none
+- budget-scope: claude | all
+- backlog-usd: <number> | unknown
 - planning-tokens: <integer> | unknown
 - continue-past: none | <task-id>, <task-id>
 - bootstrap: none | <task-id>
@@ -315,7 +327,7 @@ accepts either notation when reading) — or `unknown` (sticky) when an `impl-<n
 that should exist is missing or unreadable, **or when its `cost_usd` is null** (a
 `driver = "cli"` subscription round or unknown usage: do not add anything numerically and
 do not write `0` — write `unknown`; a later numeric round adds to the known subtotal and
-the run total is then reported `at least`). `budget` is Claude tokens. `bootstrap` names
+the run total is then reported `at least`). `budget` is tokens in `budget-scope` (absent means `claude`). `bootstrap` names
 the bootstrap task; it is row 1 and every other row depends on it directly. `source` is
 optional and absent means `backlog`; `tasks` marks a run built from an explicit
 `--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`, row 1
@@ -341,7 +353,8 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    `.work/.gitignore` as in Phase: new.
 2. **Gather.** Run id = 3–6 word kebab slug, `-2`, `-3` on collision. Create
    `.work/_autopilot/<run-id>/run.md` (state `gathering`, mode `semi` unless `--full`,
-   budget from `--budget` or `none`, `planning-tokens: 0`, `continue-past: none`,
+   budget from `--budget` or `none`, `budget-scope` from `--budget-scope claude|all`
+   or `claude`, `backlog-usd: 0`, `planning-tokens: 0`, `continue-past: none`,
    `bootstrap: none`, base = current branch). Resolve the roles once with
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
    (exit 2: show its stderr and end the command without changing `run.md` — a
@@ -350,17 +363,29 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    otherwise with today's 4 columns. From the user: write `requirements.md` from
    the argument text; if goal or scope is unclear, ask at most 3 messages of at most 4
    questions each, appending answers in the user's words, nothing invented. With
-   `--from-repo`: the backlog agent extends `requirements.md` from the repository (each
-   requirement cited; its model as in "Choosing each role's model"). Append the `inspect`
+   `--from-repo`: use the backlog selection and external command in Decompose below;
+   for kind `claude` the backlog agent extends requirements from cited repository sources. Append the `inspect`
    output to `requirements.md` under
    `## Repository`.
-3. **Decompose.** Run subagent `task-flow:backlog` (its model as in "Choosing each role's
-   model"), telling it `thin: yes|no` from
-   `inspect`. `BLOCKED: yes`: show the questions, append the answers to `requirements.md`,
-   run it again (both modes; the user is present before the loop). With `thin: yes` the
-   backlog's task 1 must be a bootstrap task that every later task depends on; if it is
-   not, run the backlog agent again once with that instruction, then stop with the problem
-   if it still is not.
+3. **Decompose.** Resolve `models.py select backlog --project <repo-root>`.
+   Kind `claude`: run `task-flow:backlog` (configured Claude model override or
+   frontmatter default), telling it `thin: yes|no` from inspect. Kind `profile`: run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/role_run.py" --role backlog --run-dir <abs .work/_autopilot/<run-id>> --project <repo-root> --worktree none`.
+   For `--from-repo`, use that command with `--from-repo` in Gather instead of calling
+   the Claude backlog agent: it gathers and decomposes in one invocation. Skip this
+   second decomposition when that validated pair already exists. Ordinary decomposition
+   preserves requirements.md and returns backlog Markdown. Repository gathering returns
+   the exact JSON envelope documented in workflow/SKILL.md; both members validate
+   before staged publication, with rollback on handled replacement failures. The host
+   resolves thinness and checks bootstrap dependencies before publication.
+   Exit 1 or 2: leave run state and task folders unchanged, show the diagnostic and
+   end the command; resume retries the external role, never Claude silently. Exit 3
+   (or Claude `BLOCKED: yes`): show questions and create no tasks; append user answers
+   to requirements and repeat. Exit 0: continue. Recompute run-level backlog USD from
+   `role-backlog-*.json`, including failures, repairs and fallbacks; write
+   `backlog-usd: <number | unknown>` in run.md and include the known subtotal in reports.
+   For Claude thin decomposition, check the bootstrap rules and permit one correction
+   attempt; do not create tasks from an invalid backlog.
 4. **Create and plan.** For each backlog task, in order, follow Phase: new without
    questions (id from the backlog, de-duplicated; `task.md` from its Goal/Context/
    Constraints plus a Context line naming the run and its dependencies; `status.md` with
@@ -390,7 +415,7 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    precondition, not a stop) and read the implementer's `kind` and the planner's `kind`.
    Show, per task, id, goal
    line and dependencies, marking the bootstrap task; then the output of
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind>`
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind> --budget-scope <persisted scope>`
    verbatim; the mode; and the sentence: estimates are coarse; the main session's own
    tokens are not counted; Claude cannot see your plan's session or weekly limit, check it
    with `/usage`.
@@ -410,12 +435,13 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    (exit 2: show its stderr and end the command without changing `run.md` — a
    precondition, not a stop) and read the implementer's `kind` and the planner's `kind`,
    then run
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind>`
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind> --budget-scope <persisted scope>`
    and obey it exactly; never pick another task or stop on your own judgment.
    If `next` refuses because a routing preview changed or is missing, repeat overview
    and the existing start gate (steps 5-6) before dispatch; preserve the existing
    `--auto` question behavior. Never refresh digest records after the gate silently. The breaker
-   counts Claude tokens only, so `--planner-kind` never changes its verdict.
+   defaults to Claude tokens. In `all` scope it includes reported external tokens and
+   retains conservative future stage estimates; pass the persisted `--budget-scope`.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
      `status.md` `base:` to the output of
      `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" base .work/_autopilot/<run-id> <id>`
@@ -430,17 +456,13 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
      `total_tokens` to the task's `Tokens used`; that column stays Claude subagents only,
      an external implementer round (Phase: implement, step 3d) adds nothing to it. After
      each external implementer round that exits 0, 1 or 3, read
-     `.work/<id>/impl-<n>.json` and add its `cost_usd` to the task's `External USD`
-     column, in plain decimal notation (6 decimal places are enough because
-     `implement.py` rounds `cost_usd` to 6; `autopilot.py` also accepts scientific
-     notation) (exit 2 adds nothing — a stale file from an earlier attempt may exist; if
-     the column is absent, add it to the header and every row with `0` first), and record
-     the History line `implementer <profile>: <cost_usd> USD external`. When that
-     `cost_usd` is **null** (a `driver = "cli"` subscription profile, or usage the CLI did
-     not report), skip the numeric addition: write `unknown` in the cell (sticky — later
-     numeric rounds still add to the known subtotal and the totals read `at least`) and
-     record the History line `implementer <profile>: unknown USD external (subscription
-     or unreported usage)`. If an external
+     `.work/<id>/impl-<n>.json` and recompute the task's External USD from all
+     implementation and role invocation records. Never add a prior total again on
+     resume. Include failed billable attempts, repairs and fallbacks. When the column
+     is absent, add it with 0 cells. Null totals write unknown and reports retain the
+     known subtotal. Record the actual implementer profile and measured or unknown
+     external USD in History. Apply the same recomputation after planner/reviewer
+     execution. If an external
      round ends with exit 1 or 2, set state `paused` (also with `--auto`), show the line
      and append the History line `paused: external implementer failed (<id>)`; do not run
      `next`. Otherwise append a History line to `run.md`, then run `next` again with the
@@ -510,7 +532,7 @@ after a failed external implementer round (exit 1 or 2; a defined rule, with and
 `--auto`, because `next` would return `run <id>` for the same task again). The no-commit
 question and the other Preconditions come before a run exists and are preconditions, not
 stops. The breaker has exactly the triggers of `autopilot.py next` (wrong direction,
-cannot finish, burn rate, budget — all four count Claude tokens only) and is evaluated
+cannot finish, burn rate, budget — token scope defaults to Claude, and all scope adds reported external tokens) and is evaluated
 only between tasks, never inside a task's run; `next` returns `run <id>` for a task
 already in progress.
 
@@ -549,7 +571,8 @@ All `epics.py` calls run from the repository root:
      failed, in-progress or unknown tasks are refused.
    - Goal-only (no `--tasks`): create the empty epic, then stage the decomposition in an
      ordinary autopilot planning folder (`.work/_autopilot/<run-id>/` with only
-     `requirements.md` written from the goal), invoke the existing `backlog` agent on it,
+     `requirements.md` written from the goal), use the configured backlog selection and
+     command from Decompose (kind `claude` retains the existing agent),
      show the resulting decomposition for approval, create the ordinary task folders with
      Phase: new, and attach them with `add`. **No creation path starts implementation.**
    - Explicit dependencies (including independent roots) are expressed by editing the
@@ -757,3 +780,21 @@ starting profile to `implement.py`; it validates the pin before model contact an
 publishes selection only after successful preflight. Actual fallback profiles and
 nullable costs remain in round evidence; never reset or double-count External USD
 because selection changed. A preflight refusal does not advance a round.
+
+## External role accounting and budget scope
+
+`task-autopilot` and `task-epic run` accept `--budget-scope claude|all`; persist it
+in run.md at creation, including prepared-task and epic runs. Resume keeps the stored
+scope; an explicit change updates the header and repeats the overview/start gate.
+Absent scope means `claude`. Pass the stored scope to `autopilot.py estimate` and
+`next` with `--budget-scope`. The script refuses conflicting scope flags.
+In `all`, sum reported external input and output tokens by invocation identity once,
+including backlog, planner, implementer and reviewer; cached tokens are already part
+of input. Retain conservative stage estimates for future external work. Unknown usage
+prevents asserting that a finite all-scope budget fits and stops before the next task.
+USD never becomes tokens. An active task always resumes before run-level checks.
+Report backlog USD separately at run level and include it in the overall external
+spend; reviewer USD belongs to its task. Recompute from invocation records rather than
+incrementing persisted totals. Preserve known subtotals alongside unknown totals.
+Claude tokens remain in planning-tokens and Tokens used; exclude all external stage
+usage from those cells. No changes to approval gates, round cap or no-progress rules.

@@ -440,9 +440,11 @@ declared_paths = 5
         self.assertEqual(profiles["mistral"]["fallback"], ["b"])
 
     def test_roles_values_validated(self):
-        # planner and implementer may name a profile; backlog and reviewer may not
-        self.assertRejected(BASE + '[roles]\nbacklog = "mistral"\n', "roles.backlog")
-        self.assertRejected(BASE + '[roles]\nreviewer = "mistral"\n', "roles.reviewer")
+        for role in ("backlog", "reviewer"):
+            self.project(BASE + f'[roles]\n{role} = "mistral"\n')
+            self.assertEqual(
+                models.resolve_role_profile(self.repo, role)["kind"], "profile"
+            )
         self.assertRejected(
             BASE + '[roles]\nimplementer = "missing"\n', "unknown profile"
         )
@@ -740,16 +742,42 @@ declared_paths = 5
             self.assertIn(key, text, f"template: the cli example must name {key}")
         self.assertEqual(set(raw["roles"]), set(models.ROLES))
         self.assertEqual(set(raw["gates"]), set(models.GATES_KEYS))
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+        self.assertEqual(
+            models.gates(self.repo),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
+        )
 
     def test_gates_default_timeout(self):
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
         self.assertEqual(
-            models.gates(None), {"command_timeout_seconds": 600}
+            models.gates(self.repo),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
+        )
+        self.assertEqual(
+            models.gates(None),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
         )  # user file only, absent
         self.user("[gates]\ncommand_timeout_seconds = 300\n")
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 300})
-        self.assertEqual(models.gates(None), {"command_timeout_seconds": 300})
+        self.assertEqual(
+            models.gates(self.repo),
+            {"command_timeout_seconds": 300, "reviewer_independence": "warn"},
+        )
+        self.assertEqual(
+            models.gates(None),
+            {"command_timeout_seconds": 300, "reviewer_independence": "warn"},
+        )
+
+    def test_independence_validation_and_precedence(self) -> None:
+        self.user('[gates]\nreviewer_independence = "different-model"\n')
+        self.assertEqual(
+            models.gates(self.repo)["reviewer_independence"], "different-model"
+        )
+        self.project('[gates]\nreviewer_independence = "different-provider"\n')
+        self.assertEqual(
+            models.gates(self.repo)["reviewer_independence"], "different-provider"
+        )
+        self.assertRejected(
+            '[gates]\nreviewer_independence = "none"\n', "gates.reviewer_independence"
+        )
 
     def test_gates_project_overrides_user(self):
         self.user("[gates]\ncommand_timeout_seconds = 300\n")
@@ -1212,10 +1240,12 @@ limit_patterns = ["rate limit reached"]
         # a free-form model or command is never accepted as an override
         with self.assertRaises(models.ConfigError):
             models.resolve_role_profile(self.repo, "planner", override="gpt-9")
-        # reviewer may not name a profile, configured or overridden
-        with self.assertRaises(models.ConfigError) as ctx:
-            models.resolve_role_profile(self.repo, "reviewer", override="mistral")
-        self.assertIn("may name a profile", str(ctx.exception))
+        self.assertEqual(
+            models.resolve_role_profile(self.repo, "reviewer", override="mistral")[
+                "kind"
+            ],
+            "profile",
+        )
         # a disabled profile is refused
         self.project(BASE + "enabled = false\n")
         with self.assertRaises(models.ConfigError) as ctx:

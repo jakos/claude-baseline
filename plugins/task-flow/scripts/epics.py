@@ -1122,6 +1122,21 @@ def cmd_link(args: argparse.Namespace) -> str:
             f"epic {args.epic_id!r} is already linked to run {epic.active_run!r}"
         )
     _run_md_source_epic(root, args.run_id, args.epic_id)
+    run_text = (work_dir(root) / "_autopilot" / args.run_id / "run.md").read_text(
+        encoding="utf-8"
+    )
+    scope = next(
+        (
+            line.partition(":")[2].strip()
+            for line in run_text.splitlines()
+            if line.startswith("- budget-scope:")
+        ),
+        "claude",
+    )
+    if scope not in ("claude", "all") or (
+        getattr(args, "budget_scope", None) is not None and args.budget_scope != scope
+    ):
+        raise EpicError("budget-scope must match the persisted run.md claude|all scope")
     epic.active_run = args.run_id
     epic.history.append(f"- {now_stamp()} linked — run {args.run_id}")
     save(root, epic)
@@ -1299,7 +1314,17 @@ def status_report(root: Path, epic: Epic) -> str:
         usd_cell = usd[task_id]
         if usd_cell in (None, "unknown"):
             unknown_usd = True
-            usd_show = "at least 0 (unknown)"
+            partial = (
+                role_runtime.invocation_usd(work_dir(root) / task_id)["total"][0]
+                if epic.active_run != "none"
+                else 0.0
+            )
+            known_usd += partial
+            usd_show = (
+                f"at least {partial:.6f} (unknown)"
+                if partial
+                else "at least 0 (unknown)"
+            )
         else:
             known_usd += float(usd_cell)
             usd_show = usd_cell
@@ -1318,6 +1343,9 @@ def status_report(root: Path, epic: Epic) -> str:
         )
         lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
     total = f"at least {known_tokens}" if unknown_tokens else str(known_tokens)
+    backlog_known, backlog_unknown = run_backlog_spend(root, epic)
+    known_usd += backlog_known
+    unknown_usd = unknown_usd or backlog_unknown
     usd_total = f"at least {known_usd:.2f}" if unknown_usd else f"{known_usd:.2f}"
     if epic.active_run != "none":
         planning_note = "unknown" if planning is None else str(planning)
@@ -1334,12 +1362,37 @@ def status_report(root: Path, epic: Epic) -> str:
         "## Spend",
         f"- tokens: {total} ({run_note})",
         f"- external USD: {usd_total}",
+        f"- backlog USD: {'at least ' if backlog_unknown else ''}{backlog_known:.6f}",
+        f"- budget-scope: {run_budget_scope(root, epic)}",
         "## Diagram",
         "```mermaid",
         mermaid_diagram(root, epic),
         "```",
     ]
     return "\n".join(lines) + "\n"
+
+
+def run_backlog_spend(root: Path, epic: Epic) -> tuple[float, bool]:
+    if epic.active_run == "none":
+        return 0.0, False
+    directory = work_dir(root) / "_autopilot" / epic.active_run
+    return role_runtime.invocation_usd(directory)["total"]
+
+
+def run_budget_scope(root: Path, epic: Epic) -> str:
+    if epic.active_run == "none":
+        return "claude"
+    text = (work_dir(root) / "_autopilot" / epic.active_run / "run.md").read_text(
+        encoding="utf-8"
+    )
+    return next(
+        (
+            line.partition(":")[2].strip()
+            for line in text.splitlines()
+            if line.startswith("- budget-scope:")
+        ),
+        "claude",
+    )
 
 
 def _status_field(root: Path, task_id: str, key: str) -> str:
@@ -1389,7 +1442,13 @@ def report_text(root: Path, epic: Epic) -> str:
             known_tokens += int(token_cell)
         if usd_cell in (None, "unknown"):
             unknown_usd = True
-            usd_show = "unknown"
+            partial = (
+                role_runtime.invocation_usd(work_dir(root) / task_id)["total"][0]
+                if epic.active_run != "none"
+                else 0.0
+            )
+            known_usd += partial
+            usd_show = f"at least {partial:.6f} (unknown)" if partial else "unknown"
         else:
             known_usd += float(usd_cell)
             usd_show = usd_cell
@@ -1399,6 +1458,9 @@ def report_text(root: Path, epic: Epic) -> str:
             f"{_status_field(root, task_id, 'last-verdict')} | {token_cell} | {usd_show} |"
         )
     total = f"at least {known_tokens}" if unknown_tokens else str(known_tokens)
+    backlog_known, backlog_unknown = run_backlog_spend(root, epic)
+    known_usd += backlog_known
+    unknown_usd = unknown_usd or backlog_unknown
     usd_total = f"at least {known_usd:.2f}" if unknown_usd else f"{known_usd:.2f}"
     if epic.active_run != "none":
         planning_note = "unknown" if planning is None else str(planning)
@@ -1421,6 +1483,8 @@ def report_text(root: Path, epic: Epic) -> str:
         "",
         f"- tokens: {total} ({run_note})",
         f"- external USD: {usd_total}",
+        f"- backlog USD: {'at least ' if backlog_unknown else ''}{backlog_known:.6f}",
+        f"- budget-scope: {run_budget_scope(root, epic)}",
         "",
         "## Failures and retries",
         "",
@@ -1619,6 +1683,7 @@ def build_parser() -> argparse.ArgumentParser:
     link = add("link", "set active-run to a run whose run.md declares source: epic")
     link.add_argument("epic_id")
     link.add_argument("run_id")
+    link.add_argument("--budget-scope", choices=("claude", "all"))
     link.set_defaults(func=cmd_link)
 
     unlink = add("unlink", "clear active-run")

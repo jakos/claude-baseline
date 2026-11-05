@@ -2,78 +2,25 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""Run ONE external producer role (the planner today) and publish its validated artifact.
+"""Run an external planner, backlog or reviewer through the trusted role runtime.
 
-This is the trusted runner of a role adapter: the model (a configured API or CLI
-profile) only reads the repository and returns artifact text; this script validates the
-text against scripts/role_contracts.py and atomically publishes only the validated
-plan.md under the root task directory. The agent body and contract are the same as the
-Claude planner's (agents/planner.md plus skills/workflow/SKILL.md); only the transport
-adapter differs — the model cannot write plan.md, the runner does.
+The host resolves complete inputs before contact and publishes only validated
+artifacts. Models return raw plan/review/backlog Markdown, or the exact JSON
+requirements/backlog envelope with --from-repo. The host owns publication,
+rollback, nullable invocation metrics and one bounded artifact repair.
 
-Usage:
-  uv run --script plugins/task-flow/scripts/role_run.py \\
-      --role planner --task-dir <absolute .work/<task-id>> --project <repo-root> \\
-      --worktree <path|none> [--profile <name>] [--invocation-id <id>] \\
-      [--stack-manifest <manifest.json>] [--heartbeat <seconds>]
-
-  --role            the producer role; only "planner" is implemented (exit 2 otherwise)
-  --task-dir        the task's .work/<task-id> folder (absolute); the repository root is
-                    the parent of the .work folder that contains it, --project overrides
-  --project         the repository root that holds .claude/ and the worktree
-  --worktree        the task's worktree, or `none` for the repository root
-  --profile         a [profiles.<name>] overriding [roles] planner for this invocation;
-                    it must name an enabled configured profile (models.py select)
-  --invocation-id   the metrics invocation id (default: a fresh UTC-stamped one)
-  --stack-manifest  a JSON file with the machine-built stack/dependency manifest
-                    ({"satisfied": [...]}); without it the manifest is built from
-                    status.md's base/branch fields only
-  --heartbeat       seconds between heartbeat lines on stderr (default 30; 0 disables)
-
-Preflight (exit 2, nothing sent, nothing written): the task dir, project, worktree and
-required readable inputs (task.md, status.md, the workflow contract, the agent body, the
-profile Conventions, the actual base's project gate, the stack manifest) resolve before
-any model contact; the role resolves to an enabled profile (never Claude — with no
-external planner configured the orchestrator runs the Claude subagent instead); a CLI
-producer profile and its fallbacks carry a verified read_only_command.
-
-Prompt: agents/planner.md's body, the applicable profile Conventions, the workflow
-contract (skills/workflow/SKILL.md), the project rules (.claude/task-flow.md of the
-worktree = the actual stack base), the task files (task.md, status.md), the base's
-Verification commands gate and the stack manifest, then the role transport adapter.
-
-Result handling: the model's final message is validated by role_contracts.validate_plan
-against the actual base's gate. On one invalid result exactly one repair attempt is made
-with the bounded validation reasons (one extra conversation turn on an API driver, one
-extra CLI process), then the run fails. Provider retries and fallback stay bounded
-independently and never silently select Claude. The validated artifact (blocked or not)
-is atomically written to <task-dir>/plan.md — rejecting unsafe destinations and symlink
-escapes — and prior artifact bytes, phase, round and approval are untouched on every
-failure path.
-
-stdout gets exactly one redacted summary line; progress goes to stderr. Exit codes:
-
-  0  published: <plan.md> (<profile>/<model>, <turns> turns, $<cost|unknown>)
-  3  blocked:   the published artifact is a valid BLOCKED: yes plan
-  1  failed:    <reason>  the model loop ran but did not finish or the artifact stayed
-                invalid after the single repair attempt
-  2  refused:   <reason>  bad arguments, configuration or a failed preflight
-
-Files written: <task-dir>/plan.md (only on a validated artifact) and
-<task-dir>/role-<role>-<invocation-id>.json — the bounded schema-versioned metrics of
-this invocation, including failed attempts, repair usage, nullable tokens/cost and the
-per-profile fallback chain; impl-<n>.json is never touched, and status.md is left to the
-orchestrator alone.
-
-Stdlib only (plus cli_driver, drivers, gates, models, role_contracts, role_runtime,
-rules from this directory), started by `uv run --script`, so it runs on macOS, Linux
-and Windows without Git Bash.
+Use --role planner --task-dir, --role backlog --run-dir [--from-repo], or
+--role reviewer --task-dir --round. All roles require --project and --worktree
+(path or none); --profile overrides configured selection for this invocation.
+Exit 0: published; 3: valid blocked artifact; 1: execution/validation failure;
+2: refused preflight. Status transitions belong to orchestration.
 """
 
 import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -86,9 +33,9 @@ import role_runtime
 from role_runtime import Refusal, log, one_line, redact_record, utc_now
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-SUPPORTED_ROLES = {"planner"}
-ROLE_TO_EXTERNAL = {"planner": "external-planner"}
-ARTIFACT_OF_ROLE = {"planner": "plan.md"}
+SUPPORTED_ROLES = {"planner", "backlog", "reviewer"}
+ROLE_TO_EXTERNAL = {role: f"external-{role}" for role in SUPPORTED_ROLES}
+ARTIFACT_OF_ROLE = {"planner": "plan.md", "backlog": "backlog.md"}
 
 ROLE_ADAPTER = """\
 ## Role runner adapter (this overrides the instructions above where they differ)
@@ -121,10 +68,13 @@ def parse_args(argv):
     parser = Parser(
         description="Run one external task-flow producer role and publish its artifact"
     )
-    parser.add_argument("--role", required=True, help="the producer role (planner)")
     parser.add_argument(
-        "--task-dir", required=True, help="absolute .work/<task-id> path"
+        "--role", required=True, help="the producer role (planner, backlog or reviewer)"
     )
+    parser.add_argument("--task-dir", help="absolute .work/<task-id> path")
+    parser.add_argument("--run-dir", help="absolute .work/_autopilot/<run-id> path")
+    parser.add_argument("--from-repo", action="store_true")
+    parser.add_argument("--round", type=int, help="review round, at least one")
     parser.add_argument("--project", required=True, help="the repository root")
     parser.add_argument("--worktree", required=True, help="the worktree, or 'none'")
     parser.add_argument("--profile", help="a profile overriding [roles] for this run")
@@ -243,12 +193,276 @@ class Context:
     """Everything preflight resolved; nothing here contacts a model."""
 
 
+MAX_REQUIRED_INPUT = 1_000_000
+
+
+def read_required(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    if (
+        "\0" in text
+        or len(text) > MAX_REQUIRED_INPUT
+        or any(m.search(text) for m in role_contracts.TRUNCATION_MARKERS)
+    ):
+        raise Refusal(f"incomplete or oversized required input: {path.name}")
+    return text
+
+
+def safe_destination(directory: Path, name: str) -> Path:
+    path = directory / name
+    if (
+        path.is_symlink()
+        or (path.exists() and not path.is_file())
+        or path.resolve().parent != directory.resolve()
+    ):
+        raise Refusal(f"unsafe artifact destination: {path}")
+    return path
+
+
+def git_input(worktree: Path, argv: list[str]) -> str:
+    result = subprocess.run(
+        ["git", "--no-pager", "-C", str(worktree), *argv],
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode:
+        raise Refusal(f"cannot resolve required git input: {argv[0]}")
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeError as exc:
+        raise Refusal("required git input is not readable UTF-8") from exc
+    if len(text) > MAX_REQUIRED_INPUT:
+        raise Refusal("required git input exceeds the complete-input limit")
+    return text
+
+
+def prepare_read_role(args: argparse.Namespace) -> Context:
+    ctx = Context()
+    ctx.role = args.role
+    ctx.external_role = ROLE_TO_EXTERNAL[args.role]
+    ctx.repo_root = Path(args.project).resolve()
+    ctx.worktree = (
+        ctx.repo_root if args.worktree == "none" else Path(args.worktree).resolve()
+    )
+    if not ctx.repo_root.is_dir() or not ctx.worktree.is_dir():
+        raise Refusal("project and worktree must be existing directories")
+    if args.role == "backlog":
+        if not args.run_dir or args.task_dir or args.round is not None:
+            raise Refusal("backlog requires --run-dir, without --task-dir or --round")
+        raw_dir = Path(args.run_dir)
+        ctx.task_dir = raw_dir.resolve()
+        if (
+            raw_dir.is_symlink()
+            or ctx.task_dir.parent != ctx.repo_root / ".work" / "_autopilot"
+            or not ctx.task_dir.is_dir()
+        ):
+            raise Refusal(
+                "run directory must be .work/_autopilot/<run-id> inside project"
+            )
+        import autopilot
+
+        ctx.thin = "thin: yes" in autopilot.inspect(str(ctx.worktree)).splitlines()
+        ctx.from_repo = args.from_repo
+        requirements = safe_destination(ctx.task_dir, "requirements.md")
+        ctx.requirements = read_required(requirements) if requirements.exists() else ""
+        if not ctx.from_repo and not ctx.requirements.strip():
+            raise Refusal("ordinary decomposition requires non-empty requirements.md")
+        ctx.artifact_name = "backlog.md"
+        ctx.artifacts = (
+            ["requirements.md", "backlog.md"] if ctx.from_repo else ["backlog.md"]
+        )
+        ctx.inputs = [
+            ("requirements.md", ctx.requirements),
+            ("repository inspection", f"thin: {'yes' if ctx.thin else 'no'}"),
+        ]
+    else:
+        if (
+            not args.task_dir
+            or args.run_dir
+            or args.from_repo
+            or args.round is None
+            or args.round < 1
+        ):
+            raise Refusal("reviewer requires --task-dir and --round >= 1")
+        raw_dir = Path(args.task_dir)
+        ctx.task_dir = raw_dir.resolve()
+        if (
+            raw_dir.is_symlink()
+            or ctx.task_dir.parent != ctx.repo_root / ".work"
+            or not ctx.task_dir.is_dir()
+        ):
+            raise Refusal("task directory must be .work/<task-id> inside project")
+        status = read_required(ctx.task_dir / "status.md")
+        ctx.round = args.round
+        if header_field(status, "round") != str(args.round):
+            raise Refusal("requested round does not match status round")
+        selected_worktree = header_field(status, "worktree")
+        if selected_worktree is None:
+            raise Refusal("status must declare the worktree")
+        expected_worktree = (
+            ctx.repo_root
+            if selected_worktree == "none"
+            else (ctx.repo_root / selected_worktree).resolve()
+        )
+        if expected_worktree != ctx.worktree:
+            raise Refusal("worktree does not match status")
+        base = header_field(status, "base")
+        if not base or base.startswith("-"):
+            raise Refusal("status has no resolvable base")
+        git_input(ctx.worktree, ["rev-parse", "--verify", f"{base}^{{commit}}"])
+        ctx.plan = read_required(ctx.task_dir / "plan.md")
+        verdict = role_contracts.validate_plan(ctx.plan)
+        if not verdict.ok or verdict.blocked:
+            raise Refusal(
+                "review requires a valid non-blocked plan: "
+                + "; ".join(verdict.reasons)
+            )
+        checks = read_required(ctx.task_dir / f"checks-{args.round}.md")
+        baseline_path = ctx.task_dir / "checks-0.md"
+        baseline = read_required(baseline_path) if baseline_path.exists() else None
+        try:
+            ctx.current_checks = role_contracts.parse_checks(
+                checks, round_number=args.round, commands=verdict.commands
+            )
+            ctx.baseline_checks = (
+                role_contracts.parse_checks(
+                    baseline, round_number=0, commands=verdict.commands
+                )
+                if baseline
+                else None
+            )
+        except ValueError as exc:
+            raise Refusal(f"insufficient check evidence: {exc}") from exc
+        diff = git_input(
+            ctx.worktree, ["diff", "--no-ext-diff", "--no-textconv", base, "--"]
+        )
+        touched = git_input(
+            ctx.worktree, ["diff", "--name-only", "-z", base, "--"]
+        ).split("\0")
+        untracked = git_input(
+            ctx.worktree, ["ls-files", "--others", "--exclude-standard", "-z"]
+        ).split("\0")
+        paths = sorted(set(filter(None, touched + untracked)))
+        ctx.inputs = [("plan.md", ctx.plan), (f"checks-{args.round}.md", checks)]
+        if baseline is not None:
+            ctx.inputs.append(("checks-0.md", baseline))
+        ctx.inputs.extend([("base diff", diff), ("changed files", "\n".join(paths))])
+        for name in paths:
+            path = ctx.worktree / name
+            resolved = path.resolve()
+            if (
+                role_runtime.review_excluded(path.relative_to(ctx.worktree))
+                or not resolved.is_relative_to(ctx.worktree)
+                or role_runtime.review_excluded(resolved.relative_to(ctx.worktree))
+            ):
+                raise Refusal(
+                    f"touched file is an excluded or unsafe review input: {name}"
+                )
+            content = (
+                read_required(path)
+                if path.exists()
+                else git_input(ctx.worktree, ["show", f"{base}:{name}"])
+            )
+            if "\0" in content or any(
+                marker.search(content) for marker in role_contracts.TRUNCATION_MARKERS
+            ):
+                raise Refusal(f"incomplete or binary required input: {name}")
+            ctx.inputs.append(
+                (
+                    f"full touched file: {name}"
+                    if path.exists()
+                    else f"deleted base file: {name}",
+                    content,
+                )
+            )
+        sections, _ = role_contracts._sections(ctx.plan)
+        names = [
+            line.partition(":")[0].strip("` ")
+            for line in role_contracts.unfenced(sections["Profiles"])
+            if line.strip()
+        ]
+        for name in names:
+            profile_path = PLUGIN_ROOT / "skills" / f"profile-{name}" / "SKILL.md"
+            profile_text = read_required(profile_path)
+            parts = profile_text.split("## Review checklist\n", 1)
+            if len(parts) != 2 or not parts[1].strip():
+                raise Refusal(f"missing Review checklist: {name}")
+            ctx.inputs.append((f"Profile {name} Review checklist", parts[1]))
+        ctx.artifact_name = f"review-{args.round}.md"
+        ctx.artifacts = [ctx.artifact_name]
+    ctx.task_id = ctx.task_dir.name
+    ctx.skill_text = read_required(PLUGIN_ROOT / "skills" / "workflow" / "SKILL.md")
+    ctx.agent_text = agent_body(args.role)
+    ctx.profile_sections = []
+    ctx.profile_override = args.profile
+    ctx.heartbeat = args.heartbeat
+    ctx.invocation_id = args.invocation_id or (
+        utc_now().replace("-", "").replace(":", "") + "-" + uuid.uuid4().hex[:8]
+    )
+    role_runtime.metrics_name(ctx.role, ctx.invocation_id)
+    ctx.started = time.monotonic()
+    ctx.started_at = utc_now()
+    for name in [
+        *ctx.artifacts,
+        role_runtime.metrics_name(ctx.role, ctx.invocation_id),
+    ]:
+        safe_destination(ctx.task_dir, name)
+    safe_destination(
+        ctx.task_dir,
+        "." + role_runtime.metrics_name(ctx.role, ctx.invocation_id) + ".tmp",
+    )
+    try:
+        ctx.profiles, _ = models.load(ctx.repo_root)
+        ctx.selection = models.resolve_role_profile(
+            ctx.repo_root, ctx.role, override=args.profile
+        )
+        ctx.independence = models.gates(ctx.repo_root)["reviewer_independence"]
+    except models.ConfigError as exc:
+        raise Refusal(str(exc)) from exc
+    if ctx.selection["kind"] != "profile":
+        raise Refusal(
+            "role is not configured for external execution; use its Claude agent"
+        )
+    ctx.profile_name = ctx.selection["profile"]
+    profile = ctx.profiles[ctx.profile_name]
+    if profile["api_key_env"] and not models.api_key(profile):
+        raise Refusal(f"{profile['api_key_env']} is not set")
+    if ctx.role == "backlog":
+        rules_path = ctx.worktree / ".claude" / "task-flow.md"
+        if rules_path.exists():
+            ctx.inputs.append(("project rules", read_required(rules_path)))
+    if ctx.role == "reviewer":
+        # Check the starting candidate now; fallbacks are checked immediately before use.
+        check_independence(ctx, ctx.profile_name)
+    if len(build_prompt(ctx)) + len(build_system(ctx)) > MAX_REQUIRED_INPUT:
+        raise Refusal("required review/backlog inputs exceed the complete-input limit")
+    return ctx
+
+
+def check_independence(ctx: Context, name: str) -> None:
+    if ctx.role != "reviewer":
+        return
+    problem = role_runtime.independence_problem(
+        ctx.task_dir, ctx.round, ctx.profiles[name], ctx.independence
+    )
+    if problem:
+        if ctx.independence != "warn":
+            raise Refusal(f"reviewer independence ({name}): {problem}")
+        log(f"warning: reviewer independence ({name}): {problem}")
+
+
 def prepare(args) -> Context:
+    if args.role in ("backlog", "reviewer"):
+        return prepare_read_role(args)
+    if not args.task_dir or args.run_dir or args.from_repo:
+        raise Refusal(
+            "planner requires --task-dir; --run-dir and --from-repo are backlog-only"
+        )
     ctx = Context()
     if args.role not in SUPPORTED_ROLES:
         raise Refusal(
             f"--role {args.role!r} is not supported by the external runner "
-            f"(supported: {sorted(SUPPORTED_ROLES)}); backlog and reviewer are a later task"
+            f"(supported: {sorted(SUPPORTED_ROLES)})"
         )
     ctx.role = args.role
     ctx.external_role = ROLE_TO_EXTERNAL[args.role]
@@ -343,6 +557,15 @@ def prepare(args) -> Context:
 
 def build_prompt(ctx: Context) -> str:
     """The whole user message: paths, the contract, rules, gate, manifest, task files."""
+    if ctx.role != "planner":
+        sections = [
+            f"Role: {ctx.role}\nArtifact directory: {ctx.task_dir}\nRepository root: {ctx.repo_root}\nWorktree: {ctx.worktree}",
+            ctx.skill_text,
+        ]
+        sections.extend(
+            f'<file label="{name}">\n{text}\n</file>' for name, text in ctx.inputs
+        )
+        return "\n\n".join(sections)
     sections = [
         f"Role: {ctx.role}",
         f"Task directory: {ctx.task_dir}",
@@ -383,7 +606,19 @@ def build_prompt(ctx: Context) -> str:
 def build_system(ctx: Context) -> str:
     parts = [ctx.agent_text]
     parts.extend(ctx.profile_sections)
-    parts.append(ROLE_ADAPTER.strip())
+    if ctx.role == "planner":
+        parts.append(ROLE_ADAPTER.strip())
+    else:
+        output = (
+            'a JSON object containing exactly "requirements.md" and "backlog.md", each a Markdown string'
+            if ctx.role == "backlog" and ctx.from_repo
+            else ctx.artifact_name + " as raw Markdown"
+        )
+        parts.append(
+            "## Role runner adapter (overrides conflicting agent instructions)\nYou are read-only. Never write artifacts or status. Return only "
+            + output
+            + ". The host validates and publishes; exactly one artifact repair is allowed. Do not wrap the response in a code fence. A blocked backlog has BLOCKED: yes followed by questions under Risks / open questions; do not create tasks. For repository gathering preserve existing requirements verbatim and cite each added bullet with file:line. Review only the supplied evidence and permitted source files; do not retrieve status, implementer narratives or prior reviews."
+        )
     return "\n\n".join(parts)
 
 
@@ -392,6 +627,34 @@ def build_system(ctx: Context) -> str:
 
 def validate(text: str, ctx: Context):
     """The validator hook: role_contracts against the actual base's gate and manifest."""
+    if ctx.role == "backlog":
+        try:
+            outputs = (
+                role_contracts.backlog_envelope(text)
+                if ctx.from_repo
+                else {"backlog.md": text}
+            )
+        except ValueError as exc:
+            return False, False, [str(exc)]
+        verdict = role_contracts.validate_backlog(
+            outputs["backlog.md"], run_id=ctx.task_id, thin=ctx.thin
+        )
+        if ctx.from_repo:
+            requirements = role_contracts.validate_requirements(
+                outputs["requirements.md"], original=ctx.requirements
+            )
+            verdict.reasons.extend(requirements.reasons)
+            verdict.ok = verdict.ok and requirements.ok
+        return verdict.ok, verdict.blocked, verdict.reasons
+    if ctx.role == "reviewer":
+        verdict = role_contracts.validate_review(
+            text,
+            round_number=ctx.round,
+            plan=ctx.plan,
+            current=ctx.current_checks,
+            baseline=ctx.baseline_checks,
+        )
+        return verdict.ok, False, verdict.reasons
     verdict = role_contracts.validate_plan(
         text, gate_commands=ctx.gate_commands, stack=ctx.stack
     )
@@ -405,6 +668,11 @@ def run_api(ctx: Context) -> role_runtime.SessionResult:
         ctx.external_role,
         ctx.profiles[ctx.profile_name]["command_timeout_seconds"],
     )
+    if ctx.role == "reviewer":
+        tools.review_inputs = {
+            (ctx.task_dir / name).resolve()
+            for name in ("plan.md", "checks-0.md", f"checks-{ctx.round}.md")
+        }
     session = role_runtime.RoleSession(
         ctx.profiles,
         ctx.profile_name,
@@ -413,6 +681,8 @@ def run_api(ctx: Context) -> role_runtime.SessionResult:
         tools,
         lambda text: validate(text, ctx),
         heartbeat=ctx.heartbeat,
+        candidate_check=lambda name: check_independence(ctx, name),
+        cli_once=lambda profile, extra: run_cli_once(ctx, profile, extra),
     )
     return session.run()
 
@@ -433,6 +703,7 @@ def run_cli(ctx: Context) -> role_runtime.SessionResult:
     ledger = role_runtime.UsageLedger(ctx.profiles)
     for index, name in enumerate(candidates):
         candidate = ctx.profiles[name]
+        check_independence(ctx, name)
         if index > 0:
             skip = None
             if not candidate["enabled"]:
@@ -520,8 +791,8 @@ def run_cli(ctx: Context) -> role_runtime.SessionResult:
             repairs += 1
             bounded = "\n".join(f"- {reason}" for reason in reasons[:10])
             extra = (
-                "\n\nYour previous answer was not a valid plan.md artifact. Fix exactly "
-                "these problems and return the complete, raw plan.md again (no code "
+                "\n\nYour previous answer was not a valid role artifact. Fix exactly "
+                "these problems and return the complete role artifact again (required format, no code "
                 f"fence around it):\n{bounded}\n"
             )
             try:
@@ -609,6 +880,43 @@ def _cli_result(ctx, status, reason, text, ledger, repairs, chain, profile_name=
 # ---------------------------------------------------------------------------- publish
 
 
+def publish_outputs(directory: Path, outputs: dict[str, str], primary: str) -> Path:
+    """Stage all validated bytes; roll back all handled replacement failures."""
+    originals = {}
+    staged = {}
+    try:
+        for name, text in outputs.items():
+            destination = safe_destination(directory, name)
+            originals[name] = destination.read_bytes() if destination.exists() else None
+            import tempfile
+
+            descriptor, raw = tempfile.mkstemp(prefix=".role-", dir=directory)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(text.replace("\r\n", "\n").encode("utf-8"))
+            staged[name] = Path(raw)
+        replaced = []
+        try:
+            for name in outputs:
+                os.replace(staged[name], safe_destination(directory, name))
+                replaced.append(name)
+        except (OSError, Refusal):
+            for name in reversed(replaced):
+                destination = directory / name
+                if originals[name] is None:
+                    destination.unlink()
+                else:
+                    destination.write_bytes(originals[name])
+            raise
+    except OSError as exc:
+        raise Refusal(
+            f"artifact publication failed; original outputs restored: {exc}"
+        ) from exc
+    finally:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
+    return directory / primary
+
+
 def publish(ctx: Context, text: str) -> Path:
     """Atomically replace only the validated artifact under the root task directory.
 
@@ -617,6 +925,13 @@ def publish(ctx: Context, text: str) -> Path:
     os.replace, so a crash never leaves a half-written artifact and a refusal leaves
     the existing bytes untouched.
     """
+    if ctx.role != "planner":
+        outputs = (
+            role_contracts.backlog_envelope(text)
+            if ctx.role == "backlog" and ctx.from_repo
+            else {ctx.artifact_name: text}
+        )
+        return publish_outputs(ctx.task_dir, outputs, ctx.artifact_name)
     destination = ctx.task_dir / ctx.artifact_name
     if destination.is_symlink():
         raise Refusal(f"refusing to publish through a symlink: {destination}")
@@ -644,6 +959,11 @@ def build_metrics(ctx: Context, result, ledger) -> dict:
         profiles_used.append(
             {
                 "profile": entry["profile"],
+                "model": ctx.profiles[entry["profile"]]["model"],
+                "method": "cli"
+                if ctx.profiles[entry["profile"]]["driver"] == "cli"
+                else "api",
+                "billing": ctx.profiles[entry["profile"]]["billing"],
                 "outcome": entry["outcome"],
                 "reason": entry.get("reason"),
                 "retries": entry.get("retries", []),
@@ -655,6 +975,7 @@ def build_metrics(ctx: Context, result, ledger) -> dict:
         "role": ctx.role,
         "invocation_id": ctx.invocation_id,
         "task_id": ctx.task_id,
+        "round": getattr(ctx, "round", None),
         "artifact": ctx.artifact_name,
         "selection": {
             "profile": ctx.selection["profile"],
@@ -673,6 +994,7 @@ def build_metrics(ctx: Context, result, ledger) -> dict:
         "duration_seconds": round(time.monotonic() - ctx.started, 3),
         "profiles": profiles_used,
         "tokens": tokens,
+        "tokens_known": ledger.tokens_known() if ledger is not None else None,
         "cost_usd": ledger.cost() if ledger is not None else None,
         "cost_known_usd": ledger.cost_known() if ledger is not None else 0.0,
     }
@@ -706,13 +1028,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refused: cannot read an input: {exc}", file=sys.stderr)
         return 2
 
-    profile = ctx.profiles[ctx.profile_name]
     try:
-        if profile["driver"] == "cli":
-            result = run_cli(ctx)
-        else:
-            result = run_api(ctx)
-    except role_runtime.Fatal as exc:
+        result = run_api(ctx)
+    except (role_runtime.Fatal, Refusal) as exc:
         result = role_runtime.SessionResult("failed", str(exc), None, [], 0, 0, None)
     except (OSError, UnicodeDecodeError) as exc:
         result = role_runtime.SessionResult(
@@ -723,7 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
     record = build_metrics(ctx, result, ledger)
     try:
         role_runtime.write_role_metrics(ctx.task_dir, record)
-    except Refusal as exc:
+    except (Refusal, OSError) as exc:
         print(f"failed: cannot write role metrics: {exc}", file=sys.stderr)
         return 1
 
@@ -732,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         destination = publish(ctx, result.text or "")
-    except Refusal as exc:
+    except (Refusal, OSError) as exc:
         print(f"failed: {exc}", file=sys.stderr)
         return 1
     summary = (

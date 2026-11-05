@@ -544,6 +544,12 @@ class StageTableTest(DoctorTest):
         self.assertEqual(by_stage["reviewer"][2], "opus (agent frontmatter default)")
         self.assertEqual(by_stage["backlog"][2], "opus (agent frontmatter default)")
 
+    def test_external_backlog_and_reviewer_stage_rows(self) -> None:
+        rows = self.rows(STAGE_TOML + 'reviewer = "mistral"\nbacklog = "codex"\n')
+        self.assertIn(("reviewer", "api", "mistral-large", "api"), rows)
+        self.assertIn(("backlog", "cli", "codex-model", "subscription"), rows)
+        self.assertIn(("reviewer fallback backup", "api", "mistral-small", "api"), rows)
+
     def test_claude_model_suffix_and_script_checker(self):
         rows = self.rows('[roles]\nplanner = "claude:haiku"\nchecker = "script"\n')
         by_stage = {r[0]: r for r in rows}

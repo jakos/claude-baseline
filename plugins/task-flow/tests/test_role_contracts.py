@@ -421,5 +421,290 @@ class FencedDeclarationTest(unittest.TestCase):
         self.assertTrue(result.ok, result.reasons)
 
 
+VALID_BACKLOG = """# Backlog: run-x
+## Tasks
+### 1. add-basic-feature
+- depends-on: -
+#### Goal
+Implement the requirement.
+#### Context
+requirements.md supplies the request.
+#### Constraints
+Use stdlib.
+## Risks / open questions
+none
+"""
+
+REVIEW_PLAN = """# Plan: example
+## Goal
+Implement feature(value) to add one for every integer, including negative input.
+## Context
+A fixture.
+## Profiles
+python: src/x.py
+## Steps
+1. Implement feature.
+## Acceptance criteria
+AC1: feature(0) returns 1 and feature(-2) returns -1. Verify: test_feature
+## Verification commands
+```
+python test_feature.py
+```
+## Project rules
+None.
+## Out of scope
+Everything else.
+## Risks / open questions
+None.
+"""
+
+VALID_REVIEW = """# Review: round 1
+## Acceptance criteria
+| AC | Result | Evidence |
+| --- | --- | --- |
+| AC1 | PASS | test_feature passed in checks-1 |
+## Pre-existing failures
+none
+## Findings
+none
+## Scope
+none
+## Verdict: APPROVED
+## Fix list
+none
+"""
+
+
+def checks_fixture(
+    round_number: int = 1,
+    result: str = "PASS",
+    evidence: str = "test_feature: AssertionError",
+) -> str:
+    return (
+        f"# Checks: round {round_number}\n\n"
+        f"| # | Command | Result | Exit | Duration |\n| --- | --- | --- | --- | --- |\n"
+        f"| 1 | `python test_feature.py` | {result} | {0 if result == 'PASS' else 1} | 1s |\n"
+        "## Failures\n"
+        + (
+            "none\n"
+            if result == "PASS"
+            else f"### 1. `python test_feature.py`\n{evidence}\n"
+        )
+        + "## Not run\nnone\n"
+    )
+
+
+class BacklogContractTest(unittest.TestCase):
+    def verdict(self, text: str, thin: bool = False) -> role_contracts.Validation:
+        return role_contracts.validate_backlog(text, run_id="run-x", thin=thin)
+
+    def test_valid_blocked_and_bootstrap(self) -> None:
+        self.assertTrue(self.verdict(VALID_BACKLOG))
+        blocked = "# Backlog: run-x\n## Tasks\n## Risks / open questions\nBLOCKED: yes\nWhich interface?\n"
+        self.assertTrue(self.verdict(blocked).blocked)
+        bootstrap = VALID_BACKLOG.replace(
+            "add-basic-feature", "bootstrap-project"
+        ).replace(
+            "requirements.md supplies the request.",
+            "requirements.md; dev-baseline:project-bootstrap is optional.",
+        )
+        self.assertTrue(self.verdict(bootstrap, True))
+        self.assertFalse(self.verdict(bootstrap))
+        self.assertFalse(self.verdict(VALID_BACKLOG, True))
+
+    def test_malformed_backlogs(self) -> None:
+        mutations = [
+            VALID_BACKLOG.replace("run-x", "other"),
+            VALID_BACKLOG.replace("### 1.", "### 2."),
+            VALID_BACKLOG.replace("add-basic-feature", "../escape"),
+            VALID_BACKLOG.replace("depends-on: -", "depends-on: later-task"),
+            VALID_BACKLOG.replace("#### Context", "#### Details"),
+            VALID_BACKLOG.replace("## Tasks", "# Extra title\n## Tasks"),
+            VALID_BACKLOG.replace("Use stdlib.", ""),
+            VALID_BACKLOG.replace(
+                "## Risks",
+                "### 2. add-basic-feature\n- depends-on: -\n#### Goal\nx\n#### Context\nx\n#### Constraints\nx\n## Risks",
+            ),
+        ]
+        for text in mutations:
+            with self.subTest(text=text):
+                self.assertFalse(self.verdict(text))
+        task = VALID_BACKLOG.split("### 1. ", 1)[1].split("## Risks", 1)[0]
+        eleven = (
+            "# Backlog: run-x\n## Tasks\n"
+            + "".join(
+                f"### {i}. " + task.replace("add-basic-feature", f"add-feature-{i}")
+                for i in range(1, 12)
+            )
+            + "## Risks / open questions\nnone\n"
+        )
+        self.assertFalse(self.verdict(eleven))
+
+    def test_exact_envelope_and_preserved_cited_requirements(self) -> None:
+        import json
+
+        data = {
+            "requirements.md": "# Requirements\n- Add feature (README.md:3).\n",
+            "backlog.md": VALID_BACKLOG,
+        }
+        self.assertEqual(role_contracts.backlog_envelope(json.dumps(data)), data)
+        for raw in (
+            "{}",
+            '{"backlog.md":"x"}',
+            '{"requirements.md":"x","backlog.md":"x","extra":"x"}',
+            '{"requirements.md":"x","requirements.md":"y","backlog.md":"x"}',
+        ):
+            with self.assertRaises(ValueError):
+                role_contracts.backlog_envelope(raw)
+        original = "User requirement.\n"
+        self.assertTrue(
+            role_contracts.validate_requirements(
+                original + "- Addition (README.md:2).\n", original=original
+            )
+        )
+        self.assertFalse(
+            role_contracts.validate_requirements(
+                "- Addition (README.md:2).\n", original=original
+            )
+        )
+        self.assertFalse(
+            role_contracts.validate_requirements(
+                original + "- Uncited.\n", original=original
+            )
+        )
+
+
+class ReviewContractTest(unittest.TestCase):
+    def checks(
+        self,
+        result: str = "PASS",
+        round_number: int = 1,
+        evidence: str = "test_feature: AssertionError",
+    ) -> role_contracts.CheckEvidence:
+        return role_contracts.parse_checks(
+            checks_fixture(round_number, result, evidence),
+            round_number=round_number,
+            commands=["python test_feature.py"],
+        )
+
+    def verdict(
+        self, text: str, current=None, baseline=None
+    ) -> role_contracts.Validation:
+        return role_contracts.validate_review(
+            text,
+            round_number=1,
+            plan=REVIEW_PLAN,
+            current=current or self.checks(),
+            baseline=baseline,
+        )
+
+    def test_approval_requires_consistent_complete_evidence(self) -> None:
+        self.assertTrue(self.verdict(VALID_REVIEW))
+        for text in [
+            VALID_REVIEW.replace("round 1", "round 2"),
+            VALID_REVIEW.replace(
+                "| AC1 | PASS | test_feature passed in checks-1 |", ""
+            ),
+            VALID_REVIEW.replace("| AC1 |", "| AC2 |"),
+            VALID_REVIEW.replace("test_feature passed in checks-1", ""),
+            VALID_REVIEW.replace("## Scope", "## Unknown"),
+            VALID_REVIEW.replace("| AC1 | PASS", "| AC1 | FAIL"),
+            VALID_REVIEW.replace(
+                "## Findings\nnone",
+                "## Findings\n1. [blocking] src/x.py:2 fails for negative input",
+            ),
+            VALID_REVIEW.replace(
+                "## Scope\nnone", "## Scope\nUnexpected unrelated file: src/y.py:1"
+            ),
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(self.verdict(text))
+        duplicate = VALID_REVIEW.replace(
+            "## Pre-existing", "| AC1 | PASS | test_feature |\n## Pre-existing"
+        )
+        self.assertFalse(self.verdict(duplicate))
+
+    def test_baseline_matching_and_insufficient_evidence(self) -> None:
+        failure = self.checks("FAIL")
+        self.assertFalse(self.verdict(VALID_REVIEW, failure))
+        baseline = self.checks("FAIL", 0)
+        review = VALID_REVIEW.replace(
+            "## Pre-existing failures\nnone",
+            "## Pre-existing failures\npython test_feature.py: test_feature: AssertionError matches checks-0",
+        )
+        self.assertTrue(self.verdict(review, failure, baseline))
+        self.assertFalse(
+            self.verdict(
+                review,
+                self.checks("ERROR", evidence="RuntimeError: new error"),
+                baseline,
+            )
+        )
+        for text in [
+            checks_fixture(result="FAIL", evidence=""),
+            checks_fixture().replace("| PASS |", "| WHAT |"),
+            checks_fixture().replace("test_feature.py` | PASS", "other.py` | PASS"),
+            checks_fixture().replace("round 1", "round 2"),
+        ]:
+            with self.assertRaises(ValueError):
+                role_contracts.parse_checks(
+                    text, round_number=1, commands=["python test_feature.py"]
+                )
+
+    def test_checker_rendered_commands_and_malformed_evidence(self) -> None:
+        lint = self.checks("FAIL", evidence="src/x.py:2:1: F401 unused import")
+        baseline_lint = self.checks("FAIL", 0, "src/x.py:2:1: F401 unused import")
+        self.assertEqual(
+            role_contracts.classify_checks(lint, baseline_lint),
+            ({("python", "test_feature.py")}, set()),
+        )
+        command = 'python test_feature.py "a|b" "`literal`"'
+        rendered = role_contracts.gates.render(
+            1,
+            "fixture",
+            600,
+            [
+                {
+                    "number": 1,
+                    "command": command,
+                    "status": "FAIL",
+                    "exit": 1,
+                    "duration": 1,
+                    "detail": ["test_feature: AssertionError"],
+                }
+            ],
+        )
+        evidence = role_contracts.parse_checks(
+            rendered, round_number=1, commands=[command]
+        )
+        self.assertEqual(len(evidence.failures), 1)
+        for text in (
+            checks_fixture().replace("| PASS | 0 |", "| PASS | 1 |"),
+            checks_fixture(result="FAIL", evidence="[no evidence]"),
+            checks_fixture(result="FAIL", evidence="1 failed"),
+            checks_fixture(result="ERROR", evidence="ERROR"),
+            checks_fixture(
+                result="FAIL", evidence="Traceback (most recent call last):"
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                role_contracts.parse_checks(
+                    text, round_number=1, commands=["python test_feature.py"]
+                )
+        self.assertFalse(
+            self.verdict(VALID_REVIEW.replace("## Findings\nnone", "## Findings\n"))
+        )
+
+    def test_changes_requested_requires_fix(self) -> None:
+        text = VALID_REVIEW.replace("| AC1 | PASS", "| AC1 | FAIL").replace(
+            "APPROVED", "CHANGES_REQUESTED"
+        )
+        self.assertFalse(self.verdict(text))
+        text = text.replace(
+            "## Fix list\nnone", "## Fix list\n1. Implement missing feature."
+        )
+        self.assertTrue(self.verdict(text))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,7 @@ prompt_extras = []                     # files whose contents are appended to th
 # billing = "subscription"              # saved login; no api_key_env needed
 # command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-"]
 # read_only_command = ["codex", "exec", "--sandbox", "read-only", "--json", "-o", "{last_message_file}", "-"]
-#                                     # separate from `command`: used instead of it by producer roles that must not write (the planner). Only a verified read-only argv passes — today `codex exec` with an explicit --sandbox read-only, no --full-auto / approval bypass / -c config override, and -o {last_message_file} so the host captures the final message. Required when this profile (or one of its fallbacks) serves the planner; never inferred from the profile name (default: none)
+#                                     # separate from `command`: used instead of it by producer roles that must not write (planner, backlog and reviewer). Only a verified read-only argv passes — today `codex exec` with an explicit --sandbox read-only, no --full-auto / approval bypass / -c config override, and -o {last_message_file} so the host captures the final message. Required when this profile (or one of its fallbacks) serves a producer role; never inferred from the profile name (default: none)
 # timeout_seconds = 600                 # the whole CLI run's deadline, seconds (default 600)
 # prompt_via = "stdin"                   # "stdin" (default), "file" (requires {prompt_file} in command) or "arg" (prompt appended as one final argument)
 # usage_format = "codex-jsonl"          # "codex-jsonl" sums turn.completed usage from stdout JSONL; "none" (default) leaves usage and cost unknown (null)
@@ -104,7 +104,7 @@ prompt_extras = []                     # files whose contents are appended to th
 #   "claude"                  run the Claude subagent; its agent file's model frontmatter applies
 #   "claude:opus|sonnet|haiku"  run the Claude subagent on that model, passed as the
 #                             subagent call's model argument
-#   a profile name            only valid for planner and implementer: planner runs
+#   a profile name            valid for planner, implementer, backlog and reviewer: planner runs
 #                             scripts/role_run.py on it, implementer runs scripts/implement.py
 #   "script"                  only valid for checker: run scripts/gates.py instead of the checker agent
 # The implementer key also accepts a table form instead of the scalar:
@@ -121,6 +121,7 @@ reviewer = "claude:opus"      # reviewer agent's frontmatter default: opus
 backlog = "claude:opus"       # backlog agent's frontmatter default: opus
 
 [gates]
+reviewer_independence = "warn"           # warn, different-model or different-provider
 command_timeout_seconds = 600           # per verification command run by scripts/gates.py (default 600)
 
 # Opt-in plan routing, disabled in the shipped template. Remove the scalar

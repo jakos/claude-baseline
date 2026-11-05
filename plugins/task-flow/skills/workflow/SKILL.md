@@ -29,7 +29,7 @@ chat history; everything another role needs is written to `.work/<task-id>/`.
   impl-<n>.progress.jsonl  per-turn trail of an external round (per parsed CLI event or
                    heartbeat record for driver "cli"); scratch, deleted at /task-finish
   role-<role>-<invocation-id>.json  metrics of one external producer-role invocation
-                   (the planner today), written by scripts/role_run.py next to the
+                   (planner, backlog and reviewer), written by scripts/role_run.py next to the
                    artifact; kept at /task-finish like impl-*.json, with `cost_usd`/
                    `tokens` null when unknown — unknown, never zero
   summary.md       final summary, when done or escalated
@@ -345,3 +345,24 @@ worktree, round and selected profile arguments while status is still round 0. Th
 validates preflight and publishes the pin without model contact before entering
 phase `implementing`. It distinguishes a fresh attempt from an already-started,
 unpinned round 1, which is refused rather than silently changing its model.
+
+## External backlog and reviewer artifacts
+
+External backlog uses `role_run.py --role backlog --run-dir <absolute run directory>`
+with the ordinary runner project/worktree arguments. Ordinary decomposition returns
+raw backlog Markdown in the existing agent heading hierarchy. With `--from-repo` the
+response is exactly a JSON object with only `requirements.md` and `backlog.md` keys,
+each a complete Markdown string; no duplicate members or wrapping fence. Existing
+requirements content is preserved verbatim, and every repository addition is a bullet
+with a file:line citation. Both artifacts validate before publication; handled failures
+restore both prior bytes or absence. Abrupt process termination between replacements
+is outside this pair guarantee. A valid blocked backlog creates no tasks.
+
+External reviewer uses `--role reviewer --task-dir <absolute task directory> --round <n>`
+with the ordinary runner project/worktree arguments. It returns raw review Markdown
+in the exact contract above. Empty Findings and Fix list use `none`. Evidence must
+cover every plan AC once. The host classifies check failures against bounded baseline
+evidence and rejects contradictory approvals. Only validated reviews are published;
+status transitions remain orchestration's responsibility. Each invocation writes
+`role-reviewer-<invocation-id>.json` next to task artifacts; backlog records live beside
+run artifacts as `role-backlog-<invocation-id>.json` and survive run cleanup.

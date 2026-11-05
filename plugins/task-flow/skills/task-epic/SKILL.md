@@ -1,7 +1,7 @@
 ---
 name: task-epic
 description: Create a persistent epic (one id for a group of tasks with declared dependencies), mutate its membership while idle, run or resume it through the ordinary autopilot loop, and inspect its status and report; retry of a failed member needs your explicit authorization.
-argument-hint: "<new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] | add <epic-id> --tasks <id>[,<id>...] [--depends-on <row-id>|-] | remove <epic-id> --tasks <id>[,<id>...] | run <epic-id> | status <epic-id> | retry <epic-id> <task-id> --authorized | sync-run <epic-id>> [--full | --semi] [--budget <tokens>] [--auto] [--planner <profile>]"
+argument-hint: "<new <epic-id> --title <title> --goal <goal> --base <branch> [--tasks <id>[,<id>...]] | add <epic-id> --tasks <id>[,<id>...] [--depends-on <row-id>|-] | remove <epic-id> --tasks <id>[,<id>...] | run <epic-id> | status <epic-id> | retry <epic-id> <task-id> --authorized | sync-run <epic-id>> [--full | --semi] [--budget <tokens>] [--budget-scope claude|all] [--auto] [--planner <profile>]"
 disable-model-invocation: true
 ---
 
@@ -65,3 +65,5 @@ no-progress rule apply per authorized attempt. `--auto` never grants the reset. 
 `--authorized` the retry refuses and changes nothing. Epics grant no new permissions: no
 push, PR, merge, deploy or worktree removal, and delivery preferences stay intent until
 `agent-pr-path` merges.
+
+Resolve configured backlog execution as in orchestration Decompose, including repository gathering and goal-only epic decomposition. Claude defaults and approval gates stay unchanged. Persist budget-scope (default claude); resume retains it. External artifacts must validate before phase advancement.

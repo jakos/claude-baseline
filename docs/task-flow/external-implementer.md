@@ -19,8 +19,7 @@ Optional and experimental: the implementer role can run on a per-token, non-Clau
 through `plugins/task-flow/scripts/implement.py` — Mistral or any OpenAI-compatible host,
 or Anthropic through the native Messages API via `scripts/drivers.py` (so far only the
 Mistral API has been exercised) — or on an agent CLI (`driver = "cli"`, see
-[Agent CLI driver](#agent-cli-driver-cli-codex)) — while Claude still plans, checks and
-reviews. A `models.toml` turns it on.
+[Agent CLI driver](#agent-cli-driver-cli-codex)) — while Claude plans, checks and reviews by default. A `models.toml` turns it on.
 
 ## External planner (a producer role)
 
@@ -72,7 +71,7 @@ flowchart TD
   subgraph subg["billing = subscription"]
     claude["Claude roles and the Claude subagent"]
     usage["at the plan limit Claude Code stops; check /usage"]
-    breaker["autopilot circuit breaker counts Claude tokens"]
+    breaker["autopilot token breaker uses persisted budget scope"]
     claude --> usage
     claude --> breaker
   end
@@ -773,3 +772,47 @@ worktree, round and selected profile arguments while status is still round 0. Th
 validates preflight and publishes the pin without model contact before entering
 phase `implementing`. It distinguishes a fresh attempt from an already-started,
 unpinned round 1, which is refused rather than silently changing its model.
+
+## Backlog and reviewer trust limits
+
+Configured external backlog and reviewer roles use `scripts/role_run.py` and the same
+agent contracts as Claude. No configuration changes the defaults. Backlog metrics live
+beside run artifacts as `role-backlog-<invocation-id>.json`; reviewer metrics live beside
+task artifacts as `role-reviewer-<invocation-id>.json`. Repairs, failed billable attempts
+and fallback usage belong to the same invocation. Run-level backlog USD is separate
+from task USD; reviewer USD joins its task. Totals are recomputed by invocation identity
+on resume, preserving known subtotals next to null/unknown totals.
+
+For repository gathering, the model returns exactly two JSON string members,
+`requirements.md` and `backlog.md`. Both validate before staging. Handled replacement
+failures restore the original bytes or absence of both outputs. Abrupt termination
+between replacements is outside that guarantee. Ordinary decomposition writes backlog
+only and preserves requirements. A blocked backlog creates no tasks.
+
+Review preflight requires a matching round >= 1, status worktree and base, valid plan,
+current checks and readable complete touched files. The prompt includes the base diff,
+changed-file list, full touched files (base contents for deletions), and declared profile
+Review checklists. Oversized, binary, unreadable or incomplete required inputs refuse
+before contact. API file and search tools exclude status Log, implementer narratives,
+previous reviews and git storage, including through resolved symlinks. API reviewer
+command execution is disabled to prevent command-based retrieval of excluded evidence.
+The supplied plan and checks remain readable. CLI read-only execution prevents writes
+but does not itself hide local files: excluded prompt material is not an OS-level
+confidentiality guarantee. A CLI may locate it independently through its own tools.
+
+Independence uses actual current-round metrics, never profile aliases or billing mode.
+Provider identity is conservative: API gateways and CLI metadata may be unverifiable.
+Strict settings refuse unknown identities; warn mode reports uncertainty or a match.
+A syntax validator can reject contradictory approval and malformed evidence; it cannot
+establish semantic defect detection. No external reviewer is recommended without
+recorded, authorized comparison results using the [evaluation protocol](../../plugins/task-flow/bench/reviewer-evaluation.md).
+
+```mermaid
+flowchart TD
+  select["Select configured backlog or reviewer"] --> preflight["Resolve complete inputs and read-only boundary"]
+  preflight --> identity["Reviewer candidate independence check"]
+  identity --> transport["Existing API or verified CLI transport"]
+  transport --> validate["Validate returned artifact; one repair"]
+  validate --> publish["Host publishes artifact and invocation metrics"]
+  validate -->|"invalid"| preserve["Preserve prior artifacts and phase"]
+```
