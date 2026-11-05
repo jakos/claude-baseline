@@ -302,6 +302,7 @@ class RoundFixture(unittest.TestCase):
         drop=(),
         cwd=None,
         extra=(),
+        check_head=True,
     ):
         cmd = self.round_cmd(round_no, profile, worktree, cwd, extra)
         done = subprocess.run(
@@ -313,8 +314,9 @@ class RoundFixture(unittest.TestCase):
             timeout=180,
             check=False,
         )
-        self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.head)
-        self.assertEqual(git(self.worktree, "rev-parse", "HEAD").strip(), self.head)
+        if check_head:
+            self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.head)
+            self.assertEqual(git(self.worktree, "rev-parse", "HEAD").strip(), self.head)
         return done
 
     def metrics(self, round_no=1):
@@ -372,6 +374,26 @@ class RoundFixture(unittest.TestCase):
             git(self.worktree, "diff", "--cached", "--name-only"), before_index, label
         )
         self.assertFalse(list(self.task.glob("impl-*.json")), label)
+
+    def test_root_scalar_implementer_wins_over_worktree_configuration(self) -> None:
+        server = self.server([reply(content="done")])
+        self.configure(
+            self.profile("fake", server) + '\n[roles]\nimplementer = "fake"\n'
+        )
+        directory = self.worktree / ".claude"
+        directory.mkdir()
+        (directory / "task-flow.models.toml").write_text(
+            '[roles]\nimplementer = "claude:sonnet"\n', encoding="utf-8"
+        )
+        self.write_task(
+            "status.md",
+            STATUS.replace("## History", f"- worktree: {self.worktree}\n## History"),
+        )
+        done = self.run_round(profile=None)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(server.requests), 1)
+        metrics = json.loads((self.task / "impl-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(metrics["profile"], "fake")
 
     # ------------------------------------------------------- observability
 
@@ -1776,6 +1798,742 @@ class AnthropicLoopTest(RoundFixture):
         status = (self.task / "status.md").read_text(encoding="utf-8")
         self.assertEqual(status, STATUS + "BLOCKED: plan is wrong\n")
         self.assertEqual(self.metrics()["status"], "blocked")
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class CliDriverTest(RoundFixture):
+    """The driver "cli" path of scripts/implement.py against fake CLI programs.
+
+    Each fake CLI is a Python script in the repository root (outside the worktree, so
+    staging never sees it) run with sys.executable; no real agent CLI, login,
+    credential or paid call is involved.
+    """
+
+    def fake_cli(self, name, body):
+        path = self.repo / name
+        path.write_text(body, encoding="utf-8", newline="")
+        return path
+
+    def cli_profile(self, name, fake, **overrides):
+        settings = {
+            "driver": "cli",
+            "model": f"{name}-model",
+            "billing": "subscription",
+            "command": [sys.executable, str(fake)],
+        }
+        settings.update(overrides)
+        lines = [f"[profiles.{name}]"]
+        lines += [f"{k} = {toml_value(v)}" for k, v in settings.items()]
+        return "\n".join(lines) + "\n"
+
+    def write_file_round(self, fake_body_extra=""):
+        """A fake CLI that reads the prompt on stdin, writes src/new.py, prints junk."""
+        prompt_out = self.repo / "prompt.txt"
+        fake = self.fake_cli(
+            "fake_cli.py",
+            "import sys, pathlib\n"
+            "prompt = sys.stdin.read()\n"
+            f"pathlib.Path({str(prompt_out)!r}).write_text(prompt, encoding='utf-8')\n"
+            "pathlib.Path('src/new.py').write_bytes(b'x = 1\\n')\n"
+            "print('lots of raw tool output')\n"
+            "print('more noise')\n" + fake_body_extra,
+        )
+        return fake
+
+    # ------------------------------------------------------------- happy path
+
+    def test_cli_round_writes_stages_logs_and_keeps_one_stdout_line(self):
+        fake = self.write_file_round()
+        self.configure(self.cli_profile("codex", fake))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual(
+            len(lines), 1, "raw CLI output never reaches the runner stdout"
+        )
+        self.assertRegex(
+            lines[0],
+            r"^ok: 1 files changed \(codex/codex-model, 1 turns, \$unknown\)$",
+        )
+        self.assertEqual((self.worktree / "src/new.py").read_bytes(), b"x = 1\n")
+        self.assertEqual(self.staged(), ["A\tsrc/new.py"])
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertEqual(status, STATUS + "round 1 implementer: src/new.py (A)\n")
+        metrics = self.metrics()
+        self.assertEqual(metrics["status"], "ok")
+        self.assertIsNone(metrics["tokens"])  # usage_format none: usage stays null
+        self.assertIsNone(metrics["cost_usd"])  # subscription: cost stays null
+        self.assertEqual(metrics["cost_known_usd"], 0.0)
+        self.assertIsNone(metrics["reasoning_tokens"])
+        self.assertEqual(
+            metrics["files_changed"], [{"path": "src/new.py", "status": "A"}]
+        )
+        self.assertEqual(metrics["cli"]["driver"], "cli")
+        self.assertEqual(metrics["cli"]["runs"][0]["command"][0], sys.executable)
+        self.assertTrue(metrics["cli"]["runs"][0]["command"][1].endswith("fake_cli.py"))
+        self.assertEqual(metrics["cli"]["runs"][0]["prompt_via"], "stdin")
+        self.assertEqual(metrics["cli"]["runs"][0]["billing"], "subscription")
+        self.assertFalse(metrics["cli"]["runs"][0]["usage_available"])
+        self.assertFalse(metrics["cli"]["usage_available"])
+        # the prompt was inlined but never persisted in the artifacts
+        prompt = (self.repo / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("task-flow: the shared contract", prompt)
+        self.assertIn(PLAN.strip(), prompt)
+        self.assertIn(STATUS.strip(), prompt)
+        self.assertIn("## CLI runner adapter", prompt)
+        self.assertNotIn(
+            "You run inside a script", prompt
+        )  # the API adapter is not used
+        # the implementer agent instructions are inlined (agents/implementer.md's body)
+        self.assertIn("You are task-flow's implementer", prompt)
+        self.assertIn("Return the change log lines.", prompt)
+        for profile in ("python", "docs"):
+            text = (PLUGIN / "skills" / f"profile-{profile}" / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            section = re.search(
+                r"^## Conventions\s*\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL
+            )
+            first = next(ln for ln in section.group(1).splitlines() if ln.strip())
+            self.assertIn(first, prompt)
+        for artifact in ("impl-1.json", "impl-1.progress.jsonl", "status.md"):
+            text = (self.task / artifact).read_text(encoding="utf-8")
+            self.assertNotIn("# Plan: demo", text, artifact)
+
+    def test_cli_round2_prompt_carries_the_review_fix_list(self):
+        prompt_out = self.repo / "prompt2.txt"
+        fake = self.fake_cli(
+            "fake_cli2.py",
+            "import sys, pathlib\n"
+            f"pathlib.Path({str(prompt_out)!r}).write_text(sys.stdin.read(), encoding='utf-8')\n"
+            "print('done')\n",
+        )
+        self.configure(self.cli_profile("codex", fake))
+        self.write_task("review-1.md", REVIEW1)
+        done = self.run_round(2, profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        prompt = (self.repo / "prompt2.txt").read_text(encoding="utf-8")
+        self.assertIn("Rename the helper in src/app.py.", prompt)
+        self.assertIn("Round: 2", prompt)
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertTrue(status.endswith("round 2 implementer: no files changed\n"))
+
+    def test_cli_file_and_arg_transports(self):
+        file_out = self.repo / "prompt-file.txt"
+        fake = self.fake_cli(
+            "fake_transport.py",
+            "import sys, pathlib\n"
+            "prompt = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+            f"pathlib.Path({str(file_out)!r}).write_text(prompt, encoding='utf-8')\n"
+            "print('file transport ok')\n",
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                fake,
+                prompt_via="file",
+                command=[sys.executable, str(fake), "{prompt_file}"],
+            )
+        )
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(PLAN.strip(), file_out.read_text(encoding="utf-8"))
+
+        arg_out = self.repo / "prompt-arg.txt"
+        fake_arg = self.fake_cli(
+            "fake_arg.py",
+            "import sys, pathlib\n"
+            f"pathlib.Path({str(arg_out)!r}).write_text(sys.argv[-1], encoding='utf-8')\n"
+            "print('arg transport ok')\n",
+        )
+        self.configure(self.cli_profile("codex", fake_arg, prompt_via="arg"))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        prompt = arg_out.read_text(encoding="utf-8")
+        self.assertIn(PLAN.strip(), prompt)
+        self.assertIn("## CLI runner adapter", prompt)
+
+    # ------------------------------------------------------------- env and secrets
+
+    def test_cli_env_is_allowlist_plus_pass_env_and_secrets_are_redacted(self):
+        report = self.repo / "env-report.json"
+        fake = self.fake_cli(
+            "fake_env.py",
+            "import json, os, sys, pathlib\n"
+            f"pathlib.Path({str(report)!r}).write_text(json.dumps(dict(os.environ)), encoding='utf-8')\n"
+            "print('key=' + os.environ.get('CODEX_API_KEY', ''))\n"
+            "sys.stderr.write('leak ' + os.environ.get('CODEX_API_KEY', '') + '\\n')\n"
+            "print('final with secret sk-codex-secret-123456 inside')\n",
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                fake,
+                billing="api",
+                api_key_env="CODEX_API_KEY",
+                pass_env=["CODEX_API_KEY"],
+            )
+        )
+        secrets = {
+            "CODEX_API_KEY": "sk-codex-secret-123456",
+            "MISTRAL_API_KEY": "!secret-mistral!",
+            "GH_TOKEN": "!secret-gh!",
+            "SENTINEL_SECRET": "!sentinel!",
+            "CODEX_HOME": str(self.home / "codex-home"),
+        }
+        done = self.run_round(profile="codex", env=secrets)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        child_env = json.loads(report.read_text(encoding="utf-8"))
+        self.assertIn("CODEX_API_KEY", child_env)  # pass_env
+        self.assertEqual(child_env["CODEX_API_KEY"], "sk-codex-secret-123456")
+        self.assertEqual(
+            child_env["CODEX_HOME"], str(self.home / "codex-home")
+        )  # allowlisted
+        for absent in ("MISTRAL_API_KEY", "GH_TOKEN", "SENTINEL_SECRET", "FAKE_KEY"):
+            self.assertNotIn(absent, child_env, absent)
+        self.assertIn("PATH", child_env)
+        # the parent environment is not modified by the round (the test process kept it)
+        self.assertNotIn("SENTINEL_SECRET", os.environ)
+        self.assertNotIn("CODEX_HOME", os.environ)
+        # persisted evidence is redacted
+        blob = "".join(
+            (self.task / name).read_text(encoding="utf-8")
+            for name in ("impl-1.json", "impl-1.progress.jsonl", "status.md")
+        )
+        blob += done.stdout + done.stderr
+        self.assertNotIn("sk-codex-secret-123456", blob)
+        self.assertNotIn("!sentinel!", blob)
+        self.assertEqual(len(done.stdout.splitlines()), 1)
+
+    def test_cli_jsonl_agent_message_secret_is_redacted_from_progress_and_metrics(self):
+        # a codex-jsonl event whose agent_message quotes the CODEX_API_KEY value
+        # must not reach impl-1.progress.jsonl or impl-1.json unredacted
+        secret = "sk-codex-secret-123456"
+        events = [
+            {
+                "type": "item.started",
+                "item": {
+                    "type": "agent_message",
+                    "text": f"step one with key {secret} inline",
+                },
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": f"used key {secret} ok"},
+            },
+        ]
+        fake = self.fake_cli(
+            "fake_leaky_jsonl.py",
+            "import json, sys, pathlib\n"
+            f"for e in {json.dumps(events)}:\n    print(json.dumps(e))\n"
+            "pathlib.Path('src/new.py').write_bytes(b'x = 1\\n')\n",
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                fake,
+                billing="api",
+                api_key_env="CODEX_API_KEY",
+                pass_env=["CODEX_API_KEY"],
+                usage_format="codex-jsonl",
+            )
+        )
+        done = self.run_round(profile="codex", env={"CODEX_API_KEY": secret})
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        blob = "".join(
+            (self.task / name).read_text(encoding="utf-8")
+            for name in ("impl-1.json", "impl-1.progress.jsonl", "status.md")
+        )
+        blob += done.stdout + done.stderr
+        self.assertNotIn(secret, blob)
+        records = self.progress()
+        messages = [record["message"] for record in records if "message" in record]
+        self.assertEqual(len(messages), 2)
+        for message in messages:
+            self.assertNotIn(secret, message)
+            self.assertIn("***", message)
+        metrics = self.metrics()
+        self.assertNotIn(secret, json.dumps(metrics))
+        self.assertEqual(metrics["tokens"], {"input": 10, "cached": 0, "output": 2})
+
+    # ------------------------------------------------------------- usage and cost
+
+    def test_cli_jsonl_usage_summed_and_api_cost_computed(self):
+        events = [
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 400,
+                    "output_tokens": 50,
+                    "reasoning_output_tokens": 20,
+                },
+            },
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 400,
+                    "output_tokens": 50,
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            },
+        ]
+        fake = self.fake_cli(
+            "fake_jsonl.py",
+            "import json, sys, pathlib\n"
+            f"for e in {json.dumps(events)}:\n    print(json.dumps(e))\n"
+            "pathlib.Path('src/new.py').write_bytes(b'x = 1\\n')\n",
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                fake,
+                billing="api",
+                api_key_env="CODEX_API_KEY",
+                pass_env=["CODEX_API_KEY"],
+                usage_format="codex-jsonl",
+                price_input_per_mtok=1.0,
+                price_cached_input_per_mtok=0.5,
+                price_output_per_mtok=2.0,
+            )
+        )
+        done = self.run_round(
+            profile="codex", env={"CODEX_API_KEY": "sk-codex-secret-123456"}
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$0.0018", done.stdout)  # (1200*1 + 800*0.5 + 100*2) / 1e6
+        metrics = self.metrics()
+        self.assertEqual(
+            metrics["tokens"], {"input": 2000, "cached": 800, "output": 100}
+        )
+        self.assertEqual(metrics["reasoning_tokens"], 20)
+        self.assertEqual(metrics["cache_tokens"], {"read": 800, "write": 0})
+        self.assertAlmostEqual(metrics["cost_usd"], 0.0018, places=9)
+        self.assertTrue(metrics["cli"]["usage_available"])
+        self.assertEqual(metrics["cli"]["runs"][0]["usage_format"], "codex-jsonl")
+        self.assertEqual(metrics["cli"]["runs"][0]["cost_usd"], 0.0018)
+        # one bounded progress record per structured event
+        records = self.progress()
+        self.assertEqual(
+            [r.get("event") for r in records],
+            ["turn.completed", "turn.completed", "item.completed"],
+        )
+        for record in records:
+            self.assertEqual(record["profile"], "codex")
+            self.assertIn("elapsed_seconds", record)
+
+    def test_cli_subscription_usage_known_but_cost_null(self):
+        events = [
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            },
+        ]
+        fake = self.fake_cli(
+            "fake_sub.py",
+            f"import json\nfor e in {json.dumps(events)}:\n    print(json.dumps(e))\n",
+        )
+        self.configure(self.cli_profile("codex", fake, usage_format="codex-jsonl"))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$unknown", done.stdout)
+        metrics = self.metrics()
+        self.assertEqual(metrics["tokens"], {"input": 10, "cached": 0, "output": 2})
+        self.assertIsNone(metrics["cost_usd"])
+        self.assertEqual(metrics["cost_known_usd"], 0.0)
+        self.assertTrue(metrics["cli"]["usage_available"])
+        self.assertIsNone(metrics["cli"]["runs"][0]["cost_usd"])
+
+    def test_cli_api_billing_without_prices_keeps_cost_unknown(self):
+        # billing "api" with no price_* key configured: reported usage gives a
+        # known token count, but the cost is unknown (null), never fabricated 0
+        events = [
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            },
+        ]
+        fake = self.fake_cli(
+            "fake_unpriced.py",
+            f"import json\nfor e in {json.dumps(events)}:\n    print(json.dumps(e))\n",
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                fake,
+                billing="api",
+                api_key_env="CODEX_API_KEY",
+                pass_env=["CODEX_API_KEY"],
+                usage_format="codex-jsonl",
+            )
+        )
+        done = self.run_round(
+            profile="codex", env={"CODEX_API_KEY": "sk-codex-secret-123456"}
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$unknown", done.stdout)
+        self.assertNotIn("$0.0000", done.stdout)
+        self.assertEqual(len(done.stdout.splitlines()), 1)
+        metrics = self.metrics()
+        self.assertEqual(metrics["tokens"], {"input": 10, "cached": 0, "output": 2})
+        self.assertIsNone(metrics["cost_usd"])
+        self.assertEqual(metrics["cost_known_usd"], 0.0)
+        self.assertTrue(metrics["cli"]["usage_available"])
+        self.assertEqual(metrics["cli"]["runs"][0]["billing"], "api")
+        self.assertIsNone(metrics["cli"]["runs"][0]["cost_usd"])
+
+    def test_cli_failure_event_fails_despite_exit_zero(self):
+        events = [
+            {"type": "turn.failed", "error": {"message": "boom"}},
+        ]
+        fake = self.fake_cli(
+            "fake_fail.py",
+            f"import json\nfor e in {json.dumps(events)}:\n    print(json.dumps(e))\n",
+        )
+        self.configure(self.cli_profile("codex", fake, usage_format="codex-jsonl"))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "))
+        self.assertIn("failure event", done.stdout)
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), STATUS)
+        self.assertEqual(self.metrics()["status"], "failed")
+
+    # ------------------------------------------------------------- outcomes
+
+    def test_cli_blocked_final_message_exits_3(self):
+        fake = self.fake_cli("fake_blocked.py", "print('BLOCKED: the plan is wrong')\n")
+        self.configure(self.cli_profile("codex", fake))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(done.stdout.strip(), "blocked: the plan is wrong")
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertEqual(status, STATUS + "BLOCKED: the plan is wrong\n")
+        self.assertEqual(self.metrics()["status"], "blocked")
+
+    def test_cli_timeout_and_nonzero_exit_fail_without_log(self):
+        sleeper = self.fake_cli("fake_sleep.py", "import time\ntime.sleep(30)\n")
+        self.configure(self.cli_profile("codex", sleeper, timeout_seconds=2))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "), done.stdout)
+        self.assertIn("timed out", done.stdout)
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), STATUS)
+        self.assertEqual(self.metrics()["status"], "failed")
+        self.assertTrue(self.metrics()["cli"]["runs"][0]["timed_out"])
+
+        bad = self.fake_cli(
+            "fake_exit7.py", "import sys\nsys.stderr.write('boom\\n')\nsys.exit(7)\n"
+        )
+        self.configure(self.cli_profile("codex", bad))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("exit code 7", done.stdout)
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), STATUS)
+
+    def test_cli_limit_pattern_and_missing_program_fall_back(self):
+        limited = self.fake_cli(
+            "fake_limited.py", "print('error: rate limit reached')\n"
+        )
+        self.configure(
+            self.cli_profile(
+                "codex",
+                limited,
+                limit_patterns=["rate limit reached"],
+                fallback=["backup"],
+            )
+            + self.profile("backup", self.server([reply(content="done")]))
+        )
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("backup/backup-model", done.stdout)
+        chain = [(c["profile"], c["outcome"]) for c in self.metrics()["fallback_chain"]]
+        self.assertEqual(chain, [("codex", "unavailable"), ("backup", "ok")])
+        self.assertIn("limit pattern", self.metrics()["fallback_chain"][0]["reason"])
+
+        self.configure(
+            self.cli_profile(
+                "codex", None, command=["no-such-cli-xyz"], fallback=["backup"]
+            )
+            + self.profile("backup", self.server([reply(content="done")]))
+        )
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("backup/backup-model", done.stdout)
+        self.assertIn(
+            "program not found", self.metrics()["fallback_chain"][0]["reason"]
+        )
+
+    def test_cli_all_unavailable_fails_never_claude(self):
+        self.configure(
+            self.cli_profile(
+                "codex", None, command=["no-such-cli-xyz"], fallback=["off"]
+            )
+            + self.profile("off", self.server([reply(content="done")]), enabled=False)
+        )
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "))
+        self.assertIn("all profiles unavailable", done.stdout)
+        self.assertEqual((self.task / "status.md").read_text(encoding="utf-8"), STATUS)
+
+    def test_cli_heartbeat_progress_while_no_structured_events(self):
+        fake = self.fake_cli(
+            "fake_slow.py",
+            "import time, pathlib\n"
+            "time.sleep(3)\n"
+            "pathlib.Path('src/new.py').write_bytes(b'x = 1\\n')\n"
+            "print('done')\n",
+        )
+        self.configure(self.cli_profile("codex", fake))
+        done = self.run_round(profile="codex", extra=("--heartbeat", "1"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.progress()
+        self.assertTrue(records)
+        self.assertTrue(all(r.get("heartbeat") for r in records), records)
+        for record in records:
+            self.assertEqual(record["profile"], "codex")
+            self.assertIn("elapsed_seconds", record)
+
+    # ------------------------------------------------------------- staging of a CLI commit
+
+    def test_cli_commit_on_task_branch_is_recovered_to_staged_changes(self):
+        (self.worktree / "notes.txt").write_text("n\n", encoding="utf-8", newline="")
+        # an initially staged change must survive the CLI's commit and recovery
+        (self.worktree / "src/app.py").write_text(
+            "def foo():\n    return 2\n", encoding="utf-8", newline=""
+        )
+        git(self.worktree, "add", "src/app.py")
+        fake = self.fake_cli(
+            "fake_commit.py",
+            "import subprocess, pathlib\n"
+            "def run(*args):\n    subprocess.run(args, check=True)\n"
+            "p = pathlib.Path('README.md')\n"
+            "p.write_text(p.read_text(encoding='utf-8') + 'cli\\n', encoding='utf-8')\n"
+            "pathlib.Path('gen.py').write_text('g = 1\\n', encoding='utf-8')\n"
+            "pathlib.Path('__pycache__').mkdir(exist_ok=True)\n"
+            "pathlib.Path('__pycache__/x.pyc').write_bytes(b'pyc')\n"
+            "pathlib.Path('notes.txt').write_text('touched\\n', encoding='utf-8')\n"
+            "run('git', 'init', '-q', 'nested')\n"
+            "pathlib.Path('nested/inner.txt').write_text('i\\n', encoding='utf-8')\n"
+            "run('git', '-C', 'nested', 'add', '-A')\n"
+            "run('git', '-C', 'nested', '-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'nested init')\n"
+            "run('git', 'add', '-A')\n"
+            "run('git', 'commit', '-q', '-m', 'cli commit')\n"
+            "print('committed')\n",
+        )
+        self.configure(self.cli_profile("codex", fake))
+        done = self.run_round(profile="codex")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # initial HEAD restored, no commit left behind
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD").strip(), self.head)
+        self.assertEqual(git(self.repo, "rev-list", "--all", "--count").strip(), "1")
+        # eligible result staged, exclusions reconciled, initial index kept
+        self.assertEqual(
+            sorted(self.staged()),
+            ["A\tgen.py", "M\tREADME.md", "M\tsrc/app.py"],
+        )
+        self.assertEqual(
+            self.metrics()["files_changed"],
+            [{"path": "README.md", "status": "M"}, {"path": "gen.py", "status": "A"}],
+        )
+        others = git(self.worktree, "ls-files", "--others").splitlines()
+        for kept_out in ("__pycache__/x.pyc", "notes.txt", "nested/"):
+            self.assertIn(kept_out, others)
+        self.assertFalse(git(self.worktree, "ls-files", "--cached", "nested").strip())
+        # working files untouched, including inside the excluded nested repository
+        self.assertTrue((self.worktree / "gen.py").is_file())
+        self.assertTrue((self.worktree / "__pycache__/x.pyc").is_file())
+        self.assertTrue((self.worktree / "notes.txt").is_file())
+        self.assertTrue((self.worktree / "nested" / "inner.txt").is_file())
+        self.assertIn(
+            "cli\n", (self.worktree / "README.md").read_text(encoding="utf-8")
+        )
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertIn("round 1 implementer: README.md (M)\n", status)
+        self.assertIn("round 1 implementer: gen.py (A)\n", status)
+
+    def test_cli_incompatible_history_fails_without_resetting(self):
+        fake = self.fake_cli(
+            "fake_branch.py",
+            "import subprocess\n"
+            "subprocess.run(['git', 'checkout', '-q', '-b', 'other-branch'], check=True)\n"
+            "import pathlib\n"
+            "pathlib.Path('gen.py').write_text('g = 1\\n', encoding='utf-8')\n"
+            "subprocess.run(['git', 'add', '-A'], check=True)\n"
+            "subprocess.run(['git', 'commit', '-q', '-m', 'x'], check=True)\n"
+            "print('done')\n",
+        )
+        self.configure(self.cli_profile("codex", fake))
+        done = self.run_round(profile="codex", check_head=False)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("failed: "), done.stdout)
+        self.assertIn("other-branch", done.stdout)  # recovery evidence in the reason
+        self.assertEqual(
+            git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+            "other-branch",
+        )
+        self.assertEqual(self.metrics()["status"], "failed")
+        self.assertIn("other-branch", self.metrics()["reason"])
+
+
+class RoutingTest(RoundFixture):
+    def routed(self, server: FakeServer) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.write_task("plan.md", VALID_PLAN)
+        self.write_task(
+            "status.md",
+            STATUS.replace("phase: implementing", "phase: baseline").replace(
+                "round: 1", "round: 0"
+            ),
+        )
+        self.configure(
+            self.profile("fake", server)
+            + '\n[roles.implementer]\ndefault = "fake"\n[roles.implementer.bands]\nS = "fake"\n[roles.implementer.thresholds.S]\nsteps = 2\ncriteria = 2\ncommands = 2\ndeclared_paths = 3\n[roles.implementer.thresholds.M]\nsteps = 4\ncriteria = 4\ncommands = 4\ndeclared_paths = 5\n'
+        )
+
+    def test_preflight_pins_before_entering_first_round_without_model_contact(
+        self,
+    ) -> None:
+        server = self.server([reply(content="done")])
+        self.routed(server)
+        done = self.run_round(extra=("--prepare-routing",))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(server.requests, [])
+        self.assertFalse((self.task / "impl-1.json").exists())
+        text = (self.task / "status.md").read_text(encoding="utf-8")
+        self.write_task(
+            "status.md",
+            text.replace("phase: baseline", "phase: implementing").replace(
+                "round: 0", "round: 1"
+            ),
+        )
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(server.requests), 1)
+        self.assertEqual(
+            (self.task / "status.md")
+            .read_text(encoding="utf-8")
+            .count("implementer-routing "),
+            1,
+        )
+
+    def test_routing_pin_resume_rounds_and_drift(self) -> None:
+        server = self.server([reply(content="done")] * 4)
+        self.routed(server)
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        routing = self.metrics()["routing"]
+        self.assertEqual(routing["band"], "S")
+        self.assertEqual(routing["selected_profile"], "fake")
+        status = (self.task / "status.md").read_text(encoding="utf-8")
+        self.assertEqual(status.count("implementer-routing "), 1)
+        self.assertEqual(self.run_round().returncode, 0)
+        self.write_task("review-1.md", REVIEW1)
+        self.assertEqual(self.run_round(round_no=2).returncode, 0)
+        self.assertEqual(self.metrics(2)["routing"], routing)
+        self.assertEqual(
+            (self.task / "status.md")
+            .read_text(encoding="utf-8")
+            .count("implementer-routing "),
+            1,
+        )
+        self.write_task(
+            "plan.md", (self.task / "plan.md").read_text(encoding="utf-8") + "\n"
+        )
+        before = (self.task / "status.md").read_bytes()
+        done = self.run_round()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("changed", done.stdout)
+        self.assertEqual(len(server.requests), 3)
+        self.assertEqual((self.task / "status.md").read_bytes(), before)
+
+    def test_routing_preflight_mismatch_and_missing_key_do_not_pin(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        before = (self.task / "status.md").read_bytes()
+        for options in [{"profile": "other"}, {"drop": ("FAKE_KEY",)}]:
+            done = self.run_round(**options)
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertEqual((self.task / "status.md").read_bytes(), before)
+        self.assertEqual(server.requests, [])
+
+    def test_routing_fallback_keeps_configured_starting_profile(self) -> None:
+        primary = self.server([503])
+        backup = self.server([reply(content="done")])
+        self.routed(primary)
+        path = self.repo / ".claude/task-flow.models.toml"
+        text = path.read_text(encoding="utf-8").replace(
+            "[roles.implementer]", 'fallback = ["backup"]\n[roles.implementer]', 1
+        )
+        self.configure(text + self.profile("backup", backup))
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        self.assertEqual(metrics["profile"], "backup")
+        self.assertEqual(metrics["routing"]["selected_profile"], "fake")
+        self.assertEqual(
+            [entry["profile"] for entry in metrics["fallback_chain"]],
+            ["fake", "backup"],
+        )
+
+    def test_routing_cli_keeps_nullable_usage(self) -> None:
+        self.routed(self.server([]))
+        path = self.repo / ".claude/task-flow.models.toml"
+        rules = (
+            "[roles.implementer]"
+            + path.read_text(encoding="utf-8").split("[roles.implementer]", 1)[1]
+        )
+        cli = (
+            '[profiles.fake]\ndriver = "cli"\nmodel = "cli-model"\nbilling = "subscription"\ncommand = '
+            + toml_value([sys.executable, "-c", "print('done')"])
+            + "\n"
+        )
+        self.configure(cli + rules)
+        done = self.run_round()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        metrics = self.metrics()
+        self.assertEqual(metrics["routing"]["selected_profile"], "fake")
+        self.assertEqual(metrics["cli"]["driver"], "cli")
+        self.assertIsNone(metrics["tokens"])
+        self.assertIsNone(metrics["cost_usd"])
+
+    def test_unreadable_routing_plan_is_resumable_without_mutation(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        before = (self.task / "status.md").read_bytes()
+        (self.task / "plan.md").write_bytes(b"\xff")
+        done = self.run_round()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("cannot read plan.md", done.stdout)
+        self.assertEqual((self.task / "status.md").read_bytes(), before)
+        self.assertEqual(server.requests, [])
+
+    def test_routing_started_unpinned_refused(self) -> None:
+        server = self.server([])
+        self.routed(server)
+        self.write_task("status.md", STATUS)
+        self.write_task("review-1.md", REVIEW1)
+        done = self.run_round(round_no=2)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("restart/retry", done.stdout)
+        self.assertEqual(server.requests, [])
 
 
 if __name__ == "__main__":

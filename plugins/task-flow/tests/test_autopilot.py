@@ -7,12 +7,14 @@
 Run: uv run --script plugins/task-flow/tests/test_autopilot.py
 """
 
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "autopilot.py"
@@ -39,6 +41,13 @@ class RunFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
+        home = self.root / "home"
+        home.mkdir()
+        environment = mock.patch.dict(
+            os.environ, {"HOME": str(home), "USERPROFILE": str(home)}
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
         self.run_dir = self.root / ".work" / "_autopilot" / "r1"
         self.run_dir.mkdir(parents=True)
 
@@ -452,6 +461,79 @@ class ExternalTest(RunFixture):
         )
         self.run_md(rows, budget="388000", planning="50000")
         self.assertEqual(self.out("next", "--implementer-kind", "profile"), "run b")
+
+
+class PlannerKindTest(RunFixture):
+    """The external planner: --planner-kind, per-stage subtotals, invocation-id USD."""
+
+    def test_planner_kind_profile_line_and_stage_subtotals(self):
+        self.run_md([("a", "-", "1000", "done")], planning="500")
+        out = self.out("estimate", "--planner-kind", "profile")
+        self.assertIn(
+            "planner: external profile; planning spends no Claude tokens; its cost "
+            "is measured in USD per invocation (role-planner-*.json), not estimated",
+            out,
+        )
+        self.assertIn(
+            "spent by stage (Claude tokens): planning: 500, rounds: 1000", out
+        )
+
+    def test_default_planner_kind_has_no_planner_line(self):
+        self.run_md([("a", "-", "0", "approved")])
+        out = self.out("estimate")
+        self.assertNotIn("planner:", out)
+        self.assertNotIn("spent by stage", out)
+        self.assertEqual(out, self.out("estimate", "--planner-kind", "claude"))
+
+    def test_next_accepts_planner_kind_and_still_counts_claude_only(self):
+        rows = [("a", "-", "10", "done"), ("b", "-", "0", "approved")]
+        self.run_md(rows, budget="150")
+        # the planner kind never changes the breaker: it counts Claude tokens only
+        self.assertEqual(
+            self.out("next", "--planner-kind", "profile"),
+            self.out("next"),
+        )
+        self.assertEqual(
+            self.out(
+                "next", "--planner-kind", "profile", "--implementer-kind", "profile"
+            ),
+            self.out("next", "--implementer-kind", "profile"),
+        )
+
+    def write_metrics(self, task_id, name, payload):
+        import json
+
+        path = self.root / ".work" / task_id / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_external_usd_recomputed_from_invocation_ids(self):
+        rows = [("a", "-", "1000", "done"), ("b", "a", "0", "approved")]
+        self.run_md(rows, usd=["0", "0"])
+        # the cells say 0, but the invocation files carry the real spend: the
+        # planner's role-*.json counts into the task's External USD total
+        self.write_metrics(
+            "a",
+            "role-planner-2026-01-01T00-00-00Z-ab12cd34.json",
+            {"schema": "role-metrics/1", "role": "planner", "cost_usd": 0.5},
+        )
+        self.write_metrics("a", "impl-1.json", {"profile": "p", "cost_usd": 1.25})
+        self.write_metrics("b", "impl-2.json", {"profile": "p", "cost_usd": None})
+        out = self.out("estimate")
+        self.assertIn("external spent: at least 1.75 USD", out)
+        self.assertIn(
+            "external by stage: implementer: at least 1.250000 USD, "
+            "planner: 0.500000 USD (from invocation ids)",
+            out,
+        )
+        # idempotent across a resume: the same files give the same totals
+        self.assertIn("external spent: at least 1.75 USD", self.out("estimate"))
+
+    def test_cells_used_when_no_invocation_files_exist(self):
+        rows = [("a", "-", "0", "approved"), ("b", "a", "0", "approved")]
+        self.run_md(rows, usd=["0.5", "unknown"])
+        out = self.out("estimate")
+        self.assertIn("external spent: at least 0.50 USD", out)
+        self.assertNotIn("external by stage", out)
 
 
 class MalformedTest(RunFixture):
@@ -1209,6 +1291,86 @@ class BaseTest(RunFixture):
         result = self.call_base("a")
         self.assertEqual((result.returncode, result.stdout), (2, b""))
         self.assertTrue(result.stderr)
+
+
+class RoutingTest(RunFixture):
+    def test_mixed_task_routing_preview(self) -> None:
+        from test_role_contracts import VALID_PLAN
+
+        self.run_md([("a", "-", "0", "planned"), ("b", "a", "0", "planned")])
+        config = self.root / ".claude" / "task-flow.models.toml"
+        config.parent.mkdir()
+        config.write_text(
+            '\n[profiles.small]\ndriver = "cli"\nmodel = "small"\nbilling = "subscription"\ncommand = ["fake"]\n[profiles.large]\ndriver = "cli"\nmodel = "large"\nbilling = "subscription"\ncommand = ["fake"]\n[roles.implementer]\ndefault = "large"\n[roles.implementer.bands]\nS = "small"\n[roles.implementer.thresholds.S]\nsteps = 2\ncriteria = 2\ncommands = 2\ndeclared_paths = 3\n[roles.implementer.thresholds.M]\nsteps = 4\ncriteria = 4\ncommands = 4\ndeclared_paths = 5\n',
+            encoding="utf-8",
+        )
+        self.task("a", "planned", VALID_PLAN)
+        self.task(
+            "b",
+            "planned",
+            VALID_PLAN.replace(
+                "2. Add a test (python).",
+                "2. Add a test (python).\n3. More work (python).",
+            ),
+        )
+        run = autopilot.load_run(str(self.run_dir), for_next=False)
+        self.assertEqual([t["implementer"] for t in run["tasks"]], ["small", "large"])
+        self.assertEqual([t["routing"]["band"] for t in run["tasks"]], ["S", "M"])
+        text = autopilot.estimate(run)
+        self.assertIn("routing a: preview; band S", text)
+        self.assertIn("routing b: preview; band M", text)
+        self.assertIn("declared_paths", text)
+        self.assertNotIn(
+            "implementer-routing ",
+            (self.root / ".work/a/status.md").read_text(encoding="utf-8"),
+        )
+
+        # The orchestrator copies estimate's read-only preview records into the
+        # run History at the overview, before the existing approval gate.
+        for task_id in ("a", "b"):
+            path = self.root / ".work" / task_id / "status.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "phase: planned", "phase: approved"
+                ),
+                encoding="utf-8",
+            )
+        with self.assertRaisesRegex(autopilot.Refusal, "overview/start gate"):
+            autopilot.load_run(str(self.run_dir), for_next=True)
+        run_path = self.run_dir / "run.md"
+        events = [
+            line
+            for line in text.splitlines()
+            if line.startswith(autopilot.ROUTING_PREVIEW)
+        ]
+        run_path.write_text(
+            run_path.read_text(encoding="utf-8")
+            + "".join("- " + event + "\n" for event in events),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            autopilot.next_step(autopilot.load_run(str(self.run_dir), for_next=True)),
+            "run a",
+        )
+        plan_path = self.root / ".work/a/plan.md"
+        original = plan_path.read_text(encoding="utf-8")
+        plan_path.write_text(original + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(autopilot.Refusal, "overview/start gate"):
+            autopilot.load_run(str(self.run_dir), for_next=True)
+        plan_path.write_text(original, encoding="utf-8")
+        config.write_text(
+            config.read_text(encoding="utf-8").split("[roles.implementer]", 1)[0]
+            + '[roles]\nimplementer = "large"\n',
+            encoding="utf-8",
+        )
+        fixed = autopilot.load_run(str(self.run_dir), for_next=False)
+        self.assertIn("unclassified/default; inputs", autopilot.estimate(fixed))
+        self.assertTrue(
+            all(
+                t["one_round"] == autopilot.estimates(*t["counts"], external=True)[0]
+                for t in fixed["tasks"]
+            )
+        )
 
 
 if __name__ == "__main__":

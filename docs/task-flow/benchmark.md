@@ -143,3 +143,28 @@ Rows are comparable only when their fingerprints are equal; a `new baseline` row
 |  --- |  --- |  --- |  --- | --- |
 | 2026-11-02 | combined-100 | sha256:dbd92482d923 | mistral-large,mistral-small,glm-flash,deepseek-flash | latest |
 <!-- bench:history:end -->
+
+## Promoting routing evidence manually
+
+The shipped default is disabled routing with no numeric thresholds. User-supplied bounds
+are deterministic policy, not a benchmark-backed recommendation. Do not recommend or
+enable default thresholds until saved repeated evidence qualifies:
+
+1. Save run ids and protocol fingerprints, keeping review modes, routing rule digests
+   and protocol versions separate.
+2. Record per-computed-band repeat counts meeting bench-repeat-protocol's ranking
+   minimum. That minimum is not established on this checkout; do not invent one.
+3. Review median and spread, acceptance, hidden-pass and cost, keeping unknown costs
+   unknown and checking profile-specific caps and actual fallback evidence.
+4. Link the qualifying saved runs and explain the promotion decision before changing
+   any recommended defaults. No qualifying saved evidence is claimed here.
+
+Harness results add optional `routing` evidence copied from implementation metrics.
+Legacy rows without it remain readable and explicitly unknown. Declared case `size`
+is distinct from computed routing `band`; case labels never prove a routing decision.
+Reports aggregate computed band/selected profile only within a protocol fingerprint,
+review mode, routing schema and rule digest. Costs stay unknown when unavailable.
+This is an additive result-schema change; measurement versions and repeat rules stay
+unchanged. Fixed case/profile/repeat experiments replace active user routing with their
+explicit scalar profile. These reports do not run hidden probes differently or contact
+paid models to calibrate thresholds.

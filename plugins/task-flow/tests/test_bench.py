@@ -322,6 +322,88 @@ class BenchFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------- units
 
 
+class SettingsForTest(BenchFixture):
+    """settings_for: the generated per-run models.toml must validate again (D4)."""
+
+    def write_and_load(self, name, settings):
+        gen = self.root / "gen"
+        (gen / ".claude").mkdir(parents=True, exist_ok=True)
+        lines = [f"[profiles.{name}]"]
+        lines += [f"{k} = {toml_value(v)}" for k, v in settings.items()]
+        (gen / ".claude" / "task-flow.models.toml").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+        )
+        return bench.models.load(gen)[0][name]
+
+    def test_fixed_experiment_replaces_user_routing(self) -> None:
+        from unittest import mock
+
+        server = self.server([])
+        self.add_profile("fake", server)
+        profiles, _ = bench.models.load(self.project)
+        stub = type(
+            "Stub",
+            (),
+            {
+                "settings_for": lambda _self, _name, _remaining: (
+                    bench.Runner.settings_for(
+                        type("Profiles", (), {"profiles": profiles})(), "fake", None
+                    )
+                )
+            },
+        )()
+        run = self.root / "fixed"
+        bench.Runner.write_models(stub, run, "fake", None)
+        user = self.root / "user.toml"
+        # Invalid/unavailable routing is irrelevant once the experiment's explicit
+        # scalar replaces it, and cannot change this fixed profile selection.
+        user.write_text(
+            '[roles.implementer]\ndefault = "missing"\n[roles.implementer.bands]\nS = "missing"\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(bench.models, "user_file", return_value=user):
+            self.assertEqual(bench.models.resolve_implementer(run)["value"], "fake")
+            self.assertNotIn("routing", bench.models.resolve_implementer(run))
+
+    def test_api_profile_drops_cli_only_keys(self):
+        server = self.server([reply(content="done")])
+        self.add_profile("fake", server)
+        profiles, _roles = bench.models.load(self.project)
+        settings = bench.Runner.settings_for(
+            type("Stub", (), {"profiles": profiles})(), "fake", None
+        )
+        for key in bench.models.CLI_ONLY_KEYS:
+            self.assertNotIn(key, settings, key)
+        reloaded = self.write_and_load("fake", settings)
+        self.assertEqual(reloaded["driver"], "openai-loop")
+        self.assertEqual(reloaded["base_url"], server.url)
+
+    def test_cli_profile_drops_api_loop_keys(self):
+        with open(self.models_path, "a", encoding="utf-8", newline="") as handle:
+            handle.write(
+                "[profiles.codex]\n"
+                'driver = "cli"\n'
+                'model = "codex-model"\n'
+                'billing = "subscription"\n'
+                'command = ["codex", "exec", "-"]\n'
+                'prompt_via = "stdin"\n'
+                'usage_format = "codex-jsonl"\n'
+                "timeout_seconds = 123\n"
+            )
+        profiles, _roles = bench.models.load(self.project)
+        settings = bench.Runner.settings_for(
+            type("Stub", (), {"profiles": profiles})(), "codex", None
+        )
+        for key in bench.models.CLI_INCOMPATIBLE_KEYS:
+            self.assertNotIn(key, settings, key)
+        self.assertEqual(settings["command"], ["codex", "exec", "-"])
+        self.assertEqual(settings["usage_format"], "codex-jsonl")
+        self.assertEqual(settings["timeout_seconds"], 123)
+        reloaded = self.write_and_load("codex", settings)
+        self.assertEqual(reloaded["driver"], "cli")
+        self.assertEqual(reloaded["command"], ["codex", "exec", "-"])
+
+
 class ParseChecksTest(unittest.TestCase):
     CHECKS0 = (
         "# Checks: round 0\n"
@@ -1744,6 +1826,60 @@ class LogTest(BenchFixture):
         log = (self.results_dir / "log.md").read_text(encoding="utf-8")
         self.assertIn("$0.0200", log)
         self.assertNotIn("$0.0049", log)
+
+
+class RoutingEvidenceTest(unittest.TestCase):
+    def test_routing_groups_preserve_protocol_rules_and_unknown_cost(self) -> None:
+        evidence = {
+            "schema": "implementer-routing/1",
+            "band": "S",
+            "selected_profile": "small",
+            "rule_digest": "rules-a",
+        }
+        rows = [
+            {
+                "n": i,
+                "case": "large-case",
+                "size": "L",
+                "profile": "small",
+                "repeat": i,
+                "routing": evidence,
+                "fingerprint": "protocol-a",
+                "review": False,
+                "outcome": "accepted" if i < 3 else "failed",
+                "hidden": "pass" if i < 3 else "fail",
+                "cost_usd": float(i),
+                "cost_known": True,
+            }
+            for i in range(1, 4)
+        ]
+        groups = bench.routing_summary(rows, {})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["band"], "S")
+        self.assertEqual(groups[0]["repeats"], 3)
+        self.assertEqual(groups[0]["accepted"], 2)
+        self.assertEqual(groups[0]["hidden_pass"], 2)
+        self.assertEqual(groups[0]["cost_median"], 2.0)
+        self.assertEqual(groups[0]["cost_spread"], [1.0, 3.0])
+        for change in [
+            {"fingerprint": "protocol-b"},
+            {"review": True},
+            {"routing": dict(evidence, rule_digest="rules-b")},
+        ]:
+            self.assertEqual(
+                len(bench.routing_summary(rows + [dict(rows[0], **change)], {})), 2
+            )
+        unknown = bench.routing_summary(
+            rows + [dict(rows[0], cost_usd=None, cost_known=False)], {}
+        )[0]
+        self.assertIsNone(unknown["cost_median"])
+        legacy = bench.routing_summary([dict(rows[0], routing=None)], {})[0]
+        self.assertIsNone(legacy["band"])
+        self.assertIsNone(legacy["selected_profile"])
+        self.assertIn(
+            "missing routing evidence is unknown",
+            "\n".join(bench.routing_report(rows, {})),
+        )
 
 
 if __name__ == "__main__":

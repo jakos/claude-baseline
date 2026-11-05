@@ -32,11 +32,22 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   `--implementer-kind {claude,profile}` (default `claude`): with `profile`,
   IMPLEMENT = 0 — an external implementer spends no Claude tokens, its USD cost is
   measured per round (`impl-<n>.json`), not estimated — and `estimate` additionally
-  prints an `implementer: external profile; ...` line. The `## Tasks` table may carry an
+  prints an `implementer: external profile; ...` line. They also take
+  `--planner-kind {claude,profile}` (default `claude`): with `profile`, `estimate`
+  prints a `planner: external profile; ...` line — planning spends no Claude tokens
+  and its USD cost is measured per invocation (`role-planner-*.json`) — and both kinds
+  or the presence of a task's invocation files make `estimate` print a
+  `spent by stage (Claude tokens): ...` line (planning vs the task rows). The
+  `## Tasks` table may carry an
   optional fifth column `External USD` (a non-negative decimal, scientific notation
   accepted, or `unknown` per row); when present, `estimate` ends with an
   `external spent: <sum> USD` line (`at least` when a row is `unknown`), and the
-  column never influences `next`. The `spent:` and `budget:` lines are about Claude
+  column never influences `next`. When a task's `.work/<id>/` carries invocation
+  files (`impl-<n>.json`, `role-*.json`), its USD row and the totals are recomputed
+  from those invocation ids — planner USD included in the same cell — so a resume
+  recomputes the same total instead of double counting, and `estimate` then also
+  prints an `external by stage: planner: ..., implementer: ...` line. Unknown (null)
+  costs stay `unknown`, never zero. The `spent:` and `budget:` lines are about Claude
   tokens only.
 - `next <run-dir>`: one line, `run <id>`, `wait <id>: <phase>`, `stop: <reason>` or `done`.
   The circuit breaker. It is evaluated between tasks only: a task already in progress
@@ -78,6 +89,7 @@ It also exposes `verification_commands(plan)`, the shared parser of a plan's fir
 import argparse
 import fnmatch
 import itertools
+import json
 import math
 import os
 import re
@@ -86,6 +98,7 @@ import sys
 from pathlib import Path
 
 import epics
+import role_runtime
 
 # Coarse default estimate constants (tokens). Invented, not measured.
 CHECK_BASE, CHECK_PER_COMMAND = 15000, 3000
@@ -281,28 +294,20 @@ def usd_value(value: str, what: str) -> float | None:
 
 
 def verification_commands(plan: str) -> list[str]:
-    """The stripped command lines of the first fenced block under `## Verification commands`.
+    """Use the producer contract's verification block parser."""
+    import role_contracts
 
-    Blank lines and lines starting with `#` are skipped; the closing fence of the first
-    block ends the list, so later blocks and trailing text are ignored. These are exactly
-    the lines `plan_counts` counts.
-    """
-    tracker = FenceTracker()
-    seen_block = False
-    commands: list[str] = []
-    for line in sections(plan).get("verification commands", []):
-        if tracker.is_fence(line):
-            if tracker.opening is None:
-                break
-            seen_block = True
-            continue
-        if seen_block and line.strip() and not line.lstrip().startswith("#"):
-            commands.append(line.strip())
-    return commands
+    return role_contracts.parse_verification_commands(
+        plan, body=sections(plan).get("verification commands", [])
+    )
 
 
 def plan_counts(plan: str) -> tuple[int, int, int]:
-    parts = sections(plan)
+    import role_contracts
+
+    parts = {
+        key: role_contracts.unfenced(lines) for key, lines in sections(plan).items()
+    }
     steps = sum(1 for line in parts.get("steps", []) if re.match(r"\d+\.\s", line))
     criteria = {
         m.group(1)
@@ -323,7 +328,53 @@ def estimates(
     return check + one_round + FINISH, check + 3 * one_round + FINISH
 
 
-def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
+ROUTING_PREVIEW = "routing-preview "
+
+
+def routing_preview(task_id: str, evidence: dict | None) -> dict | None:
+    """The versioned overview identity, independent of preview/pin state."""
+    if evidence is None:
+        return None
+    return {
+        "schema": "routing-preview/1",
+        "task": task_id,
+        **{
+            key: evidence[key]
+            for key in (
+                "plan_digest",
+                "rule_digest",
+                "profile_digest",
+                "selected_profile",
+            )
+        },
+    }
+
+
+def routing_previews(history: list[str]) -> dict[str, dict]:
+    previews = {}
+    for line in history:
+        if ROUTING_PREVIEW not in line:
+            continue
+        try:
+            record = json.loads(line.split(ROUTING_PREVIEW, 1)[1])
+            if record.get("schema") != "routing-preview/1" or not isinstance(
+                record.get("task"), str
+            ):
+                raise ValueError("invalid routing overview schema")
+            previews[record["task"]] = record
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise Refusal(
+                "run.md: malformed routing overview; repeat overview/start gate"
+            ) from exc
+    return previews
+
+
+def load_run(
+    run_dir_arg: str,
+    for_next: bool,
+    external: bool = False,
+    planner_external: bool = False,
+) -> dict:
     run_dir = Path(run_dir_arg).resolve()
     if not run_dir.is_dir():
         raise Refusal(f"{run_dir_arg} is not a directory")
@@ -331,6 +382,7 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
         raise Refusal(f"{run_dir_arg} is not inside .work/_autopilot/")
     work = run_dir.parent.parent
     parts = sections(read_text(run_dir / "run.md"))
+    previews = routing_previews(parts.get("history", []))
     fields = header_fields(parts[""])
     for key in ("mode", "budget", "planning-tokens", "continue-past", "bootstrap"):
         if key not in fields:
@@ -405,8 +457,38 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
             raise Refusal(f"{task_id} has unrecognised phase {phase!r}")
         if for_next and phase in UNAPPROVED:
             raise Refusal(f"{task_id} is not approved (phase {phase})")
-        counts = plan_counts(read_text(plan))
-        one_round, maximum = estimates(*counts, external=external)
+        plan_text = read_text(plan)
+        counts = plan_counts(plan_text)
+        import models
+
+        try:
+            selection = models.resolve_implementer(work.parent, task_dir)
+            routing = selection.get("routing")
+            task_external = (
+                selection["value"] not in models.CLAUDE_VALUES
+                if selection["configured"]
+                else external
+            )
+        except models.ConfigError as exc:
+            raise Refusal(str(exc)) from exc
+        if (
+            for_next
+            and phase not in FINISHED_OK | FAILED
+            and (routing or task_id in previews)
+            and previews.get(task_id) != routing_preview(task_id, routing)
+        ):
+            raise Refusal(
+                f"{task_id}: routing preview changed or missing; repeat overview/start gate before execution"
+            )
+        default_inputs = None
+        if selection["configured"] and not routing:
+            try:
+                default_inputs = models.measure_plan(plan_text)
+            except models.ConfigError:
+                # Legacy fixed-profile plans need not satisfy the new routing contract.
+                default_inputs = dict(zip(("steps", "criteria", "commands"), counts))
+                default_inputs["declared_paths"] = None
+        one_round, maximum = estimates(*counts, external=task_external)
         tasks.append(
             {
                 "id": task_id,
@@ -415,6 +497,9 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
                 "usd": usd,
                 "phase": phase,
                 "counts": counts,
+                "routing": routing,
+                "default_inputs": default_inputs,
+                "implementer": selection["value"],
                 "one_round": one_round,
                 "max": maximum,
             }
@@ -477,6 +562,8 @@ def load_run(run_dir_arg: str, for_next: bool, external: bool = False) -> dict:
         "continue_past": continue_past,
         "tasks": tasks,
         "external": external,
+        "planner_external": planner_external,
+        "work": work,
         "has_usd": width == 5,
         "source": source,
         "base": fields.get("base"),
@@ -607,15 +694,64 @@ def spent(run: dict) -> tuple[int, bool]:
 
 
 def external_spent(run: dict) -> tuple[float, bool]:
-    """Sum of the known `External USD` values, and whether any row is unknown."""
+    """Sum of the known `External USD` values, and whether any row is unknown.
+
+    When a task's folder carries invocation files (impl-<n>.json implementer
+    rounds, role-*.json external producer invocations such as the planner), the
+    row's USD is recomputed from those invocation ids — planner USD included —
+    so a resume recomputes the same total instead of double counting; the cell
+    is the fallback when no invocation file exists yet.
+    """
     total = 0.0
     unknown = False
     for task in run["tasks"]:
+        spend = invocation_spend(run["work"], task["id"])
+        if spend is not None:
+            value, value_unknown = spend
+            total += value
+            unknown = unknown or value_unknown
+            continue
         if task["usd"] is None:
             unknown = True
         else:
             total += task["usd"]
     return total, unknown
+
+
+def invocation_spend(work: Path, task_id: str) -> tuple[float, bool] | None:
+    """(known USD, any unknown) recomputed from .work/<id>/ invocation files, or None."""
+    task_dir = Path(work) / task_id
+    if not task_dir.is_dir():
+        return None
+    if not any(task_dir.glob("impl-*.json")) and not any(task_dir.glob("role-*.json")):
+        return None
+    return role_runtime.invocation_usd(task_dir)["total"]
+
+
+def stage_spend(run: dict) -> dict | None:
+    """Per-stage external USD of the run's tasks, recomputed from invocation ids.
+
+    None when no task folder carries an invocation file (the cells are used then).
+    """
+    stages: dict[str, tuple[float, bool]] = {}
+    found = False
+    for task in run["tasks"]:
+        task_dir = Path(run["work"]) / task["id"]
+        if not task_dir.is_dir():
+            continue
+        if not any(task_dir.glob("impl-*.json")) and not any(
+            task_dir.glob("role-*.json")
+        ):
+            continue
+        found = True
+        for stage, (known, unknown) in role_runtime.invocation_usd(task_dir)[
+            "stages"
+        ].items():
+            sum_known, sum_unknown = stages.get(stage, (0.0, False))
+            stages[stage] = (sum_known + known, sum_unknown or unknown)
+    if not found:
+        return None
+    return stages
 
 
 # --- estimate ------------------------------------------------------------------------
@@ -648,6 +784,20 @@ def estimate(run: dict) -> str:
     total_one = sum(t["one_round"] for t in run["tasks"])
     total_max = sum(t["max"] for t in run["tasks"])
     rows.append(f"| total | | | | | {total_one} | {total_max} |")
+    for task in run["tasks"]:
+        routing = task.get("routing")
+        if routing:
+            rows.append(
+                f"routing {task['id']}: {routing['state']}; band {routing['band'] or 'unclassified/default'}; inputs {json.dumps(routing['inputs'], sort_keys=True)}; profile {task['implementer']}"
+            )
+            rows.append(
+                ROUTING_PREVIEW
+                + json.dumps(routing_preview(task["id"], routing), sort_keys=True)
+            )
+        elif task.get("default_inputs") is not None:
+            rows.append(
+                f"routing {task['id']}: unclassified/default; inputs {json.dumps(task['default_inputs'], sort_keys=True)}; profile {task['implementer']}"
+            )
     total, unknown = spent(run)
     rows.append(f"spent: {'at least ' if unknown else ''}{total} tokens")
     budget = run["budget"]
@@ -674,11 +824,36 @@ def estimate(run: dict) -> str:
             "implementer: external profile; IMPLEMENT counts 0 Claude tokens; "
             "its cost is measured in USD per round (impl-<n>.json), not estimated"
         )
+    if run["planner_external"]:
+        rows.append(
+            "planner: external profile; planning spends no Claude tokens; its cost "
+            "is measured in USD per invocation (role-planner-*.json), not estimated"
+        )
+    planning_total, planning_unknown = run["planning"] or 0, run["planning"] is None
+    rounds_total = sum(t["used"] or 0 for t in run["tasks"])
+    rounds_unknown = any(t["used"] is None for t in run["tasks"])
+    if run["external"] or run["planner_external"] or stage_spend(run) is not None:
+        rows.append(
+            "spent by stage (Claude tokens): planning: "
+            f"{'at least ' if planning_unknown else ''}{planning_total}"
+            f"{' (unknown)' if planning_unknown else ''}, rounds: "
+            f"{'at least ' if rounds_unknown else ''}{rounds_total}"
+            f"{' (unknown)' if rounds_unknown else ''}"
+        )
     if run["has_usd"]:
         usd_total, usd_unknown = external_spent(run)
         rows.append(
             f"external spent: {'at least ' if usd_unknown else ''}{usd_total:.2f} USD"
         )
+        stages = stage_spend(run)
+        if stages is not None:
+            parts = [
+                f"{stage}: {'at least ' if unknown else ''}{known:.6f} USD"
+                for stage, (known, unknown) in sorted(stages.items())
+            ]
+            rows.append(
+                "external by stage: " + ", ".join(parts) + " (from invocation ids)"
+            )
     if run["source"] == "tasks" and len(run["tasks"]) > 10:
         count = len(run["tasks"])
         rows.append(
@@ -764,10 +939,16 @@ def main() -> int:
     estimate_parser.add_argument(
         "--implementer-kind", choices=("claude", "profile"), default="claude"
     )
+    estimate_parser.add_argument(
+        "--planner-kind", choices=("claude", "profile"), default="claude"
+    )
     next_parser = sub.add_parser("next")
     next_parser.add_argument("path")
     next_parser.add_argument(
         "--implementer-kind", choices=("claude", "profile"), default="claude"
+    )
+    next_parser.add_argument(
+        "--planner-kind", choices=("claude", "profile"), default="claude"
     )
     args = parser.parse_args()
 
@@ -785,6 +966,7 @@ def main() -> int:
                 args.path,
                 for_next=args.command == "next",
                 external=args.implementer_kind == "profile",
+                planner_external=args.planner_kind == "profile",
             )
             output = estimate(run) if args.command == "estimate" else next_step(run)
     except Refusal as error:

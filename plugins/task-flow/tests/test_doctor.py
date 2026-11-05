@@ -480,6 +480,132 @@ class ModelsTest(DoctorTest):
         self.assertEqual((profiles, roles), ({}, {}))
 
 
+# --- the stage table (method, model, billing of all five stages) --------------------------------
+
+STAGE_TOML = """
+[profiles.mistral]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-large"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+fallback = ["backup"]
+
+[profiles.backup]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "mistral-small"
+api_key_env = "BACKUP_API_KEY"
+billing = "api"
+
+[profiles.codex]
+driver = "cli"
+command = ["codex", "exec"]
+read_only_command = ["codex", "exec", "--sandbox", "read-only", "-o", "{last_message_file}"]
+model = "codex-model"
+billing = "subscription"
+fallback = ["backup"]
+
+[roles]
+planner = "mistral"
+implementer = "codex"
+checker = "script"
+"""
+
+
+class StageTableTest(DoctorTest):
+    PLUGIN_ROOT = SCRIPTS.parent
+
+    def rows(self, toml=None):
+        if toml is not None:
+            self.project_models(toml)
+        profiles, _roles = models.load(self.repo)
+        return doctor.stage_rows(
+            models.resolve_roles(self.repo), profiles, self.PLUGIN_ROOT
+        )
+
+    def test_no_config_shows_frontmatter_claude_defaults(self):
+        rows = self.rows()
+        self.assertEqual([r[0] for r in rows], list(doctor.STAGES))
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"],
+            (
+                "planner",
+                "claude",
+                "opus (agent frontmatter default)",
+                "subscription (Claude Code)",
+            ),
+        )
+        self.assertEqual(
+            by_stage["implementer"][2], "sonnet (agent frontmatter default)"
+        )
+        self.assertEqual(by_stage["checker"][2], "haiku (agent frontmatter default)")
+        self.assertEqual(by_stage["reviewer"][2], "opus (agent frontmatter default)")
+        self.assertEqual(by_stage["backlog"][2], "opus (agent frontmatter default)")
+
+    def test_claude_model_suffix_and_script_checker(self):
+        rows = self.rows('[roles]\nplanner = "claude:haiku"\nchecker = "script"\n')
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"][1:],
+            ("claude", "claude:haiku", "subscription (Claude Code)"),
+        )
+        self.assertEqual(
+            by_stage["checker"], ("checker", "script", "-", "none (script)")
+        )
+
+    def test_external_profiles_and_fallbacks_get_rows(self):
+        rows = self.rows(STAGE_TOML)
+        by_stage = {r[0]: r for r in rows}
+        self.assertEqual(
+            by_stage["planner"], ("planner", "api", "mistral-large", "api")
+        )
+        self.assertEqual(
+            by_stage["implementer"],
+            ("implementer", "cli", "codex-model", "subscription"),
+        )
+        self.assertIn(
+            ("implementer fallback backup", "api", "mistral-small", "api"), rows
+        )
+        self.assertIn(("planner fallback backup", "api", "mistral-small", "api"), rows)
+        self.assertEqual(
+            by_stage["checker"], ("checker", "script", "-", "none (script)")
+        )
+
+    def test_stage_table_rendered_and_spends_no_capacity(self):
+        self.init_repo()
+        self.write_full_settings()
+        self.commit(".claude/settings.json")
+        self.project_models(STAGE_TOML)
+        # STAGE_TOML's cli profile runs `codex`; a clean CI runner has none, so the
+        # program check must not depend on what is installed on the host.
+        real_which = shutil.which
+
+        def which(name, *args, **kwargs):
+            if name == "codex":
+                return "/usr/bin/codex"
+            return real_which(name, *args, **kwargs)
+
+        with mock.patch("shutil.which", which):
+            code, out, err = self.run_doctor(["--project", str(self.repo)])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("## Stages\n| Stage | Method | Model | Billing |", out)
+        self.assertIn("| planner | api | mistral-large | api |", out)
+        self.assertIn("| implementer | cli | codex-model | subscription |", out)
+        self.assertIn(
+            "| implementer fallback backup | api | mistral-small | api |", out
+        )
+        self.assertIn("| checker | script | - | none (script) |", out)
+        self.assertIn(
+            "| reviewer | claude | opus (agent frontmatter default) | "
+            "subscription (Claude Code) |",
+            out,
+        )
+        # no --online: no HTTP request was made, only configuration was inspected
+        self.assertNotIn("HTTP", out)
+
+
 # --- AC11: profile key and enabled checks -----------------------------------------------------------
 
 
@@ -613,6 +739,95 @@ class DriverTest(DoctorTest):
     def test_every_driver_has_checks(self):
         for driver in models.DRIVERS:
             self.assertIn(driver, doctor.DRIVER_CHECKS)
+
+
+CLI_TOML = """
+[profiles.codex]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "subscription"
+command = ["codex", "exec", "-"]
+prompt_via = "stdin"
+usage_format = "codex-jsonl"
+fallback = ["codex-api"]
+
+[profiles.codex-api]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "api"
+api_key_env = "CODEX_API_KEY"
+pass_env = ["CODEX_API_KEY"]
+command = ["codex", "exec", "-"]
+
+[roles]
+implementer = "codex"
+"""
+
+
+class CliProfileTest(DoctorTest):
+    """The driver "cli" rows of check 14: executable and key, never an online probe."""
+
+    def rows_for(self, profiles, roles, env, lookup=lambda name: None, which=None):
+        kwargs = {} if which is None else {"which": which}
+        rows, targets = doctor.check_implementer_profiles(
+            profiles, roles, env, lookup, **kwargs
+        )
+        return {row.name: row for row in rows}, targets
+
+    def fake_which(self, name):
+        return f"/fake/bin/{name}" if name == "codex" else None
+
+    def test_cli_rows_replace_base_url_and_limits(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        rows, targets = self.rows_for(profiles, roles, {}, which=self.fake_which)
+        self.assertNotIn("profile codex (primary): base_url", rows)
+        self.assertNotIn("profile codex (primary): limits", rows)
+        driver = rows["profile codex (primary): driver"]
+        self.assertEqual(driver.result, "PASS")
+        self.assertIn("no /models request", driver.detail)
+        self.assertIn("timeout_seconds", driver.detail)
+        self.assertIn("saved login", driver.detail)
+        command = rows["profile codex (primary): command"]
+        self.assertEqual(command.result, "PASS")
+        self.assertIn("/fake/bin/codex", command.detail)
+        # subscription: no key needed, and never an online target
+        key = rows["profile codex (primary): key"]
+        self.assertEqual(key.result, "PASS")
+        self.assertIn("no api_key_env", key.detail)
+        self.assertEqual(targets, [])
+        # the api fallback: its key is required, and it is no online target either
+        api_key = rows["profile codex-api (fallback): key"]
+        self.assertEqual(api_key.result, "WARN")
+        self.assertIn("CODEX_API_KEY", api_key.detail)
+        self.assertEqual(targets, [])
+
+    def test_cli_missing_executable_fails_primary_warns_fallback(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        rows, _ = self.rows_for(profiles, roles, {}, which=lambda name: None)
+        primary = rows["profile codex (primary): command"]
+        self.assertEqual(primary.result, "FAIL")
+        self.assertIn("not found on PATH", primary.detail)
+        self.assertIn("install codex", " ".join(primary.fixes))
+        self.assertEqual(rows["profile codex-api (fallback): command"].result, "WARN")
+
+    def test_cli_api_key_set_passes_without_revealing_and_stays_offline(self):
+        profiles, roles = self.load_profiles(CLI_TOML)
+        env = {"CODEX_API_KEY": "sk-codex-123456"}
+        rows, targets = self.rows_for(profiles, roles, env, which=self.fake_which)
+        key = rows["profile codex-api (fallback): key"]
+        self.assertEqual(key.result, "PASS")
+        self.assertIn("chars", key.detail)
+        self.assertNotIn("sk-codex-123456", key.detail)
+        self.assertEqual(targets, [])
+
+    def test_cli_profile_is_never_probed_online(self):
+        provider = FakeProvider(make_handler([], 200, ["gpt-5.2-codex"]))
+        self.addCleanup(provider.stop)
+        self.project_models(CLI_TOML)
+        os.environ["CODEX_API_KEY"] = "sk-live-key-1"
+        _code, out, _ = self.run_doctor(["--project", str(self.repo), "--online"])
+        self.assertNotIn("| online", out)
+        self.assertEqual(provider.hits, [])
 
 
 # --- AC14: the online check ------------------------------------------------------------------------
@@ -771,6 +986,22 @@ class ChangesNothingTest(DoctorTest):
         self.assertEqual(snapshot(self.home), home_before)
         self.assertEqual(status(), status_before)
         self.assertEqual(dict(os.environ), before_env)
+
+
+class RoutingDiagnosticsTest(unittest.TestCase):
+    def test_taskless_routing_is_explicitly_unresolved(self) -> None:
+        result = doctor.check_roles(
+            {
+                "implementer": {
+                    "value": "small",
+                    "kind": "profile",
+                    "model": None,
+                    "routing": {"state": "task-dependent"},
+                }
+            }
+        )
+        self.assertIn("task-dependent", result.detail)
+        self.assertIn("showing default", result.detail)
 
 
 if __name__ == "__main__":

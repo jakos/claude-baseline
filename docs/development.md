@@ -73,8 +73,9 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     scripts/task_list.py             table for task-list
     scripts/prune_task.py            task-finish keeps .md, impl-*.json and worktree/
     scripts/autopilot.py             task-autopilot: repo check, --tasks list check, token estimate, circuit breaker, stacked base
-    scripts/implement.py             one implementer round on an OpenAI-compatible or Anthropic Messages API model, used when [roles] implementer names a profile
+    scripts/implement.py             one implementer round on an external model, used when [roles] implementer names a profile
     scripts/drivers.py               the per-provider request/response formats of implement.py (openai-loop, anthropic-loop)
+    scripts/cli_driver.py            the driver "cli" execution boundary: one agent-CLI process per round (placeholders, transports, deadline, JSONL usage, redaction)
     scripts/launch.py                starts .cmd/.bat tools on Windows through cmd.exe, shared by implement.py
     scripts/gates.py                 runs plan.md's verification commands without a model, when [roles] checker = "script"
     scripts/models.py                reads, merges and validates models.toml
@@ -92,7 +93,7 @@ plugins/task-flow/                   multi-agent task workflow; see its README
     tests/test_autopilot.py, tests/test_bench.py, tests/test_bench_publish.py,
     tests/test_gates.py, tests/test_models.py,
     tests/test_drivers.py, tests/test_doctor.py, tests/test_docs.py, tests/test_implement.py, tests/test_launch.py,
-    tests/test_release.py, tests/test_ci.py, tests/test_sdlc_status.py
+    tests/test_cli_driver.py, tests/test_release.py, tests/test_ci.py, tests/test_sdlc_status.py
 ```
 
 Validate before pushing:
@@ -134,7 +135,7 @@ flowchart TD
   pr["pull request or push to main"]
   matrix["OS matrix: ubuntu-latest, windows-latest"]
   verify["uv run --script scripts/verify.py"]
-  shared["shared check list: 19 checks"]
+  shared["shared check list: 24 checks"]
   gate["gate block in .claude/task-flow.md"]
   release["checks of .claude/task-flow.release.toml"]
   local["local gates.py and release verify"]

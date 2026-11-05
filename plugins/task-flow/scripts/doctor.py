@@ -88,19 +88,37 @@ Local checks, in fixed order (each is a plain function; every input is an argume
                             but not in this process, the detail says the session was
                             started before it was set and the fix is to restart Claude
                             Code, otherwise the PowerShell and POSIX ways to set it;
-                          - base_url: FAIL when the scheme is not http/https or the host
-                            is empty; WARN when it has a query or fragment, ends with the
-                            driver's endpoint suffix (/chat/completions, /messages) or is
-                            http:// to a non-local host (the key would travel
-                            unencrypted);
-                          - limits: WARN when max_turns > 200, when billing = "api" and
-                            max_cost_usd is unset (no cost cap), and when billing = "api"
-                            with all three price_* keys 0 (the cost then reads 0 USD);
+                          - driver "cli": instead of base_url/limits, one `command` row
+                            resolves the executable (a PATH word via shutil.which, an
+                            absolute path directly, a worktree-relative path reported
+                            as unverified) and the `driver` row states that there is no
+                            online check: no /models request and no agent run, because
+                            both would spend subscription or API capacity — the saved
+                            login of a subscription CLI stays unverified here;
+                          - base_url (API drivers only): FAIL when the scheme is not
+                            http/https or the host is empty; WARN when it has a query or
+                            fragment, ends with the driver's endpoint suffix
+                            (/chat/completions, /messages) or is http:// to a non-local
+                            host (the key would travel unencrypted);
+                          - limits (API drivers only): WARN when max_turns > 200, when
+                            billing = "api" and max_cost_usd is unset (no cost cap),
+                            and when billing = "api" with all three price_* keys 0 (the
+                            cost then reads 0 USD);
                           - driver: DRIVER_CHECKS has one entry per driver doctor knows;
                             a profile whose driver has no entry -> WARN.
 
-Online check (only with --online, only for the enabled profiles of check 14 that have
-their key or need none): GET {base_url}/models with the driver's auth headers
+Between the check table and `## Fixes` the report has a `## Stages` table — one row per
+stage (planner, implementer, checker, reviewer, backlog) with its method, model and
+billing: a Claude entry shows `claude` plus the agent frontmatter's default model (or
+the `claude:<model>` suffix when configured) and billing `subscription (Claude Code)`;
+a `script` checker shows method `script`, billing `none (script)`; a profile entry shows
+the profile's method (`api` or `cli`), model and billing, and each of its fallbacks gets
+its own `... fallback <name>` row. The stage table inspects the configuration only: no
+CLI is executed and no request is sent, so it spends no model capacity.
+
+Online check (only with --online, only for the enabled API-driver profiles of check 14
+that have their key or need none; driver "cli" profiles are never online targets):
+GET {base_url}/models with the driver's auth headers
 (Authorization: Bearer <key> on openai-loop; x-api-key and anthropic-version on
 anthropic-loop), via urllib.request, timeout min(request_timeout_seconds, 20) s:
   - HTTP 200 with JSON data[*].id -> PASS "HTTP 200 in <ms> ms; model `<id>` listed", or
@@ -158,7 +176,9 @@ REQUIRED_ALLOW = [
 ]
 # One entry per driver models.DRIVERS knows; test_doctor.py asserts the two stay equal.
 # "auth" says which header carries the key on the online model-list request;
-# "endpoint" is the path the driver appends to base_url itself.
+# "endpoint" is the path the driver appends to base_url itself. driver "cli" has
+# neither: the doctor never sends a /models request for it and never launches the CLI
+# (both would spend subscription or API capacity), so it gets no online check at all.
 DRIVER_CHECKS = {
     "openai-loop": {
         "online": "GET {base_url}/models with Authorization: Bearer <key>",
@@ -171,6 +191,12 @@ DRIVER_CHECKS = {
         "endpoint": "/messages",
         # keep in sync with drivers.ANTHROPIC_VERSION (doctor imports only models)
         "extra_headers": {"anthropic-version": "2026-10-21"},
+    },
+    "cli": {
+        "online": (
+            "none: no /models request and no agent run for a CLI profile (both would "
+            "spend subscription or API capacity); its saved login is not verified here"
+        ),
     },
 }
 
@@ -662,8 +688,70 @@ def check_roles(resolved: dict) -> Check:
         entry = resolved[role]
         value = entry["value"]
         suffix = " (profile)" if entry["kind"] == "profile" else ""
+        if entry.get("routing"):
+            suffix += " (task-dependent routing; showing default)"
         parts.append(f"{role} = {value}{suffix}")
     return Check("roles", "PASS", ", ".join(parts))
+
+
+# The five workflow stages, in table order.
+STAGES = ("planner", "implementer", "checker", "reviewer", "backlog")
+
+
+def agent_frontmatter_model(plugin_root: Path, role: str) -> str | None:
+    """The `model:` frontmatter default of agents/<role>.md, or None when absent."""
+    path = plugin_root / "agents" / f"{role}.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    for line in text[3:end].splitlines():
+        if line.startswith("model:"):
+            return line.partition(":")[2].strip() or None
+    return None
+
+
+def stage_rows(
+    resolved: dict, profiles: dict, plugin_root: Path
+) -> list[tuple[str, str, str, str]]:
+    """(stage, method, model, billing) rows for every stage, external fallbacks included.
+
+    Configuration inspection only: no CLI is executed, no request is sent, so the
+    stage table spends no model capacity. A Claude entry shows the agent
+    frontmatter's default model; a profile entry shows the profile's method (api or
+    cli), model and billing, and every fallback of its chain gets its own row.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+
+    def profile_row(stage: str, name: str) -> None:
+        profile = profiles.get(name)
+        if profile is None:
+            rows.append((stage, "profile", name, "unknown profile (config error)"))
+            return
+        method = "cli" if profile["driver"] == "cli" else "api"
+        rows.append((stage, method, profile["model"], profile["billing"]))
+        for fallback in profile["fallback"]:
+            profile_row(f"{stage} fallback {fallback}", fallback)
+
+    for role in STAGES:
+        entry = resolved[role]
+        if entry["kind"] == "claude":
+            if entry["model"]:
+                model = f"claude:{entry['model']}"
+            else:
+                default = agent_frontmatter_model(plugin_root, role) or "unset"
+                model = f"{default} (agent frontmatter default)"
+            rows.append((role, "claude", model, "subscription (Claude Code)"))
+        elif entry["kind"] == "script":
+            rows.append((role, "script", "-", "none (script)"))
+        else:
+            profile_row(role, entry["value"])
+    return rows
 
 
 def _prefix(name: str, is_primary: bool) -> str:
@@ -777,11 +865,72 @@ def limits_check(name: str, profile: dict, is_primary: bool) -> Check:
     return Check(f"{prefix}: limits", "WARN", "; ".join(warns), fixes)
 
 
+def cli_check(name: str, profile: dict, is_primary: bool, which: Which) -> Check:
+    """The executable of a driver "cli" profile's command: the only local probe.
+
+    The doctor resolves the first command word like scripts/cli_driver.py does at run
+    time (a word with a path separator against the task worktree, otherwise PATH), but
+    without the worktree it can only verify PATH lookups and absolute paths; anything
+    else is reported as resolved at run time. It never starts the program.
+    """
+    prefix = _prefix(name, is_primary)
+    program = profile["command"][0] if profile["command"] else ""
+    level = "FAIL" if is_primary else "WARN"
+    if not program:
+        return Check(
+            f"{prefix}: command",
+            level,
+            "command is empty",
+            [
+                f"fix: set command in [profiles.{name}] to the CLI program and its arguments"
+            ],
+        )
+    if os.path.sep in program or (os.path.altsep and os.path.altsep in program):
+        if os.path.isabs(program):
+            if os.path.isfile(program):
+                return Check(
+                    f"{prefix}: command", "PASS", f"{program} exists (absolute path)"
+                )
+            return Check(
+                f"{prefix}: command",
+                level,
+                f"{program} does not exist",
+                [f"fix: install the CLI or correct command in [profiles.{name}]"],
+            )
+        return Check(
+            f"{prefix}: command",
+            "WARN",
+            f"{program!r} has a path separator and resolves against the task worktree "
+            "at run time; not verified here",
+            [
+                (
+                    f"fix: use a program on PATH or an absolute path in "
+                    f"[profiles.{name}], or check the worktree-relative path by hand"
+                )
+            ],
+        )
+    found = which(program)
+    if found:
+        return Check(f"{prefix}: command", "PASS", f"{program} at {found}")
+    return Check(
+        f"{prefix}: command",
+        level,
+        f"{program!r} not found on PATH",
+        [
+            (
+                f"fix: install {program} and put it on PATH, or set command in "
+                f"[profiles.{name}] to its absolute path"
+            )
+        ],
+    )
+
+
 def check_implementer_profiles(
     profiles: dict,
     roles: dict,
     env: dict,
     user_env_lookup: Callable[[str], "str | None"],
+    which: Which = shutil.which,
 ) -> tuple[list[Check], list[tuple[str, dict]]]:
     """Rows for the primary implementer profile and each of its fallbacks.
 
@@ -830,9 +979,24 @@ def check_implementer_profiles(
         else:
             rows.append(Check(f"{prefix}: enabled", "PASS", "enabled"))
         rows.append(key_check(profile_name, profile, is_primary, env, user_env_lookup))
+        driver = profile["driver"]
+        if driver == "cli":
+            # a CLI profile has no base_url and no API-loop caps to check: the CLI owns
+            # its internal loop; its deadline is timeout_seconds. Check its executable
+            # instead, and never add it to the online targets (no HTTP probe, no agent
+            # run: both would spend subscription or API capacity).
+            rows.append(cli_check(profile_name, profile, is_primary, which))
+            rows.append(
+                Check(
+                    f"{prefix}: driver",
+                    "PASS",
+                    f"{driver}: {DRIVER_CHECKS['cli']['online']}; limits: the CLI's own "
+                    "loop, deadline timeout_seconds",
+                )
+            )
+            continue
         rows.append(base_url_check(profile_name, profile, is_primary))
         rows.append(limits_check(profile_name, profile, is_primary))
-        driver = profile["driver"]
         if driver in DRIVER_CHECKS:
             rows.append(
                 Check(
@@ -998,12 +1162,24 @@ def cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
-def render(checks: list[Check], secrets: list[str]) -> str:
+def render(
+    checks: list[Check],
+    secrets: list[str],
+    stages: "list[tuple[str, str, str, str]] | None" = None,
+) -> str:
     lines = ["# task-flow doctor", "| # | Check | Result | Detail |"]
     for number, check in enumerate(checks, 1):
         lines.append(
             f"| {number} | {cell(check.name)} | {check.result} | {cell(check.detail)} |"
         )
+    if stages is not None:
+        lines.append("## Stages")
+        lines.append("| Stage | Method | Model | Billing |")
+        lines.append("| --- | --- | --- | --- |")
+        for stage, method, model, billing in stages:
+            lines.append(
+                f"| {cell(stage)} | {cell(method)} | {cell(model)} | {cell(billing)} |"
+            )
     lines.append("## Fixes")
     fixes = [
         f"{number}. {check.name}: {fix}"
@@ -1067,10 +1243,13 @@ def main(argv: list[str] | None = None) -> int:
     checks.append(check_anthropic_key(env))
     models_check, profiles, roles = check_models(project)
     checks.append(models_check)
+    stages = None
     if profiles is not None and roles is not None:
-        checks.append(check_roles(models.resolve_roles(project)))
+        resolved = models.resolve_roles(project)
+        checks.append(check_roles(resolved))
+        stages = stage_rows(resolved, profiles, plugin_root)
         rows, targets = check_implementer_profiles(
-            profiles, roles, env, windows_user_env
+            profiles, roles, env, windows_user_env, which
         )
         checks += rows
         if args.online:
@@ -1082,7 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
     secrets = secret_values(
         env, [profile.get("api_key_env") for profile in (profiles or {}).values()]
     )
-    print(render(checks, secrets), end="")
+    print(render(checks, secrets, stages), end="")
     return 1 if any(check.result == "FAIL" for check in checks) else 0
 
 

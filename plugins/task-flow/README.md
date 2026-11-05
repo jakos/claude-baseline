@@ -31,3 +31,31 @@ human gates, never unattended; the generated stage status is in
 - [Profiles](../../docs/task-flow/profiles.md)
 - [Releasing](../../docs/task-flow/releasing.md)
 - [Benchmark](../../docs/task-flow/benchmark.md)
+
+With `driver = "cli"` the implementer role runs one agent-CLI process instead of an HTTP
+API — Codex on a ChatGPT subscription (saved login) or on an invocation-scoped API key;
+see [External implementer](../../docs/task-flow/external-implementer.md):
+
+```toml
+[profiles.codex]                 # subscription: saved login (codex login), no key
+# .claude/task-flow.models.toml
+driver = "cli"
+model = "gpt-5.2-codex"           # metadata only; -m below picks the model
+billing = "subscription"
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-"]
+usage_format = "codex-jsonl"
+
+[profiles.codex-api]             # or an invocation-scoped key instead of the login
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "api"
+api_key_env = "CODEX_API_KEY"
+pass_env = ["CODEX_API_KEY"]
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-5.2-codex", "-o", "{last_message_file}", "-"]
+usage_format = "codex-jsonl"
+
+[roles]
+implementer = "codex"
+```
+
+The planner stage can run on an external profile the same way — `[roles] planner = "codex"` or a one-run `--planner codex` — see [External planner](../../docs/task-flow/external-implementer.md).

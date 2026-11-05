@@ -80,8 +80,8 @@ name the file and the key. Keys of `[profiles.<name>]`:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
-| `driver` | `"openai-loop"` or `"anthropic-loop"` (required) | |
-| `base_url` | `http(s)://` URL; `/chat/completions` is appended on `openai-loop`, `/messages` on `anthropic-loop` (required) | |
+| `driver` | `"openai-loop"`, `"anthropic-loop"` or `"cli"` (required) | |
+| `base_url` | `http(s)://` URL; `/chat/completions` is appended on `openai-loop`, `/messages` on `anthropic-loop` (required on the API drivers, refused on `cli`) | |
 | `model` | model id (required) | |
 | `api_key_env` | NAME of the environment variable holding the key, never the key; required unless `billing = "local"` | none |
 | `billing` | `subscription`, `api` or `local` (required) | |
@@ -101,11 +101,39 @@ name the file and the key. Keys of `[profiles.<name>]`:
 | `post_edit` | list of commands run after each successful `write_file`/`edit_file` call, with every literal `{path}` replaced by the written file; the exit code and output (capped to 40 lines) are appended to that tool call's result | `[]` |
 | `prompt_extras` | list of files read before the round whose contents are appended to the system prompt before the runner adapter; `~` is expanded, a relative path resolves against the repository root; a missing or unreadable file refuses the round (exit 2) | `[]` |
 
+Keys that only `driver = "cli"` accepts (refused on the API drivers), all validated after
+the user/project merge with file/key provenance in the error; a `cli` profile also refuses
+the API-loop keys `base_url`, `max_turns`, `max_cost_usd`, `max_context`, `retries`,
+`retry_base_seconds`, `request_timeout_seconds`, `command_timeout_seconds`, `temperature`,
+`max_output_tokens`, `max_tokens_param`, `extra_body` and `post_edit` (the CLI owns its
+internal loop; `model` stays required and is metadata only):
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `command` | the CLI program and its arguments, a non-empty list of non-empty strings (required on `cli`); only `{worktree}`, `{prompt_file}` and `{last_message_file}` are expanded, each argument on its own, no shell | |
+| `read_only_command` | same shape and placeholders as `command`, but used instead of it by producer roles that must not write (the planner); only a verified read-only argv passes — today `codex exec` with an explicit `--sandbox read-only`, no `--full-auto`/approval bypass/`-c` config override, and `-o {last_message_file}` so the host captures the final message; required when this profile or one of its `fallback`s serves the planner; never inferred from the profile name | none |
+| `timeout_seconds` | the whole CLI run's deadline; on timeout the process tree is killed | 600 |
+| `prompt_via` | how the prompt reaches the CLI: `"stdin"`, `"file"` (requires `{prompt_file}` in `command`), or `"arg"` (appended as one final argument; refused for a Windows `.cmd`/`.bat` shim) | `"stdin"` |
+| `usage_format` | `"codex-jsonl"` parses stdout as one JSON event per line and sums `turn.completed` usage; `"none"` uses only the final plain stdout message, leaving usage and cost unknown (null) | `"none"` |
+| `pass_env` | extra environment-variable NAMES whose values are passed to the CLI on top of the runner allowlist | `[]` |
+| `limit_patterns` | regular expressions; a match against the bounded stderr or final output makes this attempt unavailable and tries the next `fallback` | `[]` |
+
+`billing = "api"` on `driver = "cli"` requires `api_key_env` (passed through `pass_env`);
+`billing = "subscription"` or `"local"` refuses one. See
+[Agent CLI driver](external-implementer.md#agent-cli-driver-cli-codex) for Codex examples.
+
 `[roles]` keys are `planner`, `implementer`, `checker`, `reviewer`, `backlog`. Values:
 `claude`, `claude:opus`, `claude:sonnet`, `claude:haiku` for any role, a profile name for
-`implementer` only, `script` for `checker` only (see
-[Deterministic gates](gates.md#deterministic-gates-scriptsgatespy)). `implement.py` reads only
-the profiles and `[roles] implementer`.
+`planner` and `implementer` (the planner runs `scripts/role_run.py` on it, the
+implementer `scripts/implement.py`), `script` for `checker` only (see
+[Deterministic gates](gates.md#deterministic-gates-scriptsgatespy)). The `implementer` key
+also accepts a table form instead of the scalar — `[roles.implementer]` with
+`default = "<profile>"` (required), optional `bands` and `thresholds`. Two tables merge
+by leaf across user and project files; scalar/table changes replace the whole value.
+Unknown keys are errors. The default-only table preserves the scalar behavior. `models.py select <role> [--override <profile>]
+[--project <repo-root>]` resolves one role for one invocation and prints `kind`,
+`method` (`claude` | `api` | `cli`), `profile`, `model` and `billing`; the override must
+name an enabled configured profile, never a free-form model or command.
 
 `[gates]` holds the settings of `scripts/gates.py`, the script checker: only
 `command_timeout_seconds` (number > 0), the per-command timeout of a verification
@@ -144,7 +172,7 @@ it exits 2 for invalid config.
 
 `[roles]` also picks the Claude model of every Claude-run role. Values: `claude`,
 `claude:opus`, `claude:sonnet` or `claude:haiku` for any role; a profile name for
-`implementer` only; `script` for `checker` only. A `claude:<model>` value is passed to the
+`planner` and `implementer`; `script` for `checker` only. A `claude:<model>` value is passed to the
 subagent call as its `model` argument and takes precedence over the agent file's frontmatter;
 bare `claude` passes nothing, so the frontmatter default applies; with no `models.toml` at
 all, nothing changes. A misspelled role or value is refused with exit 2, never silently
@@ -168,4 +196,119 @@ Sonnet to cut cost, the same reason dev-baseline's `code-reviewer` runs on Sonne
 ```toml
 [roles]
 reviewer = "claude:sonnet"
+```
+
+## External roles per stage
+
+Every stage has a method, a model and a billing; `/task-flow:task-doctor` prints them as
+its `## Stages` table (configuration inspection only — no CLI run, no request, no model
+capacity spent):
+
+| Stage | Claude default | External form |
+| --- | --- | --- |
+| `planner` | subagent, opus | `role_run.py` on an API profile, or a verified read-only CLI profile |
+| `implementer` | subagent, sonnet | `implement.py` on a profile (API or CLI) |
+| `checker` | subagent, haiku, or `script` (`gates.py`) | — |
+| `reviewer` | subagent, opus | — (a later task) |
+| `backlog` | subagent, opus | — (a later task) |
+
+Claude stays the preferred default for design, backlog and final review; external roles
+are opt-in per stage and are configured by capability and budget: a cheap per-token API
+profile for the planner (it only reads and writes one artifact), the Codex CLI on a
+subscription when you already pay for it, and `script` for the checker when you want
+deterministic gates. Nothing changes with no `models.toml` at all.
+
+### External planner
+
+`[roles] planner = "<profile>"` runs `scripts/role_run.py` instead of the planner
+subagent: the same agent body and contract, but through a read-only transport adapter —
+the model gets `read_file`/`list_files`/`grep` and an argv-allowlisted read-only
+`run_command` (paths and symlinks contained to the selected repository roots), no
+`write_file`/`edit_file`, no shell, no redirects, no interpreters. The runner validates
+the returned artifact against the plan.md contract and the actual base's verification
+gate (`scripts/role_contracts.py`), makes exactly one repair attempt on an invalid
+result, and atomically publishes only the validated `plan.md`; a CLI producer profile
+runs its verified `read_only_command` (Codex `exec --sandbox read-only` with
+`-o {last_message_file}`, so the host — not the model — captures the final message).
+Exit codes: 0 published, 3 valid `BLOCKED: yes` plan, 1 runtime/validation exhaustion,
+2 usage/config/preflight refusal; 1 and 2 leave `status.md` untouched (a resumable
+precondition, never a silent fallback to Claude). Each invocation writes
+`role-<role>-<invocation-id>.json` next to the task artifacts (kept at `/task-finish`
+like `impl-*.json`), with the actual profile/model/billing, attempt/repair/fallback
+usage and nullable tokens/cost — a CLI subscription's cost stays `unknown`, never `0`.
+
+Planner examples — an API profile, and the Codex CLI in its read-only form:
+
+```toml
+[profiles.planner-api]
+driver = "openai-loop"
+base_url = "https://api.mistral.ai/v1"
+model = "<model id from GET /v1/models>"
+api_key_env = "MISTRAL_API_KEY"
+billing = "api"
+
+[profiles.planner-codex]
+driver = "cli"
+model = "gpt-5.2-codex"
+billing = "subscription"
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "-"]
+read_only_command = ["codex", "exec", "--sandbox", "read-only", "--json", "-o", "{last_message_file}", "-"]
+usage_format = "codex-jsonl"
+
+[roles]
+planner = "planner-codex"        # or "planner-api"
+```
+
+`--planner <profile>` on `task-plan`, `task-run`, `task-autopilot` and `task-epic run`
+overrides the configured planner for that invocation only (it must name an enabled
+configured profile) and is passed to every newly planned task of an autopilot or epic
+run; the run's History records the invocation. Resuming without the flag uses the
+current configuration — history is evidence, not a sticky selection — and an existing
+valid `plan.md` is never silently replanned. In an autopilot run the planner's USD
+lands in each task's `External USD` cell (recomputed from the invocation files on
+resume), and `autopilot.py estimate` shows per-stage Claude and external subtotals with
+`--planner-kind`.
+
+## Deterministic implementer routing
+
+The shipped default disables size routing: no enabled bands, numeric thresholds or
+recommended numeric defaults. Keep `[roles] implementer = "<profile>"` for a fixed
+choice, or replace that scalar with `[roles.implementer] default = "<profile>"`.
+Never declare both alternatives in one file. Table targets (including the default)
+must name enabled external profiles, never Claude or script aliases. Scalar Claude
+choices continue to work.
+
+A nonempty `[roles.implementer.bands]` may map only `S`, `M`, `L` to profiles.
+It requires both `[roles.implementer.thresholds.S]` and
+`[roles.implementer.thresholds.M]`, each with exactly `steps`, `criteria`, `commands`
+and `declared_paths`: nonnegative integers, never booleans. Every S bound must be
+less than or equal to M, with at least one strictly smaller. Thresholds without bands,
+unknown keys, incomplete bounds and disabled targets fail with file/key provenance.
+
+All four measurements must fit the inclusive S bounds; otherwise all must fit M;
+otherwise the band is L. An unmapped band uses `default`. Numbered Steps and column-zero
+`AC<n>:` lines exclude fenced examples. Commands use the verification parser and gate
+command validation. Declared paths count unique comma-delimited entries after profile
+colons, with whitespace/backticks trimmed and slashes normalized. A glob is one entry;
+Unicode and spaces are preserved. This measures declarations, never actual changed
+files or difficulty, and does not expand paths against repository contents.
+
+`uv run --script plugins/task-flow/scripts/models.py roles --project .` validates
+configuration and displays the default with task-dependent routing unresolved.
+Add `--task-dir <absolute-task-directory>` to preview one planned task; no approval,
+History write or pin occurs. Task artifacts remain in root `.work/`; the repository
+root supplies project configuration, including for tasks with a worktree. A missing
+or malformed supplied plan is a refusal, never a silent default. Other role JSON fields
+remain compatible.
+
+```mermaid
+flowchart TD
+  config["Scalar or implementer table"] --> rules{"Active bands?"}
+  rules -->|"no"| fixed["Existing fixed selection"]
+  rules -->|"yes"| plan["Read and validate plan declarations"]
+  plan --> bounds["All dimensions fit S, then M, otherwise L"]
+  bounds --> selected["Mapped profile or default; preview before gate"]
+  selected --> approved["Ordinary plan approval"]
+  approved --> pin["History pin for this attempt"]
+  pin --> execute["Rounds reuse starting profile; existing fallback chain"]
 ```

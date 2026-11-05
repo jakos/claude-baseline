@@ -62,7 +62,15 @@ files whether the next task may start. Its four triggers, in both modes:
 
 All four count Claude tokens only; external USD cost is measured and reported, never a
 trigger. A task already in progress always resumes. The breaker is decided by the script
-but obeyed by procedure, not by a hook.
+but obeyed by procedure, not by a hook. An external round whose `impl-<n>.json` has a null
+`cost_usd` (a `driver = "cli"` subscription profile, or unknown usage) is not added
+numerically: its `External USD` cell is `unknown` (sticky — later numeric rounds add to
+the known subtotal and the total is reported `at least`), exactly like `autopilot.py`
+already reads it. The planner's external USD counts into the same cell: a
+`role-planner-*.json` with a null `cost_usd` makes it `unknown` the same way, and when a
+task's folder carries invocation files (`impl-<n>.json`, `role-*.json`), `estimate` and
+the epic spend recompute the totals from those invocation ids, so a resume never double
+counts.
 
 **Estimates are coarse.** Per task: check = 15000 + 3000 x commands, implement = 30000 +
 12000 x steps, review = 30000 + 6000 x criteria, finish = 10000. A round is implement +
@@ -71,7 +79,16 @@ check + review. The 1-round estimate is check (baseline) + 1 round + finish; the
 measured. With an external implementer, `autopilot.py estimate` and `next` take
 `--implementer-kind profile` and count the implement term as 0 — the external round's
 cost is measured in USD (the `External USD` column of `run.md`, totalled in `report.md`),
-not estimated. Tokens of your main session are not counted, and Claude cannot see your plan's
+not estimated; a null `cost_usd` (a CLI subscription round or unknown usage) is recorded
+as `unknown` in the column, not as 0. `estimate` and `next` also take `--planner-kind
+profile` when the planner is an external profile: the planner's cost is likewise measured
+per invocation (`role-planner-*.json`), never estimated, and the estimate prints a
+`planner: external profile; ...` line, a `spent by stage (Claude tokens): ...` line and,
+when invocation files exist, an `external by stage: planner: ..., implementer: ...`
+line. `task-autopilot --planner <profile>` plans every newly planned task of the run with
+that enabled profile (recorded once in the run's History); resuming without the flag uses
+the current configuration, and `planned`/`approved` tasks keep their plan. Tokens of your
+main session are not counted, and Claude cannot see your plan's
 session or weekly limit; check it with `/usage`.
 
 ## Epics
@@ -154,3 +171,36 @@ task belongs to at most one non-completed epic.
 - **Delivery is intent only.** `delivery: per-task | epic` records a preference until
   `agent-pr-path` merges; epics never push, open a PR, merge or make an aggregate
   integration commit, and a branched forest reports all of its branches.
+
+## Per-task routing preview
+
+The overview uses the shared `models.py roles --task-dir <absolute-task-directory>`
+resolver for each planned task, including stacked and epic tasks. `autopilot.py estimate`
+shows band (or unclassified/default), `steps`, `criteria`, `commands`, `declared_paths`
+and selected profile before the start gate. A preview does not approve or pin anything;
+a previously selected attempt is marked pinned. Inputs are declarations, not measured
+changed-file counts. Mixed bands can select different profiles in one run.
+
+External selections contribute zero implementer Claude tokens per task. Subscription
+usage and unknown costs stay unknown; External USD continues to sum round and role
+evidence, including actual fallbacks, without resetting or counting resumes twice.
+A changed plan or routing rule must regenerate the overview and return through the
+existing start gate before execution. `--auto` skips only its existing question.
+A pinned attempt rejects incompatible changes rather than rerouting.
+
+```mermaid
+flowchart TD
+  plans["Plan every task, stacked or epic"] --> preview["Resolve each task: inputs, band, profile"]
+  preview --> overview["Overview and per-task estimates"]
+  overview --> gate["Existing start gate; auto skips question"]
+  gate --> execute["Approved attempts pin their selections"]
+  execute --> rounds["Existing task loop and accounting"]
+  overview -->|"plan or rules changed"| preview
+```
+
+Estimate also emits versioned `routing-preview/1` digest records. At the overview the
+orchestrator copies them into run History before the existing start gate. `next`
+compares current plan/rule/profile digests with that saved overview and refuses with
+an instruction to repeat overview/start gate if they changed or are missing. This
+resumable precondition prevents a changed choice from inheriting stale approval;
+it creates no new workflow phase or stop and never pins a preview in task status.

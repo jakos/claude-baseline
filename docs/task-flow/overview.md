@@ -22,7 +22,7 @@ flowchart TD
   impl["implement.py"]
   loop1["openai-loop (Mistral, OpenAI-compatible)"]
   loop2["anthropic-loop (Claude API)"]
-  cli["agent CLI, e.g. Codex (planned)"]
+  cli["agent CLI, e.g. Codex (driver cli)"]
   gate["checker subagent or gates.py"]
   wt["git worktree"]
   orch -->|"reads and writes"| files
@@ -35,19 +35,19 @@ flowchart TD
   orch --> impl
   impl --> loop1
   impl --> loop2
-  impl -.->|"planned"| cli
+  impl -->|"one process, driver cli"| cli
   sub -->|"changes in"| wt
   impl -->|"changes in"| wt
   gate -->|"reads"| wt
   gate -->|"writes checks-n.md"| files
-  classDef planned stroke-dasharray: 5 5
-  class cli planned
 ```
 <!-- /diagram:architecture -->
 
 The diagram cannot carry: the API key of an external profile lives only in the runner's
 environment, never in `models.toml`; with `checker = "script"` the gate is
-`scripts/gates.py`, not the checker subagent; no agent-CLI driver is built yet.
+`scripts/gates.py`, not the checker subagent; a `driver = "cli"` profile runs one agent-CLI
+process (`scripts/cli_driver.py`) that owns its own tools and sandbox — the runner controls
+only its environment, working directory, deadline and result capture.
 
 A multi-agent workflow for tasks and feature requests:
 
@@ -116,7 +116,8 @@ skills/task-*/                  the 12 commands
 hooks/hooks.json, scripts/rules.py, scripts/guard.py, scripts/task_list.py,
 scripts/prune_task.py, scripts/autopilot.py, scripts/epics.py (persistent epics:
 `.work/_epics/<epic-id>/epic.md`, run through the autopilot with `source: epic`),
-scripts/implement.py, scripts/drivers.py,
+scripts/implement.py, scripts/drivers.py, scripts/cli_driver.py (the driver "cli"
+execution boundary: one agent-CLI process per round),
 scripts/launch.py, scripts/gates.py, scripts/models.py, scripts/release.py,
 scripts/doctor.py               read-only environment and configuration check (task-doctor)
 scripts/sdlc_status.py          SDLC status: validate, check, render, done and finish
@@ -133,9 +134,10 @@ templates/task-flow.md          project config example
 templates/models.toml           commented models.toml example (profiles, [roles], [gates])
 templates/release.toml          commented release config example (targets, version files)
 templates/records.toml          commented task-record config example (disabled by default)
-tests/test_drivers.py, tests/test_doctor.py
-                                offline suites for scripts/drivers.py and scripts/doctor.py
-                                (the other test_*.py suites cover the other scripts)
+tests/test_drivers.py, tests/test_doctor.py, tests/test_cli_driver.py
+                                offline suites for scripts/drivers.py, scripts/doctor.py and
+                                scripts/cli_driver.py (the other test_*.py suites cover the
+                                other scripts)
 tests/test_bench.py             offline suite for bench/bench.py
 tests/test_bench_publish.py     offline suite for bench/publish.py
 tests/test_docs.py              offline suite for the docs pages and their links

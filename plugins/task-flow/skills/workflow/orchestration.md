@@ -63,6 +63,21 @@ nothing changes. A `checker` entry of kind `script` means `scripts/gates.py` run
 Phase baseline and Phase check (see those phases): never the checker subagent, and never
 a silent fallback to it either way — kind `claude` always runs `task-flow:checker`.
 
+For one invocation-scoped override, `task-plan`, `task-run`, `task-autopilot` and
+`task-epic run` accept `--planner <profile>`: resolve it with
+`uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" select planner --override <profile> --project <repo-root>`
+(exit 2: show stderr and end the command without changing `status.md` — a precondition,
+not a stop). The override must name an **enabled configured profile** of models.toml —
+never a free-form model, a `claude:*` value, `script` or a command. The explicit
+override wins over the configured `[roles] planner` for that invocation only and is
+passed to every newly planned task of an autopilot or epic run; the run's History
+records the invocation for audit. Resuming without the flag uses the current
+configuration — history is evidence, not a sticky selection — and an existing valid
+`plan.md` of a `planned`/`approved` task is never silently replanned. The same `select`
+subcommand resolves any role with `--override` (`models.py select <role> [--override
+<profile>] --project <repo-root>`, printing `kind`, `method` (`claude` | `api` | `cli`),
+`profile`, `model`, `billing`).
+
 ## Phase: new
 
 1. Read `.claude/task-flow.md` if it exists (format: `${CLAUDE_PLUGIN_ROOT}/templates/task-flow.md`).
@@ -78,12 +93,41 @@ a silent fallback to it either way — kind `claude` always runs `task-flow:chec
 
 ## Phase: plan
 
-1. Run subagent `task-flow:planner` with the paths (its model as in "Choosing each role's
+0. **Planner selection.** From the repository root resolve the planner for this
+   invocation: `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" select planner [--override <the --planner value>] --project <repo-root>`
+   (exit 2: show its stderr and end the command without changing `status.md` — a
+   precondition, not a stop). Read the JSON's `kind`, `method`, `profile`, `model`,
+   `billing`. With no external planner configured (kind `claude`) the orchestrator
+   runs the Claude subagent; `scripts/role_run.py` refuses a Claude role itself.
+1. Kind `claude` (value `claude` or `claude:*`, also the result with no config): run
+   subagent `task-flow:planner` with the paths (its model as in "Choosing each role's
    model").
+   Kind `profile`: from the repository root, in the background (the planning run can
+   outlast the Bash tool's foreground limit), run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/role_run.py" --role planner --task-dir <abs .work/<id>> --project <repo-root> --worktree <abs worktree | none> [--profile <value> when --planner was given]`
+   and wait. The runner gives the model the same agent body and contract as the Claude
+   planner plus a read-only transport adapter, validates the returned artifact against
+   the workflow contract and the actual base's gate, makes exactly one repair attempt
+   on an invalid result, and atomically publishes only the validated `plan.md`; it also
+   writes the invocation metrics `role-planner-<invocation-id>.json`. The model never
+   writes files; a CLI producer profile runs through its verified `read_only_command`
+   and the host captures the final message. Exit 0: continue at step 2. Exit 3: the
+   published `plan.md` is a valid `BLOCKED: yes` plan; step 2 applies unchanged. Exit 1
+   or 2: show the one redacted result line, leave phase, round and `status.md`
+   unchanged and end the command — a resumable failed precondition, not a stop and not
+   a new phase; the same command plans again, and the run never falls back to the
+   Claude subagent silently.
 2. If `plan.md` starts its open questions with `BLOCKED: yes`: show the questions, set
    phase `new`, stop. After the user answers, append the answers to `task.md` and re-plan.
 3. Otherwise set phase `planned` and show a short summary: goal, profiles, number of
-   steps, the acceptance criteria verbatim, the verification commands.
+   steps, the acceptance criteria verbatim, the verification commands. The History
+   line names the planner: `claude`, `claude:<model>`, or `planner <profile> (external,
+   <method>/<model>): published plan.md` — recorded only when planning succeeded, so a
+   failed or refused external run leaves `status.md` untouched. After a successful
+   external planner run, read `.work/<id>/role-planner-*.json` and add its `cost_usd`
+   to the task's `External USD` cell when the run table has the column (adding the
+   column with `0` everywhere when a cost must be recorded and it is absent); a null
+   cost writes `unknown` (sticky), exactly like an external implementer round.
 4. **Approval gate.** Ask: approve / edit / cancel (with `AskUserQuestion` when
    available). Do not continue without an explicit approve. "Edit" means the user's
    changes go into `task.md` as constraints and the planner runs again.
@@ -124,11 +168,21 @@ steps 1-3 again; step 2 reuses an existing worktree or branch and never re-creat
 2. Round 1 requires `checks-0.md`; if it is missing, run **Phase: baseline** first.
 3. Pick the implementer.
    - (a) Resolve the roles from the repository root with `models.py roles`:
-     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`.
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root> --task-dir <abs .work/<id>>`.
+     Use the returned implementer value and routing evidence, never a taskless default
+     when routing is active. Preview does not approve or pin; implementation preflight
+     publishes the attempt History event. Reuse the pin on later rounds and resumes.
      Exit 2: show its stderr and end the command without changing `status.md` (a
      precondition, like the uncommitted-changes check, not a stop). Read the
      `implementer` entry of the JSON (as in "Choosing each role's model").
-   - (b) Set round n, phase `implementing`.
+   - (b) For active routing with no current attempt pin, while status is still round 0
+     (after ordinary plan approval and baseline), run
+     `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/implement.py" --task-dir <abs .work/<id>> --worktree <abs worktree | none> --round 1 --profile <value> --prepare-routing`.
+     This performs the same preflight and publishes only the selection History event;
+     no model runs and no round advances. Exit 2: show the resumable refusal and leave
+     phase/round unchanged. On success, or when the attempt is already pinned, set
+     round n, phase `implementing`. Never prepare a new pin on a started unpinned attempt;
+     it requires an explicitly authorized restart/retry.
    - (c) Kind `claude` (value `claude` or `claude:*`, also the result with no config):
      run subagent `task-flow:implementer` with the paths, and for n > 1 the path of
      `review-<n-1>.md`, passing the entry's `model` as the subagent call's `model`
@@ -258,7 +312,10 @@ be recorded, add it to the header and every row with `0`. Its values are a USD s
 plain decimal notation, never scientific notation — write `0.000012`, not `1.2e-05` (6
 decimal places are enough, because `implement.py` rounds `cost_usd` to 6; `autopilot.py`
 accepts either notation when reading) — or `unknown` (sticky) when an `impl-<n>.json`
-that should exist is missing or unreadable. `budget` is Claude tokens. `bootstrap` names
+that should exist is missing or unreadable, **or when its `cost_usd` is null** (a
+`driver = "cli"` subscription round or unknown usage: do not add anything numerically and
+do not write `0` — write `unknown`; a later numeric round adds to the known subtotal and
+the run total is then reported `at least`). `budget` is Claude tokens. `bootstrap` names
 the bootstrap task; it is row 1 and every other row depends on it directly. `source` is
 optional and absent means `backlog`; `tasks` marks a run built from an explicit
 `--tasks` list (see "Explicit task list" below) and requires `bootstrap: none`, row 1
@@ -308,9 +365,12 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    questions (id from the backlog, de-duplicated; `task.md` from its Goal/Context/
    Constraints plus a Context line naming the run and its dependencies; `status.md` with
    the run's base) and add its row to `run.md`; with a bootstrap task set `bootstrap:` to
-   its final id. Then Phase: plan steps 1–3 for each task **without the approval gate**, in
+   its final id. Then Phase: plan steps 0–3 for each task **without the approval gate**, in
    table order; each planner runs with its model as in "Choosing each role's model" (via
-   Phase: plan step 1). **With a bootstrap task, the bootstrap task is planned first**, completely
+   Phase: plan steps 0–1), passing the run's `--planner <profile>` through as the
+   invocation override when the command was given one — the run's History records the
+   invocation once (`planned — planner override <profile> (<method>/<model>)`, only
+   when at least one task was planned with it). **With a bootstrap task, the bootstrap task is planned first**, completely
    (its planner `BLOCKED: yes` questions asked and answered into its `task.md`, and
    re-planned, until its `plan.md` is not blocked), before any other task is planned. Every
    later task's `task.md` Context then carries the line: "Toolchain and verification: read
@@ -319,18 +379,25 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    those tasks says the same; the planner agent itself is unchanged. For the remaining
    tasks, collect planner `BLOCKED: yes` questions, ask them in one message, append the
    answers to each `task.md`, re-plan those. Add every subagent's `total_tokens` to
-   `planning-tokens` (`unknown` if any is missing). State `planning`, then `ready`. All
+   `planning-tokens` (`unknown` if any is missing); an external planner round adds no
+   Claude tokens — its USD goes to the task's `External USD` cell via its
+   `role-planner-*.json`, like step 3's note. State `planning`, then `ready`. All
    tasks are still planned before the overview. Later plans are not re-planned after the
-   bootstrap task finishes.
+   bootstrap task finishes, and `planned`/`approved` tasks keep their plan on resume.
 5. **Overview (always, both modes).** Run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
    (exit 2: show its stderr and end the command without changing `run.md` — a
-   precondition, not a stop) and read the implementer's `kind`. Show, per task, id, goal
+   precondition, not a stop) and read the implementer's `kind` and the planner's `kind`.
+   Show, per task, id, goal
    line and dependencies, marking the bootstrap task; then the output of
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" estimate .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind>`
    verbatim; the mode; and the sentence: estimates are coarse; the main session's own
    tokens are not counted; Claude cannot see your plan's session or weekly limit, check it
    with `/usage`.
+   Copy each `routing-preview <JSON>` line emitted by estimate verbatim into run.md
+   History as `- <timestamp> routing-preview <JSON>`. These versioned digest records
+   describe the shown overview, never approval or an attempt pin. Use task-aware
+   per-task selections; the taskless implementer kind is only a legacy estimate fallback.
 6. **Start gate.** Ask start / edit / cancel. Start: in every task's `status.md` set
    `plan-approved: yes (user, <date>, autopilot <run-id>)` and phase `approved`. Edit: the
    change goes into that task's `task.md` (or `requirements.md` for backlog changes),
@@ -341,9 +408,14 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
 7. **Loop (between tasks).** Each iteration, run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/models.py" roles --project <repo-root>`
    (exit 2: show its stderr and end the command without changing `run.md` — a
-   precondition, not a stop) and read the implementer's `kind`, then run
-   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind>`
+   precondition, not a stop) and read the implementer's `kind` and the planner's `kind`,
+   then run
+   `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" next .work/_autopilot/<run-id> --implementer-kind <implementer kind> --planner-kind <planner kind>`
    and obey it exactly; never pick another task or stop on your own judgment.
+   If `next` refuses because a routing preview changed or is missing, repeat overview
+   and the existing start gate (steps 5-6) before dispatch; preserve the existing
+   `--auto` question behavior. Never refresh digest records after the gate silently. The breaker
+   counts Claude tokens only, so `--planner-kind` never changes its verdict.
    - `run <id>`: if the task has not started (phase `approved`, no worktree), set its
      `status.md` `base:` to the output of
      `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.py" base .work/_autopilot/<run-id> <id>`
@@ -363,7 +435,12 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
      `implement.py` rounds `cost_usd` to 6; `autopilot.py` also accepts scientific
      notation) (exit 2 adds nothing — a stale file from an earlier attempt may exist; if
      the column is absent, add it to the header and every row with `0` first), and record
-     the History line `implementer <profile>: <cost_usd> USD external`. If an external
+     the History line `implementer <profile>: <cost_usd> USD external`. When that
+     `cost_usd` is **null** (a `driver = "cli"` subscription profile, or usage the CLI did
+     not report), skip the numeric addition: write `unknown` in the cell (sticky — later
+     numeric rounds still add to the known subtotal and the totals read `at least`) and
+     record the History line `implementer <profile>: unknown USD external (subscription
+     or unreported usage)`. If an external
      round ends with exit 1 or 2, set state `paused` (also with `--auto`), show the line
      and append the History line `paused: external implementer failed (<id>)`; do not run
      `next`. Otherwise append a History line to `run.md`, then run `next` again with the
@@ -380,7 +457,8 @@ completed, and that the `## Tasks` table matches the epic's rows and dependencie
    are none —, Claude tokens used, External USD, the 1-round and 3-round estimates), a
    totals line with the Claude tokens (`planning-tokens` plus the sum of `Tokens used`,
    `at least` when any is `unknown`) and the external USD (the sum of the `External USD`
-   column, or `0` when the column is absent), the branch stack in order (the last `done`
+   column, `at least` when any row is `unknown` — a null CLI cost is never added as 0 —,
+   or `0` when the column is absent), the branch stack in order (the last `done`
    branch contains all finished work), skipped
    and failed tasks with their `summary.md`, and what is left to the user: push, PRs,
    worktree removal. Show it.
@@ -407,10 +485,13 @@ Gather). Write `requirements.md`: the id list as given, and the `inspect` output
 `## Repository`. No `backlog.md`. Ensure `.work/.gitignore` as in Phase: new.
 (d) Set each listed task's `status.md` `base:` to the run's base (all of them are `new`,
 `planned` or `approved`).
-(e) Plan every `new` task in table order with Phase: plan steps 1–3 without the approval
-gate, collecting `BLOCKED: yes` questions in one message, appending the answers to each
+(e) Plan every `new` task in table order with Phase: plan steps 0–3 without the approval
+gate (passing the command's `--planner <profile>` through as the override when given),
+collecting `BLOCKED: yes` questions in one message, appending the answers to each
 `task.md` and re-planning those; `planned` and `approved` tasks keep their plan. Add
-every planner's `total_tokens` to `planning-tokens` (`unknown` if any is missing).
+every planner subagent's `total_tokens` to `planning-tokens` (`unknown` if any is
+missing; an external planner adds no Claude tokens — its USD goes to the task's
+`External USD` cell via its `role-planner-*.json`).
 State `planning`, then `ready`.
 (f) **Overview, Start gate, Loop and Report** as in steps 5–8, with: no bootstrap task is
 marked; the `warning:` line of `autopilot.py estimate` (more than 10 tasks) is shown
@@ -492,8 +573,11 @@ All `epics.py` calls run from the repository root:
    and `epic: <epic-id>`). Write `run.md` as in Gather, but with `source: epic`,
    `epic: <epic-id>`, and the `## Tasks` table **generated from the epic's graph** (same
    rows, same `Depends on` cells) — never edited by hand. Then run steps 5–8 of Autopilot
-   unchanged: role resolution, `estimate`, the overview, the start gate (`--auto` skips
-   only that question), the `next`-driven loop and `report.md`. The same epic id always
+   unchanged: role resolution, `estimate` (with `--planner-kind`), the overview, the
+   start gate (`--auto` skips
+   only that question), the `next`-driven loop and `report.md`. A `--planner <profile>`
+   given to `task-epic run` is passed to every newly planned member task as in Autopilot
+   step 4. The same epic id always
    resumes the same linked run; idle additions are incorporated through a fresh
    planning/start gate — step 2's regeneration of the linked run's table sets its state
    back to `planning` — without overwriting started-task state or historical totals.
@@ -592,7 +676,9 @@ All `epics.py` calls run from the repository root:
 9. **Prune** (not asked): from the repository root run
    `uv run --quiet --script "${CLAUDE_PLUGIN_ROOT}/scripts/prune_task.py" .work/<id>` and
    show its output. Every top-level `.md` file stays (task, plan, status, summary, checks,
-   reviews) and so do the `impl-*.json` files, everything else in the folder is deleted, and `worktree/` is left to the
+   reviews) and so do the `impl-*.json` files and the final `role-*.json` metrics of
+   external role invocations (only their scratch/progress files are pruned), everything
+   else in the folder is deleted, and `worktree/` is left to the
    worktree question in step 5. If the script exits non-zero, show stderr: exit 2 means it
    refused and deleted nothing, exit 1 means some entries (`failed: <name>`) could not be
    removed and the rest was pruned. Do not retry or delete by hand.
@@ -653,3 +739,21 @@ live in `.claude/task-flow.release.toml` (override with `--config <path>`).
 5. `--online` adds one authenticated request per profile in use,
    `GET <base_url>/models` — the provider's model list, which costs no tokens — and says
    whether the configured `model` is among the listed ids.
+
+## Routing in the overview and dispatch
+
+For every planned task resolve `models.py roles --project <repo-root> --task-dir <abs .work/<id>>`
+using repository-root artifacts and configuration. Show the returned band
+(or unclassified/default), inputs and selected profile with `autopilot.py estimate`
+before the existing start gate. Distinguish a read-only preview from a pinned attempt.
+Use per-task implementer kinds for mixed-task estimates, including stacked and epic
+tasks. Do not use one run-wide model judgment. A plan/rule change regenerates the
+overview and returns through the existing start gate; a pinned incompatible attempt
+refuses and requires restoration or an explicitly authorized restart/retry.
+
+Keep ordinary approval, phase, round, three-round/no-progress and failure/resume
+handling unchanged. `--auto` skips only existing questions. Pass the task-aware selected
+starting profile to `implement.py`; it validates the pin before model contact and
+publishes selection only after successful preflight. Actual fallback profiles and
+nullable costs remain in round evidence; never reset or double-count External USD
+because selection changed. A preflight refusal does not advance a round.

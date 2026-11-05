@@ -1044,5 +1044,82 @@ class RunVersionTest(BenchFixture):
         self.assertNotIn("task_flow_version", meta["case_entries"])
 
 
+class RoutingEvidenceTest(unittest.TestCase):
+    def test_routing_groups_preserve_protocol_rules_and_unknown_cost(self) -> None:
+        evidence = {
+            "schema": "implementer-routing/1",
+            "band": "S",
+            "selected_profile": "small",
+            "rule_digest": "rules-a",
+        }
+        rows = [
+            {
+                "n": i,
+                "case": "large-case",
+                "size": "L",
+                "profile": "small",
+                "repeat": i,
+                "routing": evidence,
+                "fingerprint": "protocol-a",
+                "review": False,
+                "outcome": "accepted" if i < 3 else "failed",
+                "hidden": "pass" if i < 3 else "fail",
+                "cost_usd": float(i),
+                "cost_known": True,
+            }
+            for i in range(1, 4)
+        ]
+        groups = bench.routing_summary(rows, {})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["band"], "S")
+        self.assertEqual(groups[0]["repeats"], 3)
+        self.assertEqual(groups[0]["accepted"], 2)
+        self.assertEqual(groups[0]["hidden_pass"], 2)
+        self.assertEqual(groups[0]["cost_median"], 2.0)
+        self.assertEqual(groups[0]["cost_spread"], [1.0, 3.0])
+        for change in [
+            {"fingerprint": "protocol-b"},
+            {"review": True},
+            {"routing": dict(evidence, rule_digest="rules-b")},
+        ]:
+            self.assertEqual(
+                len(bench.routing_summary(rows + [dict(rows[0], **change)], {})), 2
+            )
+        unknown = bench.routing_summary(
+            rows + [dict(rows[0], cost_usd=None, cost_known=False)], {}
+        )[0]
+        self.assertIsNone(unknown["cost_median"])
+        legacy = bench.routing_summary([dict(rows[0], routing=None)], {})[0]
+        self.assertIsNone(legacy["band"])
+        self.assertIsNone(legacy["selected_profile"])
+        self.assertIn(
+            "missing routing evidence is unknown",
+            "\n".join(bench.routing_report(rows, {})),
+        )
+
+    def test_published_summary_contains_computed_evidence(self) -> None:
+        # Existing row fixtures exercise all ordinary publisher fields.
+        rows = small_rows()
+        meta = {
+            "run_id": "r1",
+            "cases": ["c1", "c2"],
+            "profiles": ["a", "b"],
+            "repeat": 2,
+            "fingerprint": FP1,
+            "review": False,
+        }
+        rows[0]["routing"] = {
+            "schema": "implementer-routing/1",
+            "band": "S",
+            "selected_profile": "routed",
+            "rule_digest": "rules",
+        }
+        summary = publish.summarize(meta, rows)
+        self.assertTrue(
+            any(group["selected_profile"] == "routed" for group in summary["routing"])
+        )
+        self.assertIn("Computed routing evidence", publish.render_latest(summary, None))
+
+
 if __name__ == "__main__":
     unittest.main()

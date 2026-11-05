@@ -23,6 +23,7 @@ diagram_block to copy the diagrams onto the front page.
 
 import json
 import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -61,7 +62,11 @@ FRONT_PAGE = "README.md"
 # lines strictly between the sdlc:status markers, because sdlc_status.py controls those
 # (bounded separately by SDLC_BLOCK_MAX_LINES).
 FRONT_PAGE_MAX_LINES = 150
-PLUGIN_README_MAX_LINES = 40
+# cli-implementer-driver added the Codex subscription/API example block under the plugin
+# README's Documentation section, so the README grew from 40 to 59 lines.
+# external-role-delegation round 2 added the one-line external-planner pointer after that
+# block, so the cap grows to 61.
+PLUGIN_README_MAX_LINES = 61
 # readme-front-page: the bench:latest marker pair of the front page; must equal
 # README_START / README_END in plugins/task-flow/bench/publish.py.
 BENCH_LATEST = ("<!-- bench:latest:start -->", "<!-- bench:latest:end -->")
@@ -176,6 +181,7 @@ KEPT = [
     (BENCH_README, "Re-running over time and the suite fingerprint"),
     (BENCH_README, "Durability"),
     (BENCH_README, "Limits, stated plainly"),
+    (BENCH_README, "Promoting routing evidence manually"),
 ]
 # Fenced code blocks (info string "mermaid" excluded), measured on the base and after
 # the split; a later task that adds or removes one updates BLOCKS_AFTER here.
@@ -186,7 +192,7 @@ BLOCKS_BEFORE = {
 }
 BLOCKS_AFTER = {
     "README.md": 1,
-    PLUGIN_README: 1,
+    PLUGIN_README: 2,
     BENCH_README: 8,
     "docs/README.md": 0,
     "docs/dev-baseline.md": 6,
@@ -196,8 +202,8 @@ BLOCKS_AFTER = {
     "docs/task-flow/setup.md": 8,
     "docs/task-flow/commands.md": 0,
     "docs/task-flow/autopilot.md": 1,
-    "docs/task-flow/configuration.md": 3,
-    "docs/task-flow/external-implementer.md": 13,
+    "docs/task-flow/configuration.md": 4,
+    "docs/task-flow/external-implementer.md": 16,
     "docs/task-flow/gates.md": 5,
     "docs/task-flow/enforcement.md": 0,
     "docs/task-flow/profiles.md": 0,
@@ -212,9 +218,15 @@ BLOCKS_ADDED = {
     "docs/task-flow/setup.md": 5,
     # Added by the task readme-front-page: the front page keeps one fenced block (the
     # quick-start install block, delta 0 against the post-split count), and the plugin
-    # README gains its five-line quick-reference block.
+    # README gains its five-line quick-reference block; cli-implementer-driver added the
+    # Codex subscription/API example block under the plugin README's Documentation
+    # section, so its total is 2.
     "README.md": 0,
-    PLUGIN_README: 1,
+    PLUGIN_README: 2,
+    # Added by the task cli-implementer-driver: the three blocks of the new
+    # "Agent CLI driver (cli): Codex" section of external-implementer.md (two toml
+    # examples and the manual smoke command).
+    "docs/task-flow/external-implementer.md": 3,
     # Added by the task ci-github-actions: one block in docs/development.md (the local
     # verify.py command in the CI section) and two in docs/task-flow/gates.md (the local
     # verify.py run and a sample of its per-check output). The CI Mermaid diagram is
@@ -223,7 +235,9 @@ BLOCKS_ADDED = {
     "docs/task-flow/gates.md": 2,
     # Added by the task task-record-in-git: the records.toml example block in the new
     # "Task records (records.toml)" section of docs/task-flow/configuration.md.
-    "docs/task-flow/configuration.md": 1,
+    # Added by the task external-role-delegation: the planner-examples toml block in the
+    # new "External roles per stage" section of the same page.
+    "docs/task-flow/configuration.md": 2,
     # Added by the task task-epics: the strict epic.md example block in the new "Epics"
     # section of docs/task-flow/autopilot.md.
     "docs/task-flow/autopilot.md": 1,
@@ -1164,6 +1178,35 @@ class DocsTest(unittest.TestCase):
             )
             resolved = ((ROOT / PLUGIN_README).parent / target).resolve()
             self.assertTrue(resolved.is_file(), f"plugin README: broken link {target}")
+
+
+class RoutingDocsTest(unittest.TestCase):
+    def test_routing_contract_and_disabled_defaults_documented(self) -> None:
+        text = (ROOT / "docs/task-flow/configuration.md").read_text(encoding="utf-8")
+        for needle in (
+            "declared_paths",
+            "nonnegative integers",
+            "task-dependent",
+            "inclusive",
+            "no enabled bands",
+        ):
+            self.assertIn(needle, text)
+        template = (ROOT / "plugins/task-flow/templates/models.toml").read_text(
+            encoding="utf-8"
+        )
+        parsed = tomllib.loads(template)
+        self.assertIsInstance(parsed["roles"]["implementer"], str)
+        self.assertIn("uncalibrated", template)
+        for rel in ("docs/task-flow/benchmark.md", "plugins/task-flow/bench/README.md"):
+            evidence = (ROOT / rel).read_text(encoding="utf-8")
+            for needle in (
+                "ranking",
+                "minimum is not established",
+                "protocol fingerprints",
+                "hidden-pass",
+                "median and spread",
+            ):
+                self.assertIn(needle, evidence)
 
 
 if __name__ == "__main__":

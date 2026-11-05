@@ -22,3 +22,19 @@ cost no context. Agents read them by path.
    allowed values under `plan.md → Profiles`.
 3. Run one `task-run` on a scratch repo with a file it should detect, and check that
    `plan.md → Profiles` names it.
+
+Separate from these detection profiles, a workflow *stage* can also be delegated to an
+external model profile from `models.toml` — today the planner, via
+`[roles] planner = "<profile>"` or a one-run `--planner <profile>` — see
+[External planner](external-implementer.md#external-planner-a-producer-role) and
+[Configuration](configuration.md#external-planner).
+
+## Implementer profiles by plan size
+
+Detection profiles above remain separate from model profiles. The optional
+`roles.implementer` routing table selects enabled external profiles using four plan
+counts and inclusive S/M bounds, with L for overflow and `default` for unmapped bands.
+See [Configuration](configuration.md#deterministic-implementer-routing) for both TOML
+alternatives and strict validation. No thresholds are enabled or recommended by default.
+Profile-specific limits and fallback chains remain unchanged; routing never promotes
+a model because a round failed.

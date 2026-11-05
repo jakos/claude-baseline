@@ -271,6 +271,143 @@ class RulesTest(unittest.TestCase):
                     rules.check_command(command, "external-implementer"), command
                 )
 
+    def test_external_planner_argv_allowlist(self):
+        allowed = [
+            ["git", "status"],
+            ["git", "status", "--short"],
+            ["git", "log", "--oneline", "-5"],
+            ["git", "ls-files"],
+            ["git", "diff", "main", "--stat"],
+            ["git", "show", "HEAD:README.md"],
+            ["git", "blame", "README.md"],
+            ["git", "rev-parse", "--verify", "HEAD"],
+            ["git", "grep", "-n", "x", "--", "."],
+            ["git", "--no-pager", "log", "-1"],
+            ["git", "--version"],
+            ["ls", "-la", "plugins"],
+            ["rg", "--files", "plugins/task-flow"],
+            ["grep", "-rn", "planner", "docs"],
+            ["find", ".", "-name", "*.py"],
+            ["find", ".", "-name", "*.py", "-print"],
+            ["head", "-n", "20", "README.md"],
+            ["cat", ".gitignore"],
+            ["C:\\tools\\rg.exe", "--version"],
+        ]
+        denied = [
+            (["python", "-c", "print(1)"], "allowlist"),
+            (["python3", "-V"], "allowlist"),
+            (["node", "-e", "1"], "allowlist"),
+            (["powershell", "-Command", "ls"], "allowlist"),
+            (["cmd", "/c", "dir"], "allowlist"),
+            (["uv", "run", "x.py"], "allowlist"),
+            (["uvx", "ruff", "check", "."], "allowlist"),
+            (["env", "X=1", "ls"], "allowlist"),
+            (["xargs", "rm"], "allowlist"),
+            (["sh", "-c", "git push"], "allowlist"),
+            (["git", "commit", "-m", "x"], "read-only"),
+            (["git", "push", "origin", "main"], None),
+            (["git", "add", "."], "read-only"),
+            (["git", "checkout", "main"], "read-only"),
+            (["git", "-C", "/etc", "log"], "outside the selected repository"),
+            (
+                ["git", "--work-tree", "/tmp", "status"],
+                "outside the selected repository",
+            ),
+            (
+                ["git", "--git-dir=/etc", "log"],
+                "outside the selected repository",
+            ),
+            (["git", "-C/etc", "log"], "outside the selected repository"),
+            (["ls", "a>b"], "shell syntax"),
+            (["ls", "$(rm -rf /)"], "shell syntax"),
+            (["ls", "a|b"], "shell syntax"),
+            (["grep", "-r", "x", ".", ">", "out"], "shell syntax"),
+            ([], "non-empty argv"),
+            ([""], "non-empty argv"),
+        ]
+        for argv in allowed:
+            with self.subTest(argv=argv):
+                self.assertIsNone(rules.check_argv(argv, "external-planner"), argv)
+        for argv, needle in denied:
+            with self.subTest(argv=argv):
+                reason = rules.check_argv(argv, "external-planner")
+                self.assertIsNotNone(reason, argv)
+                if needle:
+                    self.assertIn(needle, reason, argv)
+        # other roles are not restricted by check_argv
+        self.assertIsNone(
+            rules.check_argv(["python", "-c", "x"], "external-implementer")
+        )
+        self.assertIsNone(rules.check_argv(["python", "-c", "x"], "planner"))
+        with self.assertRaises(ValueError):
+            rules.check_argv(["ls"], "general-purpose")
+
+    def test_external_planner_argv_read_only_holes_closed(self):
+        """The allowlisted programs themselves must not mutate (review round 1, finding 1)."""
+        denied = [
+            (["find", ".", "-delete"], "-delete"),
+            (["find", ".", "-exec", "rm", "{}", "+"], "-exec"),
+            (["find", ".", "-execdir", "sh", "-c", "id", "{}", ";"], "-execdir"),
+            (["find", ".", "-ok", "rm", "{}"], "-ok"),
+            (["find", ".", "-okdir", "rm", "{}"], "-okdir"),
+            (["find", ".", "-fprint", "x.txt"], "-fprint"),
+            (["find", ".", "-fprint0", "x.txt"], "-fprint0"),
+            (["find", ".", "-fprintf", "x.txt", "%p"], "-fprintf"),
+            (["find", ".", "-fls", "x"], "-fls"),
+            (["rg", "--pre", "python", "x", "."], "--pre"),
+            (["rg", "--pre=python", "x", "."], "--pre=python"),
+            (["rg", "--pre-glob", "*.py", "--pre", "python", "."], "--pre"),
+            (["git", "diff", "--output=out.txt"], "--output=out.txt"),
+            (["git", "log", "--output", "o"], "--output"),
+            (["git", "grep", "-O", "sh", "x"], "-O"),
+            (["git", "--open-files-in-pager", "grep", "x"], "--open-files-in-pager"),
+            (["git", "log", "--ext-diff"], "--ext-diff"),
+            (["git", "log", "--textconv"], "--textconv"),
+            (["git", "--paginate", "log"], "--paginate"),
+            (["git", "-ccore.pager=sh", "log"], "-ccore.pager=sh"),
+            (["git", "-c", "core.pager=sh", "log"], "-c"),
+            (["git", "--config", "core.pager=sh", "log"], "--config"),
+            (["git", "log", "-c", "core.pager=sh"], "-c"),
+            (["git", "config", "--list"], "'config'"),
+            (["git", "remote", "-v"], "'remote'"),
+            (["git", "branch", "-a"], "'branch'"),
+            (["file", "-C", "x"], "not in the read-only allowlist"),
+            (["file", "x"], "not in the read-only allowlist"),
+            (["jq", "."], "not in the read-only allowlist"),
+            (
+                ["jq", "--rawfile", "s", "/etc/passwd", "."],
+                "not in the read-only allowlist",
+            ),
+            (["jq", "-f", "prog.jq", "."], "not in the read-only allowlist"),
+        ]
+        for argv, needle in denied:
+            with self.subTest(argv=argv):
+                reason = rules.check_argv(argv, "external-planner")
+                self.assertIsNotNone(reason, argv)
+                self.assertIn(needle, reason, argv)
+        # read-only forms of the same programs stay allowed
+        allowed = [
+            ["find", ".", "-name", "*.py", "-type", "f"],
+            ["rg", "--files", "."],
+            ["rg", "-g", "*.py", "planner", "."],
+            ["git", "diff", "--stat"],
+            ["git", "log", "--no-textconv", "-1"],
+            ["git", "grep", "-n", "x", "."],
+        ]
+        for argv in allowed:
+            with self.subTest(allowed=argv):
+                self.assertIsNone(rules.check_argv(argv, "external-planner"), argv)
+
+    def test_external_planner_commands_and_writes(self):
+        # the same leaves/commit/snooze denials as the external implementer
+        for command in ("git push", "git commit -m x", "habit-snooze --snooze x"):
+            self.assertIsNotNone(rules.check_command(command, "external-planner"))
+        self.assertIsNone(rules.check_command("git status", "external-planner"))
+        # a producer may not write anything: the runner publishes the artifact
+        self.assertIsNotNone(rules.check_write("plan.md", "external-planner"))
+        self.assertIsNotNone(rules.check_write(".work/x/plan.md", "external-planner"))
+        self.assertIn("may not write", rules.check_write("plan.md", "external-planner"))
+
     def test_external_implementer_writes_confined_to_worktree(self):
         outside = Path(self._tmp.name) / "elsewhere"
         outside.mkdir()
