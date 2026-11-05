@@ -62,6 +62,7 @@ driver = "cli"
 model = "gpt-6.1-sol"
 billing = "subscription"
 command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-6.1-sol", "-"]
+read_only_command = ["codex", "exec", "--sandbox", "read-only", "--json", "--ephemeral", "-m", "gpt-6.1-sol", "-o", "{last_message_file}", "-"]
 usage_format = "codex-jsonl"
 timeout_seconds = 1800
 
