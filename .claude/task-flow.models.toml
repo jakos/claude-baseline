@@ -55,8 +55,18 @@ price_cached_input_per_mtok = 0.007
 price_output_per_mtok = 1.20
 fallback = ["mistral-large"]
 
+# Codex through the CLI on the ChatGPT login (codex login). The reasoning effort comes from
+# ~/.codex/config.toml. gpt-5.2-codex is not available on a ChatGPT account.
+[profiles.codex]
+driver = "cli"
+model = "gpt-6.1-sol"
+billing = "subscription"
+command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-m", "gpt-6.1-sol", "-"]
+usage_format = "codex-jsonl"
+timeout_seconds = 1800
+
 [roles]
-implementer = "mistral-large"
+implementer = "codex"
 planner = "claude:sonnet"
 backlog = "claude:sonnet"
 checker = "script"
