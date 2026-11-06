@@ -1121,5 +1121,83 @@ class RoutingEvidenceTest(unittest.TestCase):
         self.assertIn("Computed routing evidence", publish.render_latest(summary, None))
 
 
+class RepeatProtocolTest(unittest.TestCase):
+    def test_unknown_api_billing_and_interrupted_work_remain_explicit(self) -> None:
+        rows = small_rows()
+        for row in rows:
+            row.update(billing="api", cost_known=False)
+        meta = {
+            "run_id": "r",
+            "cases": ["c1", "c2"],
+            "profiles": ["a", "b"],
+            "repeat": 2,
+            "harness_version": 1,
+            "review": False,
+            "interrupted_attempts": [
+                {
+                    "cost_usd": 0.25,
+                    "cost_known": False,
+                    "seconds": 2,
+                    "tokens": {"input": 42},
+                }
+            ],
+        }
+        summary = publish.summarize(meta, rows)
+        page = publish.render_latest(summary, None)
+        self.assertIn("| unknown | unknown |", page)
+        self.assertNotIn("bills by subscription", page)
+        self.assertIn("1 interrupted attempt records; billing unknown", page)
+        self.assertIn("wall seconds", page)
+        self.assertIn("unknown", publish.render_chart(summary))
+        self.assertIn("unknown", publish.render_readme_block(summary, "docs"))
+
+    def test_publication_coverage_quality_spread_and_legacy_notice(self) -> None:
+        for count in (1, 4, 5):
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                rows = [
+                    canned_row("r", n, "c1", "S", "fake", repeat=n)
+                    for n in range(1, count + 1)
+                ]
+                run = canned_run(
+                    directory, "r", "2026-11-01T00:00:00Z", ["fake"], rows, repeat=count
+                )
+                meta, loaded = publish.load_saved_run(directory, "r")
+                summary = publish.summarize(meta, loaded)
+                page = publish.render_latest(summary, None)
+                self.assertIn("predates the per-round probe", page)
+                self.assertIn(f"0/{count}; {count} unavailable", page)
+                self.assertIn("IQR", page)
+                self.assertEqual(page, publish.render_latest(summary, None))
+                self.assertIn("Repeat coverage", publish.render_chart(summary))
+                self.assertIn(
+                    "minimum five", publish.render_readme_block(summary, "docs")
+                )
+                for row in loaded:
+                    row.update(
+                        harness_version=2,
+                        round1_hidden="pass",
+                        earliest_hidden_pass_round=1,
+                        hidden_observations=[{"round": 1, "result": "pass"}],
+                        attempts=[],
+                    )
+                meta["harness_version"] = 2
+                summary = publish.summarize(meta, loaded)
+                page = publish.render_latest(summary, None)
+                self.assertIn(
+                    "descriptive ranking" if count == 5 else "exploratory", page
+                )
+                self.assertNotIn("predates the per-round probe", page)
+                loaded[-1]["settings"] = {"max_turns": 7}
+                self.assertIn(
+                    "exploratory",
+                    publish.render_latest(publish.summarize(meta, loaded), None),
+                )
+                loaded[-1]["review"] = True
+                with self.assertRaisesRegex(publish.PublishError, "review modes"):
+                    publish.check_comparable(meta, loaded)
+                self.assertTrue(run.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

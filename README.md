@@ -165,6 +165,10 @@ The latest published comparison of implementers, written by `bench.py publish`:
 <!-- bench:latest:start -->
 Latest benchmark: run combined-100, 2026-11-02, 3 cases x 1 repeats, task-flow 0.12.0.
 
+Repeat evidence: exploratory; minimum five completed independent repeats per case/profile.
+
+Version 1 predates the per-round probe; version 2 requires a new baseline.
+
 | Profile | Model | Accepted | Hidden pass | Tokens per accepted (in / cached / out) | Cost per accepted |
 |  --- |  --- |  --- |  --- |  --- | --- |
 | mistral-large | mistral-large-4-0 | 3/3 (100%) | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.2112 |

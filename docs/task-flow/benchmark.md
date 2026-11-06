@@ -4,8 +4,8 @@ Paths such as `scripts/…`, `skills/…`, `agents/…`, `templates/…` and `be
 
 `bench/bench.py` runs the implementer profiles from `models.toml` on frozen task cases
 (`bench/cases/<id>/`, each case × profile × repeat) in isolated scratch repositories —
-up to 3 rounds of `scripts/implement.py` judged by `scripts/gates.py`, then the case's
-hidden acceptance tests — and reports cost per accepted task in
+up to 3 rounds of `scripts/implement.py` judged by `scripts/gates.py`, with isolated
+hidden acceptance probes after every green round — and reports cost per accepted task in
 `.work/_bench/<run-id>/report.md`:
 
 ```
@@ -29,11 +29,61 @@ It spends model budget (and with `--review`, Claude limits too), so it is never 
 the gates — only its test is. See [bench/README.md](../../plugins/task-flow/bench/README.md) for the case
 format, all commands and flags, the run layout, isolation and safety, and the limits.
 
+## Measurement protocol (version 2)
+
+The saved `first-pass-2` and `combined-100` measurements use harness version 1 and
+one repeat. Their outcomes and turn limits differ; merged rows reuse source work,
+so a merge is not independent repeat evidence. Uncontrolled cold-versus-warm
+observations cannot distinguish cache effects from scheduling or time effects.
+Repeating alone does not control provider caching or time effects.
+
+Keep model, resolved profile settings, reviewer settings, limits and suite fixed.
+Execute sequentially, recording execution order. Keep normal provider caching;
+send no warm-up requests and add no cache-busting nonces. The main comparison is
+gates-only. Choose an explicit case subset for a separate `--review` comparison;
+reviewer usage and limits belong to that comparison's total work.
+
+A descriptive ranking requires at least **five completed independent repeats per
+case/profile**, with complete coverage. Smaller or incomplete samples are
+exploratory. Retain unsuccessful and capped outcomes as data. Changed caps require
+a separately labelled experiment. Report per-case medians, IQR and min–max with
+denominators; cases are not interchangeable repeats. Cross-case summaries are
+labelled separately. Quantiles use linear interpolation at index `(n - 1) * p`
+in sorted values; IQR is Q(0.75) minus Q(0.25). Missing legacy observations are
+unavailable, never inferred from final quality. Do not rank across review modes,
+harness versions, fingerprints or measurement settings.
+
+### Provisional regression alarm
+
+Compare ten independent repeats per compared case/profile under compatible fixed
+settings, then run a second independent ten-repeat confirmation batch. Alarm only
+when both batches show either an acceptance or hidden-pass decrease of at least
+20 percentage points, or a median total cost/time increase of at least 20% which
+also exceeds the larger compared IQR. Use all scheduled cells as success
+denominators; list missing and not-observed results. These are operational
+thresholds, not universal statistical significance or power claims; calibrate them
+with future data. Neither a merge nor replacing selected failures is confirmation.
+
+### Optional controlled cache experiment
+
+This remains manual and unpaid in this task. Fix model, settings, prompts and
+concurrency (one); alternate or counterbalance cold and warm conditions and record
+their order. Record first-turn cache usage separately from conversation-turn usage.
+Provider cache state is uncertain even when a request is labelled cold.
+For K paired conditions and T turns per condition, plan `2 * K * T` requests,
+plus W preparation requests: `2 * K * T + W` requests in total. Before running, set
+a spending cap B and obtain provider evidence for prices. For each request use
+`cost = (uncached_input * P_input + cached_input * P_cached + output * P_output)
+/ 1_000_000`; sum over all requests, including retries, and stop before B. Cached
+prices are unverified until provider evidence is supplied. No prices or paid
+experiment are established here.
+
 ## How a benchmark run works
 
 One `bench.py run` measures what an implementer profile costs per accepted task: each
 frozen case × profile × repeat drives up to three rounds of `scripts/implement.py`
-judged by `scripts/gates.py` in a scratch repository, then the case's hidden tests.
+judged by `scripts/gates.py` in a scratch repository, probing each green round in
+a disposable hidden-test copy before acceptance or review.
 
 ```mermaid
 flowchart TD
@@ -53,7 +103,8 @@ flowchart TD
   reps --> comb
   comb --> scratch
   scratch --> rounds
-  rounds --> hidden
+  rounds -->|each green round| hidden
+  rounds --> results
   hidden --> results
   results --> report
   report --> pub
@@ -76,10 +127,29 @@ workflow is:
    published pages are reproducible byte for byte from it);
 3. `publish` — write the pages (below).
 
-Re-running only some cells (for example the ones that hit `max_turns`): start a new run
-of just those profiles and cases, then `merge <first> <rerun> --into <new-id>` — later
-runs replace earlier cells — and `save` and `publish` the merged run. The published page
-says the run is merged and flags any profile whose rows used different turn limits.
+Recover an interrupted experiment with `run --resume <run-id>`: only missing cells
+run, using recorded settings and sequential order. Completed failed, skipped and capped
+outcomes remain data. Profiles may be omitted; conflicting explicit settings, changed
+profile/reviewer settings, fingerprint mismatches and damaged or duplicate rows refuse
+before mutation. Resume excludes `--extend` and `--run-id`; a complete run makes no
+model calls. Interrupted scratch directories are retained and never reused.
+
+`--infra-retries N` defaults to two additional attempts (zero disables, negatives
+refuse). Structured exhausted HTTP 408/429/5xx, connection and transport/process
+timeouts qualify; arbitrary exceptions, malformed responses, authentication failures,
+visible test timeouts and model outcomes do not. Request-level retries have their own
+bound. Restore code, index, untracked files and task artifacts before retrying the same
+logical round. Separate attempt evidence preserves known usage and elapsed time,
+including reviewer usage. Missing billing stays unknown; a spending cap prevents
+further calls when remaining budget cannot safely be established. Identifiable reviewer
+process timeouts use the same bounded rule. Prompt-input digests detect changed
+extra instructions on resume. Reports distinguish unknown API billing from subscriptions
+and include persisted interrupted-attempt work in known totals; a crash before metrics
+were persisted leaves usage unknown.
+
+Never selectively replace `max_turns` or capped outcomes to improve a ranking.
+Changed caps require a separately labelled experiment. Merges reuse source rows and
+are exploratory; they are not independent repeat evidence.
 
 Adding a model to an existing run:
 
@@ -152,8 +222,8 @@ enable default thresholds until saved repeated evidence qualifies:
 
 1. Save run ids and protocol fingerprints, keeping review modes, routing rule digests
    and protocol versions separate.
-2. Record per-computed-band repeat counts meeting bench-repeat-protocol's ranking
-   minimum. That minimum is not established on this checkout; do not invent one.
+2. Record per-computed-band repeat counts meeting the established minimum of five
+   completed independent repeats per case/profile for a descriptive ranking.
 3. Review median and spread, acceptance, hidden-pass and cost, keeping unknown costs
    unknown and checking profile-specific caps and actual fallback evidence.
 4. Link the qualifying saved runs and explain the promotion decision before changing
@@ -164,7 +234,7 @@ Legacy rows without it remain readable and explicitly unknown. Declared case `si
 is distinct from computed routing `band`; case labels never prove a routing decision.
 Reports aggregate computed band/selected profile only within a protocol fingerprint,
 review mode, routing schema and rule digest. Costs stay unknown when unavailable.
-This is an additive result-schema change; measurement versions and repeat rules stay
-unchanged. Fixed case/profile/repeat experiments replace active user routing with their
-explicit scalar profile. These reports do not run hidden probes differently or contact
-paid models to calibrate thresholds.
+Fixed case/profile/repeat experiments replace active user routing with their explicit
+scalar profile. Harness version 2 changes the measurement protocol and fingerprint;
+version-1 saved results remain historical evidence and require a new baseline for the
+per-round probe. No paid models are contacted to calibrate thresholds.

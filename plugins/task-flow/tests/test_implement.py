@@ -22,11 +22,15 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 PLUGIN = Path(__file__).resolve().parent.parent
 SCRIPT = PLUGIN / "scripts" / "implement.py"
+sys.path.insert(0, str(PLUGIN / "scripts"))
+import implement
 
 PLAN = """# Plan: demo
 ## Goal
@@ -941,6 +945,20 @@ class ImplementTest(RoundFixture):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(len(server.requests), 3)
         self.assertEqual(self.metrics()["turns"], 1)
+        self.assertIsNone(self.metrics()["infrastructure_failure"])
+
+    def test_exhausted_infrastructure_failure_is_structured(self) -> None:
+        for code in (408, 429, 503):
+            with self.subTest(code=code):
+                server = self.server([code, code])
+                self.configure(self.profile("fake", server, retries=1))
+                done = self.run_round()
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(len(server.requests), 2)
+                self.assertEqual(
+                    self.metrics()["infrastructure_failure"],
+                    {"kind": "http", "status": code, "retryable": True},
+                )
 
     def test_unavailable_profile_falls_back_and_records_chain(self):
         down = self.server([503, 503])
@@ -2534,6 +2552,37 @@ class RoutingTest(RoundFixture):
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
         self.assertIn("restart/retry", done.stdout)
         self.assertEqual(server.requests, [])
+
+
+class InfrastructureClassificationTest(unittest.TestCase):
+    def test_connection_timeout_and_unknown_are_distinct(self) -> None:
+        profile = {
+            "driver": "openai-loop",
+            "base_url": "http://127.0.0.1:1",
+            "retries": 1,
+            "retry_base_seconds": 0,
+            "request_timeout_seconds": 1,
+        }
+        for error, kind in (
+            (ConnectionResetError("dropped"), "connection"),
+            (urllib.error.URLError(ConnectionRefusedError()), "connection"),
+            (TimeoutError(), "timeout"),
+            (urllib.error.URLError(TimeoutError()), "timeout"),
+            (ValueError("invalid JSON"), None),
+            (OSError("unknown"), None),
+            (urllib.error.URLError("arbitrary"), None),
+        ):
+            with (
+                self.subTest(error=repr(error)),
+                patch.object(
+                    implement.urllib.request, "urlopen", side_effect=error
+                ) as request,
+            ):
+                with self.assertRaises(implement.Unavailable) as caught:
+                    implement.post(profile, None, {})
+                failure = caught.exception.infrastructure_failure
+                self.assertEqual(failure["kind"] if failure else None, kind)
+                self.assertEqual(request.call_count, 2)
 
 
 if __name__ == "__main__":

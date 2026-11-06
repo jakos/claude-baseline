@@ -3,12 +3,20 @@
 `bench.py` answers one question: **what does an implementer profile cost per accepted
 task?** It runs the profiles from `models.toml` on frozen task cases — each case ×
 profile × repeat — in fully isolated scratch repositories. Each run drives up to 3
-rounds of `scripts/implement.py` with `scripts/gates.py` as the judge, then runs the
-case's hidden acceptance tests, and records one row in
+rounds of `scripts/implement.py` with `scripts/gates.py` as the judge, probes every
+green round with isolated hidden acceptance tests, and records one row in
 `.work/_bench/<run-id>/results.jsonl`. `report.md` aggregates the rows into cost per
 accepted task, acceptance in round 1 and within 3 rounds, rounds to green, hidden-test
 pass rate, out-of-scope changes, tokens, time, median and spread, and the failures with
 reasons.
+
+The [version-2 protocol](../../../docs/task-flow/benchmark.md#measurement-protocol-version-2)
+fixes settings and sequential execution, keeps normal provider caching, and requires
+five completed independent repeats per case/profile for a descriptive ranking.
+Smaller or incomplete samples are exploratory; repetitions alone do not control
+cache or time effects. Gates-only is the main comparison; explicitly choose a case
+subset for a separate `--review` comparison. The protocol also defines the provisional
+regression alarm and the optional, manual cache experiment; neither runs here.
 
 Cost per accepted task is `(implementation cost + review cost) / accepted runs`: a
 cheap model that never passes the gates is not a bargain.
@@ -78,7 +86,8 @@ reason on stderr for an invalid case.
   file at `base` and is at least 30 characters long after stripping).
 - The case folder is invisible to the implementer as long as the case base predates it:
   the run's scratch repository is exported from `base` only, so neither the case folder
-  nor the hidden files exist in it until the hidden commands run after the last round.
+  nor the hidden files exist in it. Every green round is probed in a disposable copy
+  outside the model's repository and task roots, removed before review or another round.
 
 ### Adding a case
 
@@ -146,9 +155,12 @@ uv run --script plugins/task-flow/bench/bench.py list [--cases-dir D]
 uv run --script plugins/task-flow/bench/bench.py run \
     --profiles a,b [--cases id,id|all] [--repeat N] [--max-cost-usd X] [--review] \
     [--review-model M] [--claude-command JSON] [--run-id ID] [--extend ID] [--out D] \
+    [--infra-retries N] \
     [--cases-dir D] [--project D] [--timeout-seconds S] [--keep-code]
 
 uv run --script plugins/task-flow/bench/bench.py report <run-id> [--out D] [--project D]
+
+uv run --script plugins/task-flow/bench/bench.py run --resume <run-id> [--out D] [--project D] [--cases-dir D]
 
 uv run --script plugins/task-flow/bench/bench.py save <run-id> [--replace] [--out D] [--results-dir D] [--project D]
 
@@ -180,6 +192,23 @@ through `scripts/launch.py`).
   model>` and `--max-budget-usd <remaining>` when a cap is set. It spends Claude limits.
 - `--keep-code` keeps each run's scratch `code/` repository (deleted otherwise).
 - `--timeout-seconds S` is passed to `gates.py` as the per-command timeout.
+- `--resume ID` uses the recorded cases, profiles, repeats, review settings, budget,
+  retry policy and scheduling order. Profiles may be omitted. It executes only missing
+  `(case, profile, repeat)` cells; failed, skipped and capped rows remain completed data.
+  A complete run makes no model calls. Resume refuses conflicting explicit options,
+  changed profile/reviewer settings, fingerprints, malformed/truncated rows and duplicate
+  identities before mutation. Restore original records when evidence is damaged.
+  `--resume` is mutually exclusive with `--extend` and `--run-id`. Interrupted scratch
+  numbers are never reused; persisted attempt spend counts, and missing spend is unknown.
+- `--infra-retries N` defaults to 2 additional attempts, accepts 0, refuses negatives.
+  Request-level profile retries remain independently bounded. Only structured exhausted
+  HTTP 408/429/5xx, connection failures and transport/process timeouts qualify. Model
+  outcomes, auth/configuration failures, malformed responses, visible test timeouts and
+  unknown failures do not. Retries restore code, index, untracked files and task artifacts
+  to their pre-attempt state. Attempts are recorded outside the restored task directory.
+  Identifiable reviewer process timeouts follow the same bound. All known attempt usage,
+  reviewer usage and elapsed time count; unknown billing stays unknown. With a spending
+  cap, uncertain billing stops further spending because remaining budget is not safe.
 - `report <run-id>` rewrites `report.md` from `results.jsonl` (byte-identical for the
   same rows).
 - `save <run-id>` copies `results.jsonl`, `run.json` and `report.md` into
@@ -189,8 +218,9 @@ through `scripts/launch.py`).
 - `merge a b ... --into m` combines the rows of several runs of one suite into the new
   run `m`. Sources apply in order: a later run's row for a cell (case, profile, repeat)
   replaces the earlier one, cells new to the result are appended, and rows are
-  renumbered. Use it to re-run only the cells that hit a cap or a failure of the
-  environment, instead of repeating a whole run. The sources must agree on harness
+  renumbered. Merges reuse source observations and are exploratory, not independent
+  repeat evidence. Retain capped outcomes; changed caps require a separately labelled
+  experiment. The sources must agree on measurement settings and harness
   version, repeat and review flag, and on the fingerprint entry of every case they share;
   otherwise exit 2 and nothing is written. The merged run's fingerprint is computed from
   the union of its cases, so merging runs that cover a whole suite gives that suite's
@@ -273,8 +303,7 @@ runs/<n>/
   code/                        the scratch repository (see Isolation)
   .work/<case-id>/             the seeded task folder: plan.md, status.md, then the
                                checks-*.md, impl-*.json and review-*.md of the run
-  .work/_hidden/               plan.md whose Verification commands are the case's
-                               commands, and its checks-1.md
+  attempts/                   bounded implementation/reviewer attempt evidence
   .claude/task-flow.models.toml  the per-run models file (only this one profile)
 ```
 
@@ -298,8 +327,26 @@ reviewer's `APPROVED` accepts it. Otherwise round r < 3 gets a synthesized
 contract's no-progress rule (equal failing sets in rounds r-1 and r, r ≥ 2) and round
 cap apply. Out-of-scope paths (`git diff --cached --name-only HEAD` against the plan's
 `## Profiles` / `## Steps` tokens) are recorded. Only when the final round's gates were
-green are the hidden test files written into `code/` from
-`git show <result>:<path>` and the hidden commands run.
+green does its probe supply final `hidden` pass/fail. A final non-green state is
+`not_run`, even after an earlier passing probe. Every green round is copied in full
+(staged, unstaged, untracked files and index) to a temporary repository outside model
+roots. Only there are hidden files installed and commands run; the copy is removed
+even on failure. Probe output is captured silently. `hidden_observations` records round
+and pass/fail/error solely in harness data; `round1_hidden` and
+`earliest_hidden_pass_round` describe initial quality and earliest observed success.
+Probe results never affect acceptance, review prompts, feedback or stopping rules.
+Legacy rows have unavailable intermediate observations. `attempts` includes role,
+logical round, attempt number, elapsed time, known usage and structured failure evidence.
+`run.json` additionally records resolved profile settings without keys, reviewer settings,
+retry policy, prompt-input digests and `execution_order`.
+
+The per-case repeat table reports median, IQR and min?max for accepted rounds, earliest
+observed hidden-pass rounds, implementation plus reviewer tokens and cost, and wall
+time. Quantiles interpolate linearly at `(n - 1) * p`; IQR is Q(0.75) minus Q(0.25).
+Quality denominators include all scheduled cells, with unavailable legacy values and
+not-observed outcomes explicit. Total known work also includes interrupted attempts;
+unknown API billing is labelled `unknown`, while subscriptions remain `subscription`.
+The size and All tables are cross-case summaries, not independent repeat samples.
 
 ## Isolation and safety
 
@@ -312,9 +359,9 @@ green are the hidden test files written into `code/` from
   result objects. The source repository's working tree, index, refs and worktree list
   are never touched, and the real `.work/<id>/` folders are never read or written —
   output goes to `--out`. `check-case` works the same way in a temporary directory.
-- **Hidden tests stay hidden.** The hidden files never exist in `code/`, in the task
-  folder or in any prompt before the final green round; they are written into `code/`
-  only afterwards, as bytes from `git show <result>:<path>`.
+- **Hidden tests stay hidden.** Hidden files, commands and captured output never exist
+  in the implementation checkout, task folder, index or git objects. Probe copies are
+  deleted before implementers or reviewers run; only harness-owned observations survive.
 - **`--max-cost-usd X` caps the whole run.** Each run's models file gets
   `max_cost_usd` = the smaller of the profile's own value and the remaining budget, and
   `fallback = []` — a measurement measures one profile, a silent fallback would
@@ -325,9 +372,15 @@ green are the hidden test files written into `code/` from
 
 ## Repeats, medians and spread
 
-`--repeat N` runs each case × profile N times (order: repeat outer, then case, then
-profile). The report shows medians and min–max for cost per run, tokens per run and
-seconds, and cost per accepted over all repeats — the spread is the point of repeating.
+`--repeat N` runs each case × profile N times sequentially (recorded order: repeat
+outer, then case, then profile). Per-case tables show medians, IQR and min–max for
+total implementation plus reviewer tokens/cost and wall time, accepted round, initial
+and final hidden pass, earliest observed hidden pass, extra attempts and coverage.
+Quantiles interpolate linearly at `(n - 1) * p`; IQR is Q(0.75) minus Q(0.25).
+Unsuccessful, unavailable and not-observed measurements stay explicit in denominators.
+At least five completed independent repeats per case/profile are required for a
+descriptive ranking. Cross-case summaries are labelled; never rank across versions,
+fingerprints, review modes or differing measurement settings.
 
 ## Re-running over time and the suite fingerprint
 
@@ -346,7 +399,7 @@ recomputes the fingerprint from the current case files with the stored repeat an
 flag; on mismatch it exits 2 naming the first differing component (case id and field,
 or repeat / harness version). It refuses a profile already in the run and `--cases` /
 `--repeat` / `--review` values that differ from the run; otherwise it appends rows with n
-continuing and regenerates `report.md`. Raise `HARNESS_VERSION` (currently `1`, a
+continuing and regenerates `report.md`. Raise `HARNESS_VERSION` (currently `2`, a
 constant in `bench.py`) whenever a change alters what is measured.
 
 ## Durability
@@ -386,8 +439,8 @@ enable default thresholds until saved repeated evidence qualifies:
 
 1. Save run ids and protocol fingerprints, keeping review modes, routing rule digests
    and protocol versions separate.
-2. Record per-computed-band repeat counts meeting bench-repeat-protocol's ranking
-   minimum. That minimum is not established on this checkout; do not invent one.
+2. Record per-computed-band repeat counts meeting the established minimum of five
+   completed independent repeats per case/profile for a descriptive ranking.
 3. Review median and spread, acceptance, hidden-pass and cost, keeping unknown costs
    unknown and checking profile-specific caps and actual fallback evidence.
 4. Link the qualifying saved runs and explain the promotion decision before changing
@@ -398,7 +451,7 @@ Legacy rows without it remain readable and explicitly unknown. Declared case `si
 is distinct from computed routing `band`; case labels never prove a routing decision.
 Reports aggregate computed band/selected profile only within a protocol fingerprint,
 review mode, routing schema and rule digest. Costs stay unknown when unavailable.
-This is an additive result-schema change; measurement versions and repeat rules stay
-unchanged. Fixed case/profile/repeat experiments replace active user routing with their
-explicit scalar profile. These reports do not run hidden probes differently or contact
-paid models to calibrate thresholds.
+Fixed case/profile/repeat experiments replace active user routing with their explicit
+scalar profile. Harness version 2 changes the protocol fingerprint; version-1 results
+remain historical evidence and need a new baseline for the per-round probe. These
+reports do not contact paid models to calibrate thresholds.

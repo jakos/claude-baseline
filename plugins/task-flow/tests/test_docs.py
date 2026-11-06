@@ -1201,7 +1201,7 @@ class RoutingDocsTest(unittest.TestCase):
             evidence = (ROOT / rel).read_text(encoding="utf-8")
             for needle in (
                 "ranking",
-                "minimum is not established",
+                "established minimum of five",
                 "protocol fingerprints",
                 "hidden-pass",
                 "median and spread",

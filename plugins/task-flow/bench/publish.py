@@ -154,6 +154,8 @@ def newest_run(results_dir) -> str | None:
 def check_comparable(meta: dict, rows: list) -> None:
     """P2a: one fingerprint and harness version across the rows, equal to run.json's."""
     run_id = meta.get("run_id", "?")
+    if any(r.get("review", meta["review"]) != meta["review"] for r in rows):
+        raise PublishError(f"run {run_id} mixes review modes")
     fingerprints = {str(row.get("fingerprint", "")) for row in rows}
     fingerprints.add(str(meta.get("fingerprint", "")))
     if len(fingerprints) > 1:
@@ -219,7 +221,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
     elif known:
         per_run = "n/a"
     else:
-        per_run = "subscription"
+        per_run = bench.unknown_cost_label(prows)
     per_accepted_text = bench._cost_per_accepted(prows, accepted)
     if known and accepted:
         per_accepted = sum(r["cost_usd"] + r["review_cost_usd"] for r in prows) / len(
@@ -227,7 +229,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         )
         cost_label = None
     elif not known:
-        per_accepted, cost_label = None, "subscription"
+        per_accepted, cost_label = None, bench.unknown_cost_label(prows)
     else:
         per_accepted, cost_label = None, "n/a (0 accepted)"
     return {
@@ -319,7 +321,7 @@ def summarize(meta: dict, rows: list) -> dict:
     for cell in all_cells:
         if not cell["cost_known"]:
             notes.append(
-                f"profile `{cell['profile']}` bills by subscription, so its cost is "
+                f"profile `{cell['profile']}` has incomplete billing evidence, so its cost is "
                 "unknown; it is compared on tokens, rounds and acceptance"
             )
         if cell["partial"]:
@@ -360,6 +362,7 @@ def summarize(meta: dict, rows: list) -> dict:
         "case_sizes": {c: case_size.get(c, "?") for c in cases},
         "repeat": repeat,
         "review": bool(meta.get("review")),
+        "interrupted_attempts": meta.get("interrupted_attempts", []),
         "task_flow_version": meta.get("task_flow_version")
         or "unknown (not recorded by this run)",
         "sizes": sizes,
@@ -501,6 +504,7 @@ def render_latest(summary: dict, prev: dict | None) -> str:
             "not comparable with earlier runs."
         )
         lines.append("")
+    lines.extend(bench.protocol_report(summary["rows"], summary))
     lines += [f"![{summary['chart_alt']}](latest.svg)", ""]
     for size in [*summary["sizes"], "All"]:
         lines.append(f"## {size}")
@@ -533,8 +537,8 @@ def render_chart(summary: dict) -> str:
     """P7: the deterministic SVG chart (stdlib only) for the `All` figures."""
     cells = summary["all"]
     count = len(cells)
-    head1_y = 24
-    bars1_y = 44
+    head1_y = 48
+    bars1_y = 68
     head2_y = bars1_y + count * CHART_ROW + 16
     bars2_y = head2_y + 20
     height = bars2_y + count * CHART_ROW + 10
@@ -552,6 +556,11 @@ def render_chart(summary: dict) -> str:
         (
             f'  <rect x="0" y="0" width="{CHART_WIDTH}" height="{height}" rx="6" '
             'fill="#ffffff" stroke="#d0d7de"/>'
+        ),
+        (
+            f'  <text x="10" y="20" font-family="{CHART_FONT}" font-size="12" '
+            f'fill="{TEXT_COLOR}">Repeat coverage: {summary["repeat"]} per case; '
+            f"{'exploratory' if any(bench.eligibility(summary['rows'], summary, c, p) == 'exploratory' for c in summary['cases'] for p in summary['profiles']) else 'descriptive ranking'}</text>"
         ),
         (
             f'  <text x="10" y="{head1_y}" font-family="{CHART_FONT}" font-size="14" '
@@ -647,6 +656,29 @@ def render_readme_block(summary: dict, rel: str) -> str:
             f"task-flow {summary['task_flow_version']}."
         )
     ]
+    lines.extend(
+        [
+            "",
+            "Repeat evidence: "
+            + (
+                "exploratory"
+                if any(
+                    bench.eligibility(summary["rows"], summary, c, p) == "exploratory"
+                    for c in summary["cases"]
+                    for p in summary["profiles"]
+                )
+                else "descriptive ranking"
+            )
+            + "; minimum five completed independent repeats per case/profile.",
+        ]
+    )
+    if (summary.get("harness_version") or 1) < 2:
+        lines.extend(
+            [
+                "",
+                "Version 1 predates the per-round probe; version 2 requires a new baseline.",
+            ]
+        )
     if summary.get("new_baseline"):
         lines.append("")
         lines.append(
