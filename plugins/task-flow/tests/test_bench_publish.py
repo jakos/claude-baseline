@@ -473,6 +473,115 @@ class DeterminismTest(PublishFixture):
                 self.assertNotIn(b"\r", path.read_bytes(), str(path))
 
 
+class TimeTest(PublishFixture):
+    def test_time_populations(self) -> None:
+        rows = [
+            canned_row("r1", i, "c1", "S", "a", outcome=outcome)
+            for i, outcome in enumerate(
+                ["accepted", "accepted", "failed", "skipped"], 1
+            )
+        ]
+        for row, seconds in zip(rows, [100, 300, 1, 0]):
+            row["seconds"] = seconds
+            row["implement_seconds"] = 9999
+        rows[0]["hidden"] = "fail"  # acceptance does not imply hidden pass
+        cell = publish._profile_cell("a", rows, ["c1"], 4)
+        self.assertEqual(cell["time_text"], "200.0 (100.0–300.0); time to accepted")
+        for row in rows[:2]:
+            row["outcome"] = "failed"
+        cell = publish._profile_cell("a", rows, ["c1"], 4)
+        self.assertEqual(
+            cell["time_text"], "100.0 (1.0–300.0); 0 accepted; time until stop"
+        )
+        for population in ([], rows[-1:]):
+            self.assertEqual(
+                publish._profile_cell("a", population, ["c1"], 1)["time_text"], "n/a"
+            )
+        self.assertIn(
+            "single sample",
+            publish._profile_cell("a", rows[:1], ["c1"], 2)["time_text"],
+        )
+
+    def test_time_tables_notes_and_same_id(self) -> None:
+        rows = small_rows()
+        rows[0]["started_at"] = "2026-03-04T04:00:00+02:00"
+        rows[1]["started_at"] = "2026-03-03T23:00:00-01:00"
+        rows[2].pop("started_at")
+        rows[-1]["outcome"] = "skipped"
+        rows[-1]["started_at"] = "2099-01-01T00:00:00Z"
+        rows[0]["settings"] = {"max_turns": 10}
+        run_dir = small_run(self.results)
+        meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        meta["merged_from"] = ["source-a", "source-b"]
+        write_file(run_dir / "run.json", json.dumps(meta))
+        write_file(
+            run_dir / "results.jsonl", "".join(json.dumps(r) + "\n" for r in rows)
+        )
+        done = self.bench()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for text, tables, columns in (
+            (self.latest_md(), 3, 10),
+            (self.readme.read_text(encoding="utf-8"), 1, 7),
+        ):
+            header = "Seconds per run, median (min-max)"
+            self.assertEqual(text.count(header), tables)
+            in_time_table = False
+            for line in text.splitlines():
+                if header in line:
+                    in_time_table = True
+                if not line.startswith("|"):
+                    in_time_table = False
+                if in_time_table:
+                    self.assertEqual(len(line.split("|")) - 2, columns, line)
+            self.assertIn("; merged run; mixed turn limits", text)
+            for phrase in (
+                "provider and network latency",
+                "rate-limit waits and retries",
+                "repeated cells can vary",
+                "only within one published run's table",
+                "never across days",
+                "Overlapping model min-max spreads",
+                "2026-03-04T00:00:00Z to 2026-03-04T02:00:00Z",
+                "Incomplete timestamp coverage: 6/7",
+                "not completion",
+            ):
+                self.assertIn(phrase, text)
+            self.assertNotIn("each case/profile cell's time is a single sample", text)
+        before = {
+            p.relative_to(self.docs): p.read_bytes()
+            for p in self.docs.rglob("*")
+            if p.is_file()
+        }
+        readme_before = self.readme.read_bytes()
+        self.assertEqual(self.bench().returncode, 0)
+        self.assertEqual(
+            before,
+            {
+                p.relative_to(self.docs): p.read_bytes()
+                for p in self.docs.rglob("*")
+                if p.is_file()
+            },
+        )
+        self.assertEqual(readme_before, self.readme.read_bytes())
+        self.assertFalse((self.docs / "benchmark/history").exists())
+        self.assertEqual(
+            (self.docs / "benchmark.md").read_text(encoding="utf-8").count("| r1 |"), 1
+        )
+        for data in [*before.values(), readme_before]:
+            self.assertNotIn(b"\r", data)
+
+    def test_single_repeat_without_timestamps(self) -> None:
+        rows = [canned_row("r1", 1, "c1", "S", "a")]
+        rows[0].pop("started_at")
+        canned_run(self.results, "r1", "2026-03-04T00:00:00Z", ["a"], rows)
+        self.assertEqual(self.bench().returncode, 0)
+        for text in (self.latest_md(), self.readme.read_text(encoding="utf-8")):
+            self.assertIn("each case/profile cell's time is a single sample", text)
+            self.assertIn("even when All pools several cases", text)
+            self.assertIn("UTC row start window unavailable", text)
+            self.assertIn("1.0 (1.0–1.0); time to accepted; single sample", text)
+
+
 class ExtendTest(PublishFixture):
     def test_extend_adds_profile(self):
         rows_a = [r for r in small_rows() if r["profile"] == "a"]
@@ -1119,6 +1228,156 @@ class RoutingEvidenceTest(unittest.TestCase):
             any(group["selected_profile"] == "routed" for group in summary["routing"])
         )
         self.assertIn("Computed routing evidence", publish.render_latest(summary, None))
+
+
+class CliPublicationTest(unittest.TestCase):
+    def test_cli_null_usage_provenance_cost_context_and_determinism(self) -> None:
+        row = canned_row(
+            "cli",
+            1,
+            "c1",
+            "S",
+            "codex",
+            billing="subscription",
+            cost_known=False,
+            cost=None,
+            settings={"driver": "cli", "command": ["codex", "exec", "-"]},
+        )
+        row.update(
+            tokens=None,
+            api_spend_usd=None,
+            subscription_cost_usd=None,
+            subscription_monthly_usd=20,
+            provenance={
+                "tool": "codex",
+                "version": "codex 1.2",
+                "isolation": "per-cell-home-xdg-v1",
+                "limitations": "network remains accessible",
+            },
+        )
+        meta = {
+            "run_id": "cli",
+            "created": "2026-11-06",
+            "harness_version": 1,
+            "fingerprint": FP1,
+            "profiles": ["codex"],
+            "cases": ["c1"],
+            "repeat": 1,
+            "review": False,
+        }
+        publish.check_comparable(meta, [row])
+        summary = publish.summarize(meta, [row])
+        page = publish.render_latest(summary, None)
+        self.assertEqual(
+            page, publish.render_latest(publish.summarize(meta, [row]), None)
+        )
+        for text in (
+            "codex 1.2",
+            "network remains accessible",
+            "API implementation spend USD",
+            "Subscription marginal USD",
+            "20",
+            "Coverage / scheduled",
+            "Wall seconds",
+            "Rounds (median)",
+        ):
+            self.assertIn(text, page)
+        self.assertIsNone(summary["all"][0]["tokens"])
+        self.assertIn("unknown", page)
+        legacy = dict(row, provenance=None)
+        self.assertIn(
+            "unknown / unknown",
+            publish.render_latest(publish.summarize(meta, [legacy]), None),
+        )
+
+    def test_incompatible_cli_versions_or_settings_refuse(self) -> None:
+        row = canned_row("cli", 1, "c1", "S", "codex", settings={"driver": "cli"})
+        row["provenance"] = {"version": "1"}
+        meta = {"review": False, "fingerprint": FP1, "harness_version": 1}
+        for changed in (
+            dict(row, provenance={"version": "2"}),
+            dict(row, settings={"driver": "cli", "usage_format": "none"}),
+        ):
+            with self.assertRaises(publish.PublishError):
+                publish.check_comparable(meta, [row, changed])
+
+
+class RepeatProtocolTest(unittest.TestCase):
+    def test_unknown_api_billing_and_interrupted_work_remain_explicit(self) -> None:
+        rows = small_rows()
+        for row in rows:
+            row.update(billing="api", cost_known=False)
+        meta = {
+            "run_id": "r",
+            "cases": ["c1", "c2"],
+            "profiles": ["a", "b"],
+            "repeat": 2,
+            "harness_version": 1,
+            "review": False,
+            "interrupted_attempts": [
+                {
+                    "cost_usd": 0.25,
+                    "cost_known": False,
+                    "seconds": 2,
+                    "tokens": {"input": 42},
+                }
+            ],
+        }
+        summary = publish.summarize(meta, rows)
+        page = publish.render_latest(summary, None)
+        self.assertIn("| unknown | unknown |", page)
+        self.assertNotIn("bills by subscription", page)
+        self.assertIn("1 interrupted attempt records; billing unknown", page)
+        self.assertIn("wall seconds", page)
+        self.assertIn("unknown", publish.render_chart(summary))
+        self.assertIn("unknown", publish.render_readme_block(summary, "docs"))
+
+    def test_publication_coverage_quality_spread_and_legacy_notice(self) -> None:
+        for count in (1, 4, 5):
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                rows = [
+                    canned_row("r", n, "c1", "S", "fake", repeat=n)
+                    for n in range(1, count + 1)
+                ]
+                run = canned_run(
+                    directory, "r", "2026-11-01T00:00:00Z", ["fake"], rows, repeat=count
+                )
+                meta, loaded = publish.load_saved_run(directory, "r")
+                summary = publish.summarize(meta, loaded)
+                page = publish.render_latest(summary, None)
+                self.assertIn("predates the per-round probe", page)
+                self.assertIn(f"0/{count}; {count} unavailable", page)
+                self.assertIn("IQR", page)
+                self.assertEqual(page, publish.render_latest(summary, None))
+                self.assertIn("Repeat coverage", publish.render_chart(summary))
+                self.assertIn(
+                    "minimum five", publish.render_readme_block(summary, "docs")
+                )
+                for row in loaded:
+                    row.update(
+                        harness_version=2,
+                        round1_hidden="pass",
+                        earliest_hidden_pass_round=1,
+                        hidden_observations=[{"round": 1, "result": "pass"}],
+                        attempts=[],
+                    )
+                meta["harness_version"] = 2
+                summary = publish.summarize(meta, loaded)
+                page = publish.render_latest(summary, None)
+                self.assertIn(
+                    "descriptive ranking" if count == 5 else "exploratory", page
+                )
+                self.assertNotIn("predates the per-round probe", page)
+                loaded[-1]["settings"] = {"max_turns": 7}
+                self.assertIn(
+                    "exploratory",
+                    publish.render_latest(publish.summarize(meta, loaded), None),
+                )
+                loaded[-1]["review"] = True
+                with self.assertRaisesRegex(publish.PublishError, "review modes"):
+                    publish.check_comparable(meta, loaded)
+                self.assertTrue(run.exists())
 
 
 if __name__ == "__main__":

@@ -60,8 +60,8 @@ files whether the next task may start. Its four triggers, in both modes:
 - burn rate: the last finished task used more than 2 x its worst-case estimate;
 - budget (with `--budget`): tokens spent plus the next task's worst case exceeds it.
 
-All four count Claude tokens only; external USD cost is measured and reported, never a
-trigger. A task already in progress always resumes. The breaker is decided by the script
+Token scope defaults to Claude; `--budget-scope all` also counts reported external
+tokens. External USD cost is measured and reported separately, never a token trigger. A task already in progress always resumes. The breaker is decided by the script
 but obeyed by procedure, not by a hook. An external round whose `impl-<n>.json` has a null
 `cost_usd` (a `driver = "cli"` subscription profile, or unknown usage) is not added
 numerically: its `External USD` cell is `unknown` (sticky — later numeric rounds add to
@@ -190,7 +190,8 @@ A pinned attempt rejects incompatible changes rather than rerouting.
 
 ```mermaid
 flowchart TD
-  plans["Plan every task, stacked or epic"] --> preview["Resolve each task: inputs, band, profile"]
+  decompose["Configured backlog: Claude default or external runner"] --> plans["Plan every task, stacked or epic"]
+  plans --> preview["Resolve each task: inputs, band, profile"]
   preview --> overview["Overview and per-task estimates"]
   overview --> gate["Existing start gate; auto skips question"]
   gate --> execute["Approved attempts pin their selections"]
@@ -204,3 +205,30 @@ compares current plan/rule/profile digests with that saved overview and refuses 
 an instruction to repeat overview/start gate if they changed or are missing. This
 resumable precondition prevents a changed choice from inheriting stale approval;
 it creates no new workflow phase or stop and never pins a preview in task status.
+
+## External decomposition, review and budget scope
+
+Autopilot gathering (`--from-repo`), ordinary decomposition and goal-only epic creation
+resolve `[roles] backlog`. Claude keeps its existing agent/model override; an external
+profile uses `role_run.py --role backlog --run-dir` with project/worktree arguments.
+Repository gathering returns the exact requirements/backlog JSON pair. Validated blocked
+output creates no tasks. All decomposition and start approval gates stay in place.
+Standalone and task-run reviews resolve `[roles] reviewer` and use the trusted runner
+only for configured external profiles. Invalid external output leaves phases unchanged;
+resume retries that role without silently selecting Claude.
+
+`task-autopilot` and `task-epic run` accept `--budget-scope claude|all`, persisted in
+run.md as `budget-scope`. An absent key means `claude`, preserving legacy budgets.
+Resume retains scope; an explicit change repeats the overview/start gate. The estimate
+and next helpers accept the same flag and reject disagreement with the saved header.
+All scope adds reported external input plus output tokens once per invocation, including
+backlog, planner, implementer and reviewer. Cached input is already included. USD is
+never converted to tokens. Conservative future stage estimates are retained for external
+work. Null usage remains unknown, known subtotals remain visible, and a finite all-scope
+budget cannot be declared to fit when usage is unknown. The next task waits in that
+case; an active task always resumes before run-level budget checks.
+
+`backlog-usd` in run.md and run reports exposes run-level decomposition spend;
+`role-backlog-*.json` supplies the authoritative recomputed total. Reviewer invocation
+USD joins the task External USD cell. Reports include both in external spend without
+resume duplication. A null cost or subscription CLI cost remains unknown, never zero.

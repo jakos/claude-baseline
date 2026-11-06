@@ -111,7 +111,7 @@ internal loop; `model` stays required and is metadata only):
 | Key | Meaning | Default |
 | --- | --- | --- |
 | `command` | the CLI program and its arguments, a non-empty list of non-empty strings (required on `cli`); only `{worktree}`, `{prompt_file}` and `{last_message_file}` are expanded, each argument on its own, no shell | |
-| `read_only_command` | same shape and placeholders as `command`, but used instead of it by producer roles that must not write (the planner); only a verified read-only argv passes — today `codex exec` with an explicit `--sandbox read-only`, no `--full-auto`/approval bypass/`-c` config override, and `-o {last_message_file}` so the host captures the final message; required when this profile or one of its `fallback`s serves the planner; never inferred from the profile name | none |
+| `read_only_command` | same shape and placeholders as `command`, but used instead of it by producer roles that must not write (planner, backlog and reviewer); only a verified read-only argv passes — today `codex exec` with an explicit `--sandbox read-only`, no `--full-auto`/approval bypass/`-c` config override, and `-o {last_message_file}` so the host captures the final message; required when this profile or one of its `fallback`s serves a producer role; never inferred from the profile name | none |
 | `timeout_seconds` | the whole CLI run's deadline; on timeout the process tree is killed | 600 |
 | `prompt_via` | how the prompt reaches the CLI: `"stdin"`, `"file"` (requires `{prompt_file}` in `command`), or `"arg"` (appended as one final argument; refused for a Windows `.cmd`/`.bat` shim) | `"stdin"` |
 | `usage_format` | `"codex-jsonl"` parses stdout as one JSON event per line and sums `turn.completed` usage; `"none"` uses only the final plain stdout message, leaving usage and cost unknown (null) | `"none"` |
@@ -172,7 +172,7 @@ it exits 2 for invalid config.
 
 `[roles]` also picks the Claude model of every Claude-run role. Values: `claude`,
 `claude:opus`, `claude:sonnet` or `claude:haiku` for any role; a profile name for
-`planner` and `implementer`; `script` for `checker` only. A `claude:<model>` value is passed to the
+`planner`, `implementer`, `backlog` and `reviewer`; `script` for `checker` only. A `claude:<model>` value is passed to the
 subagent call as its `model` argument and takes precedence over the agent file's frontmatter;
 bare `claude` passes nothing, so the frontmatter default applies; with no `models.toml` at
 all, nothing changes. A misspelled role or value is refused with exit 2, never silently
@@ -312,3 +312,35 @@ flowchart TD
   approved --> pin["History pin for this attempt"]
   pin --> execute["Rounds reuse starting profile; existing fallback chain"]
 ```
+
+## External backlog and reviewer
+
+Backlog and reviewer accept enabled model profile names in `[roles]`, just like the
+planner. Missing keys, `claude` and existing `claude:*` values keep their Claude agent
+defaults and model overrides. The project file overrides the user file key by key.
+`models.py select backlog` and `models.py select reviewer` inspect the chosen method;
+`doctor.py` reports both and their fallbacks without contacting models.
+
+`[gates] reviewer_independence` accepts `warn` (default), `different-model` or
+`different-provider`. Invalid values refuse configuration. Before each candidate,
+including fallbacks, the runner compares actual current-round `impl-<n>.json` metadata.
+Profile aliases and billing modes do not prove independent providers. Missing or
+conflicting identity is unknown. API records must include consistent final profile,
+status, fallback-chain and execution settings; a model label alone is insufficient.
+CLI model metadata can be unverifiable; strict
+settings refuse unknown identities. API model IDs in round records can establish a
+model comparison; existing implementer records do not establish a verified actual
+provider, so `different-provider` conservatively refuses them. A gateway hostname does
+not establish provider identity. Warn mode reports matches and uncertainty.
+
+`role_run.py --role backlog --run-dir <absolute run directory> --project <repo-root>
+--worktree none` publishes validated backlog Markdown. Add `--from-repo` to gather
+requirements and backlog together through the exact JSON envelope in the workflow
+contract. `role_run.py --role reviewer --task-dir <absolute task directory> --project
+<repo-root> --worktree <path|none> --round <n>` publishes validated review Markdown.
+These commands use the existing API/CLI transports and require verified read-only CLI
+commands for every producer-role candidate. Exit 0 means published, 3 a valid blocked
+backlog (no tasks created), 1 failed execution/validation, 2 refused preflight. One
+artifact repair is allowed; failures never silently select Claude or advance phases.
+See [External role trust limits](external-implementer.md#backlog-and-reviewer-trust-limits)
+and the [manual reviewer evaluation protocol](../../plugins/task-flow/bench/reviewer-evaluation.md).

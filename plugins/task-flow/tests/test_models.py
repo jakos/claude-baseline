@@ -440,9 +440,11 @@ declared_paths = 5
         self.assertEqual(profiles["mistral"]["fallback"], ["b"])
 
     def test_roles_values_validated(self):
-        # planner and implementer may name a profile; backlog and reviewer may not
-        self.assertRejected(BASE + '[roles]\nbacklog = "mistral"\n', "roles.backlog")
-        self.assertRejected(BASE + '[roles]\nreviewer = "mistral"\n', "roles.reviewer")
+        for role in ("backlog", "reviewer"):
+            self.project(BASE + f'[roles]\n{role} = "mistral"\n')
+            self.assertEqual(
+                models.resolve_role_profile(self.repo, role)["kind"], "profile"
+            )
         self.assertRejected(
             BASE + '[roles]\nimplementer = "missing"\n', "unknown profile"
         )
@@ -740,16 +742,86 @@ declared_paths = 5
             self.assertIn(key, text, f"template: the cli example must name {key}")
         self.assertEqual(set(raw["roles"]), set(models.ROLES))
         self.assertEqual(set(raw["gates"]), set(models.GATES_KEYS))
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
+        self.assertEqual(
+            models.gates(self.repo),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
+        )
+
+    def test_benchmark_presets_are_disabled_valid_and_ordered(self) -> None:
+        text = TEMPLATE.read_text(encoding="utf-8")
+        blocks: list[list[str]] = []
+        for line in text.splitlines():
+            if line.startswith("# [profiles.bench-"):
+                blocks.append([line[2:]])
+            elif blocks and line.startswith("# ") and " = " in line:
+                key = line[2:].split(" = ", 1)[0]
+                if key in models.PROFILE_KEYS:
+                    blocks[-1].append(line[2:])
+            elif line == "[roles]":
+                break
+        self.project("\n".join("\n".join(block) for block in blocks))
+        profiles, _ = models.load(self.repo)
+        self.assertEqual(
+            list(profiles),
+            [
+                "bench-codex",
+                "bench-gemini",
+                "bench-copilot",
+                "bench-opencode",
+                "bench-claude",
+            ],
+        )
+        for profile in profiles.values():
+            self.assertFalse(profile["enabled"])
+            self.assertEqual(profile["driver"], "cli")
+            self.assertIsNotNone(profile["benchmark_isolation"])
+            self.assertIn(profile["usage_format"], ("codex-jsonl", "none"))
+        self.assertIn("Documentation checked 2026-11-06", text)
+        self.assertIn("authenticated test: untested", text)
+
+    def test_benchmark_keys_reject_unsupported_isolation_and_api_profiles(self) -> None:
+        for key, value in {
+            "benchmark_isolation": '"codex"',
+            "benchmark_version_command": '["codex", "--version"]',
+            "subscription_monthly_usd": "20",
+        }.items():
+            self.assertRejected(BASE + f"{key} = {value}\n", key, '"cli"')
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION + 'benchmark_isolation = "unsupported"\n',
+            "benchmark_isolation",
+        )
 
     def test_gates_default_timeout(self):
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 600})
         self.assertEqual(
-            models.gates(None), {"command_timeout_seconds": 600}
+            models.gates(self.repo),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
+        )
+        self.assertEqual(
+            models.gates(None),
+            {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
         )  # user file only, absent
         self.user("[gates]\ncommand_timeout_seconds = 300\n")
-        self.assertEqual(models.gates(self.repo), {"command_timeout_seconds": 300})
-        self.assertEqual(models.gates(None), {"command_timeout_seconds": 300})
+        self.assertEqual(
+            models.gates(self.repo),
+            {"command_timeout_seconds": 300, "reviewer_independence": "warn"},
+        )
+        self.assertEqual(
+            models.gates(None),
+            {"command_timeout_seconds": 300, "reviewer_independence": "warn"},
+        )
+
+    def test_independence_validation_and_precedence(self) -> None:
+        self.user('[gates]\nreviewer_independence = "different-model"\n')
+        self.assertEqual(
+            models.gates(self.repo)["reviewer_independence"], "different-model"
+        )
+        self.project('[gates]\nreviewer_independence = "different-provider"\n')
+        self.assertEqual(
+            models.gates(self.repo)["reviewer_independence"], "different-provider"
+        )
+        self.assertRejected(
+            '[gates]\nreviewer_independence = "none"\n', "gates.reviewer_independence"
+        )
 
     def test_gates_project_overrides_user(self):
         self.user("[gates]\ncommand_timeout_seconds = 300\n")
@@ -1212,10 +1284,12 @@ limit_patterns = ["rate limit reached"]
         # a free-form model or command is never accepted as an override
         with self.assertRaises(models.ConfigError):
             models.resolve_role_profile(self.repo, "planner", override="gpt-9")
-        # reviewer may not name a profile, configured or overridden
-        with self.assertRaises(models.ConfigError) as ctx:
-            models.resolve_role_profile(self.repo, "reviewer", override="mistral")
-        self.assertIn("may name a profile", str(ctx.exception))
+        self.assertEqual(
+            models.resolve_role_profile(self.repo, "reviewer", override="mistral")[
+                "kind"
+            ],
+            "profile",
+        )
         # a disabled profile is refused
         self.project(BASE + "enabled = false\n")
         with self.assertRaises(models.ConfigError) as ctx:

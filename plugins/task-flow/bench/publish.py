@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -61,7 +62,7 @@ REQUIRED_RUN_KEYS = (
 TABLE_HEADER = (
     "| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | "
     "Tokens per accepted (in / cached / out) | Cost per run median (min–max) | "
-    "Cost per accepted |"
+    "Cost per accepted | Seconds per run, median (min-max) |"
 )
 CHART_WIDTH = 760
 CHART_BAR_X = 180
@@ -154,6 +155,12 @@ def newest_run(results_dir) -> str | None:
 def check_comparable(meta: dict, rows: list) -> None:
     """P2a: one fingerprint and harness version across the rows, equal to run.json's."""
     run_id = meta.get("run_id", "?")
+    try:
+        bench.check_cli_comparable(rows, meta)
+    except bench.BenchError as exc:
+        raise PublishError(str(exc)) from exc
+    if any(r.get("review", meta["review"]) != meta["review"] for r in rows):
+        raise PublishError(f"run {run_id} mixes review modes")
     fingerprints = {str(row.get("fingerprint", "")) for row in rows}
     fingerprints.add(str(meta.get("fingerprint", "")))
     if len(fingerprints) > 1:
@@ -178,6 +185,19 @@ def check_comparable(meta: dict, rows: list) -> None:
 def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dict:
     accepted = [r for r in prows if r["outcome"] == "accepted"]
     done = [r for r in prows if r["outcome"] != "skipped"]
+    # Total wall time follows acceptance, independently of hidden-test results.
+    # Only when nothing was accepted do finished failures describe time until stop.
+    population = accepted if accepted else done
+    seconds = [r["seconds"] for r in population]
+    time_text = "n/a"
+    if seconds:
+        label = "time to accepted" if accepted else "0 accepted; time until stop"
+        time_text = (
+            f"{bench.median(seconds):.1f} ({min(seconds):.1f}–{max(seconds):.1f})"
+            f"; {label}"
+        )
+        if len(seconds) == 1:
+            time_text += "; single sample"
     runs = len(prows)
     pct = (100 * len(accepted)) // runs if runs else 0
     reasons: list[str] = []
@@ -192,7 +212,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         )
     partial = bool(reasons)
     tokens = None
-    if accepted:
+    if accepted and all(r.get("tokens") is not None for r in done):
         tokens = {}
         for kind in ("input", "cached", "output"):
             total = sum(
@@ -219,7 +239,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
     elif known:
         per_run = "n/a"
     else:
-        per_run = "subscription"
+        per_run = bench.unknown_cost_label(prows)
     per_accepted_text = bench._cost_per_accepted(prows, accepted)
     if known and accepted:
         per_accepted = sum(r["cost_usd"] + r["review_cost_usd"] for r in prows) / len(
@@ -227,11 +247,12 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         )
         cost_label = None
     elif not known:
-        per_accepted, cost_label = None, "subscription"
+        per_accepted, cost_label = None, bench.unknown_cost_label(prows)
     else:
         per_accepted, cost_label = None, "n/a (0 accepted)"
     return {
         "profile": name,
+        "time_text": time_text,
         "label": name + (" (partial)" if partial else ""),
         "model": model,
         "billing": billing,
@@ -244,6 +265,8 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         "tokens_text": (
             " / ".join(f"{tokens[kind]:,}" for kind in ("input", "cached", "output"))
             if tokens
+            else "unknown"
+            if accepted
             else "n/a (0 accepted)"
         ),
         "cost_known": known,
@@ -303,6 +326,8 @@ def summarize(meta: dict, rows: list) -> dict:
         tokens_text = (
             f"in {tokens['input']:,}, cached {tokens['cached']:,}, out {tokens['output']:,}"
             if tokens
+            else "unknown"
+            if cell["accepted"]
             else "n/a (0 accepted)"
         )
         chart_parts.append(
@@ -319,7 +344,7 @@ def summarize(meta: dict, rows: list) -> dict:
     for cell in all_cells:
         if not cell["cost_known"]:
             notes.append(
-                f"profile `{cell['profile']}` bills by subscription, so its cost is "
+                f"profile `{cell['profile']}` has incomplete billing evidence, so its cost is "
                 "unknown; it is compared on tokens, rounds and acceptance"
             )
         if cell["partial"]:
@@ -327,6 +352,19 @@ def summarize(meta: dict, rows: list) -> dict:
                 f"profile `{cell['profile']}` is partial — {'; '.join(cell['partial_reasons'])}"
             )
     merged_from = meta.get("merged_from")
+    for cells in tables.values():
+        for cell in cells:
+            if merged_from:
+                cell["time_text"] += "; merged run"
+            limits = {
+                (r.get("settings") or {}).get("max_turns")
+                for r in rows
+                if r["profile"] == cell["profile"] and r["outcome"] != "skipped"
+            }
+            if len(limits) > 1:
+                cell["time_text"] += "; mixed turn limits"
+    time_note = _time_note(rows, repeat)
+    notes.append(time_note)
     if merged_from:
         notes.append(
             "this run merges rows of the runs "
@@ -360,6 +398,7 @@ def summarize(meta: dict, rows: list) -> dict:
         "case_sizes": {c: case_size.get(c, "?") for c in cases},
         "repeat": repeat,
         "review": bool(meta.get("review")),
+        "interrupted_attempts": meta.get("interrupted_attempts", []),
         "task_flow_version": meta.get("task_flow_version")
         or "unknown (not recorded by this run)",
         "sizes": sizes,
@@ -368,6 +407,7 @@ def summarize(meta: dict, rows: list) -> dict:
         "all": all_cells,
         "profile_info": profile_info,
         "notes": notes,
+        "time_note": time_note,
         "failures": failures,
         "rows": rows,
         "chart_alt": chart_alt,
@@ -377,6 +417,49 @@ def summarize(meta: dict, rows: list) -> dict:
 
 
 # ---------------------------------------------------------------------------- rendering (P4–P8)
+
+
+def _time_note(rows: list[dict], repeat: int) -> str:
+    text = (
+        "Times use total wall seconds, to one decimal: accepted rows only (time to "
+        "accepted), or all non-skipped finished rows when none accepted (0 accepted; "
+        "time until stop); empty populations are n/a. Acceptance is separate from hidden pass. "
+        "Elapsed time includes provider and network latency, rate-limit waits and retries "
+        "when they occur; configured retry counts do not establish observed attempts. "
+        "Provider load, turn counts and time of day affect timings; repeated cells can vary. "
+        "Compare times only within one published run's table, never across days. "
+        "Overlapping model min-max spreads do not support an ordering; non-overlap alone "
+        "does not establish one. Merged runs and mixed turn limits prevent strict "
+        "like-for-like comparisons. All pools different cases, not identical repeats. "
+    )
+    if repeat == 1:
+        text += (
+            "With one repeat each case/profile cell's time is a single sample, not a "
+            "measurement of typical performance, even when All pools several cases. "
+        )
+    else:
+        text += "Any displayed population of one is labelled single sample. "
+    finished = [r for r in rows if r["outcome"] != "skipped"]
+    starts = []
+    for row in finished:
+        value = row.get("started_at")
+        if value:
+            try:
+                start = datetime.fromisoformat(value)
+            except ValueError:
+                continue
+            if start.tzinfo is not None:
+                starts.append(start.astimezone(UTC))
+    if starts:
+        first, last = (
+            v.isoformat().replace("+00:00", "Z") for v in (min(starts), max(starts))
+        )
+        text += f"UTC row start window: {first} to {last} (first to last available non-skipped start, not completion)."
+        if len(starts) < len(finished):
+            text += f" Incomplete timestamp coverage: {len(starts)}/{len(finished)} non-skipped rows."
+    else:
+        text += "UTC row start window unavailable: no timestamp coverage for non-skipped rows."
+    return text
 
 
 def replace_block(text: str, start: str, end: str, body: str) -> str:
@@ -438,13 +521,13 @@ def parse_page_meta(text: str) -> dict | None:
 
 
 def _table_lines(cells: list) -> list[str]:
-    lines = [TABLE_HEADER, "| " + " --- | " * 8 + "--- |"]
+    lines = [TABLE_HEADER, "| " + " --- | " * 9 + "--- |"]
     for cell in cells:
         lines.append(
             f"| {cell['label']} | {cell['model']} | {cell['runs']} | "
             f"{cell['accepted_text']} | {cell['rounds_text']} | {cell['hidden_pass']} | "
             f"{cell['tokens_text']} | {cell['cost_per_run_text']} | "
-            f"{cell['cost_per_accepted_text']} |"
+            f"{cell['cost_per_accepted_text']} | {cell['time_text']} |"
         )
     return lines
 
@@ -501,6 +584,8 @@ def render_latest(summary: dict, prev: dict | None) -> str:
             "not comparable with earlier runs."
         )
         lines.append("")
+    lines.extend(bench.provenance_report(summary["rows"], summary))
+    lines.extend(bench.protocol_report(summary["rows"], summary))
     lines += [f"![{summary['chart_alt']}](latest.svg)", ""]
     for size in [*summary["sizes"], "All"]:
         lines.append(f"## {size}")
@@ -533,8 +618,8 @@ def render_chart(summary: dict) -> str:
     """P7: the deterministic SVG chart (stdlib only) for the `All` figures."""
     cells = summary["all"]
     count = len(cells)
-    head1_y = 24
-    bars1_y = 44
+    head1_y = 48
+    bars1_y = 68
     head2_y = bars1_y + count * CHART_ROW + 16
     bars2_y = head2_y + 20
     height = bars2_y + count * CHART_ROW + 10
@@ -552,6 +637,11 @@ def render_chart(summary: dict) -> str:
         (
             f'  <rect x="0" y="0" width="{CHART_WIDTH}" height="{height}" rx="6" '
             'fill="#ffffff" stroke="#d0d7de"/>'
+        ),
+        (
+            f'  <text x="10" y="20" font-family="{CHART_FONT}" font-size="12" '
+            f'fill="{TEXT_COLOR}">Repeat coverage: {summary["repeat"]} per case; '
+            f"{'exploratory' if any(bench.eligibility(summary['rows'], summary, c, p) == 'exploratory' for c in summary['cases'] for p in summary['profiles']) else 'descriptive ranking'}</text>"
         ),
         (
             f'  <text x="10" y="{head1_y}" font-family="{CHART_FONT}" font-size="14" '
@@ -595,7 +685,7 @@ def render_chart(summary: dict) -> str:
                 f"· out {cell['tokens']['output']:,}"
             )
         else:
-            value = "n/a (0 accepted)"
+            value = "unknown" if cell["accepted"] else "n/a (0 accepted)"
         out.append(
             f'    <text x="{CHART_VALUE_X}" y="{y + 13}" font-family="{CHART_FONT}" '
             f'font-size="12" fill="{TEXT_COLOR}">{escape(value)}</text>'
@@ -647,6 +737,29 @@ def render_readme_block(summary: dict, rel: str) -> str:
             f"task-flow {summary['task_flow_version']}."
         )
     ]
+    lines.extend(
+        [
+            "",
+            "Repeat evidence: "
+            + (
+                "exploratory"
+                if any(
+                    bench.eligibility(summary["rows"], summary, c, p) == "exploratory"
+                    for c in summary["cases"]
+                    for p in summary["profiles"]
+                )
+                else "descriptive ranking"
+            )
+            + "; minimum five completed independent repeats per case/profile.",
+        ]
+    )
+    if (summary.get("harness_version") or 1) < 2:
+        lines.extend(
+            [
+                "",
+                "Version 1 predates the per-round probe; version 2 requires a new baseline.",
+            ]
+        )
     if summary.get("new_baseline"):
         lines.append("")
         lines.append(
@@ -656,15 +769,17 @@ def render_readme_block(summary: dict, rel: str) -> str:
     lines.append("")
     lines.append(
         "| Profile | Model | Accepted | Hidden pass | "
-        "Tokens per accepted (in / cached / out) | Cost per accepted |"
+        "Tokens per accepted (in / cached / out) | Cost per accepted | "
+        "Seconds per run, median (min-max) |"
     )
-    lines.append("| " + " --- | " * 5 + "--- |")
+    lines.append("| " + " --- | " * 6 + "--- |")
     for cell in summary["all"]:
         lines.append(
             f"| {cell['label']} | {cell['model']} | {cell['accepted_text']} | "
             f"{cell['hidden_pass']} | {cell['tokens_text']} | "
-            f"{cell['cost_per_accepted_text']} |"
+            f"{cell['cost_per_accepted_text']} | {cell['time_text']} |"
         )
+    lines.extend(["", summary["time_note"]])
     for note in summary.get("notes", []):
         if note.startswith("this run merges") or "different turn limits" in note:
             lines.append("")

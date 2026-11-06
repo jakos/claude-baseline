@@ -35,3 +35,5 @@ not to confirm that it meets it.
 8. Write `.work/<task-id>/review-<n>.md`.
 
 Return the verdict line and the Fix list.
+
+When the external runner supplies a transport adapter, return only raw review Markdown. The host owns publication and status transitions; malformed output receives one bounded repair. Use `none` for empty Findings and Fix list.

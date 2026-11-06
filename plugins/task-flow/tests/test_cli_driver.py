@@ -62,6 +62,55 @@ def run(
 
 
 class CliDriverTest(unittest.TestCase):
+    def test_benchmark_environment_is_opt_in_and_per_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "UNRELATED_SECRET": "private",
+                "APPROVED_TOKEN": "approved",
+                "HOME": "personal",
+                "CODEX_HOME": "personal-config",
+            }
+            self.assertIs(cli_driver.benchmark_environment(env), env)
+            for tool, variable in cli_driver.BENCH_TOOL_ENV.items():
+                policy = {
+                    "tool": tool,
+                    "root": str(root / tool),
+                    "pass_env": ["APPROVED_TOKEN"],
+                }
+                selected = cli_driver.benchmark_environment(
+                    {**env, cli_driver.BENCH_ENV: json.dumps(policy)}
+                )
+                self.assertNotIn("UNRELATED_SECRET", selected)
+                self.assertNotIn(cli_driver.BENCH_ENV, selected)
+                self.assertEqual(selected["APPROVED_TOKEN"], "approved")
+                self.assertEqual(selected[variable], str(root / tool / "tool"))
+                self.assertTrue(Path(selected["HOME"]).is_dir())
+                self.assertNotEqual(selected["HOME"], env["HOME"])
+
+    def test_fake_cli_receives_only_approved_benchmark_environment(self) -> None:
+        fake = fake_cli(
+            self.tmp,
+            "environment.py",
+            "import os, json\nprint(json.dumps(dict(os.environ)))\n",
+        )
+        state = self.tmp / "isolated"
+        env = {
+            **os.environ,
+            "UNRELATED_SECRET": "private",
+            "APPROVED_TOKEN": "approved",
+            cli_driver.BENCH_ENV: json.dumps(
+                {"tool": "codex", "root": str(state), "pass_env": ["APPROVED_TOKEN"]}
+            ),
+        }
+        result = run(fake, self.worktree, env=env)
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        selected = json.loads(result.stdout)
+        self.assertNotIn("UNRELATED_SECRET", selected)
+        self.assertEqual(selected["CODEX_HOME"], str(state / "tool"))
+        self.assertEqual(selected["APPROVED_TOKEN"], "approved")
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

@@ -1373,5 +1373,102 @@ class RoutingTest(RunFixture):
         )
 
 
+class ExternalReviewBudgetTest(RunFixture):
+    def record(self, directory: Path, role: str, invocation: str, cost, tokens) -> None:
+        import role_runtime
+
+        role_runtime.write_role_metrics(
+            directory,
+            {
+                "schema": "role-metrics/1",
+                "role": role,
+                "invocation_id": invocation,
+                "cost_usd": cost,
+                "cost_known_usd": 0.25 if cost is None else cost,
+                "tokens": tokens,
+            },
+        )
+
+    def scope(self, value: str) -> None:
+        path = self.run_dir / "run.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "- budget:", f"- budget-scope: {value}\n- budget:"
+            ),
+            encoding="utf-8",
+        )
+
+    def test_backlog_and_reviewer_accounting_is_idempotent(self) -> None:
+        self.run_md([("a", "-", "0", "approved")], usd=["0"])
+        self.record(
+            self.run_dir, "backlog", "gather", 1.0, {"input": 100, "output": 20}
+        )
+        self.record(
+            self.root / ".work/a",
+            "reviewer",
+            "review",
+            None,
+            {"input": 50, "output": 10},
+        )
+        out = self.out("estimate")
+        self.assertIn("external spent: at least 1.25 USD", out)
+        self.assertIn("backlog USD: 1.000000", out)
+        self.assertIn("reviewer: at least 0.250000 USD", out)
+        self.assertEqual(out, self.out("estimate"))
+
+    def test_default_and_all_token_budgets(self) -> None:
+        self.run_md([("a", "-", "0", "approved")], budget=str(MAX + 100))
+        self.record(
+            self.run_dir, "backlog", "gather", 999999, {"input": 100, "output": 20}
+        )
+        self.assertEqual(self.out("next"), "run a")
+        self.scope("all")
+        self.assertIn("stop: budget:", self.out("next"))
+        self.assertIn("spent: 120 tokens", self.out("estimate"))
+        self.assertEqual(self.out("next"), self.out("next"))
+        bad = self.call("next", self.run_dir, "--budget-scope", "claude")
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn(b"persisted", bad.stderr)
+
+    def test_unknown_all_scope_stops_between_tasks_only(self) -> None:
+        self.run_md([("a", "-", "0", "approved")], budget="9000000")
+        self.scope("all")
+        self.record(self.run_dir, "backlog", "gather", None, None)
+        self.assertIn("unknown external usage", self.out("next"))
+        self.assertIn("cannot assert fit", self.out("estimate"))
+        self.task("a", "implementing", plan())
+        self.assertEqual(self.out("next"), "run a")
+
+    def test_legacy_external_spend_without_token_records_is_unknown(self) -> None:
+        self.run_md(
+            [("a", "-", "0", "done"), ("b", "a", "0", "approved")],
+            budget="9000000",
+            usd=["1.0", "0"],
+        )
+        self.scope("all")
+        self.assertIn("unknown external usage", self.out("next"))
+
+    def test_all_scope_burn_rate_uses_reported_task_tokens(self) -> None:
+        self.run_md([("a", "-", "0", "done"), ("b", "a", "0", "approved")])
+        self.record(
+            self.root / ".work/a",
+            "reviewer",
+            "expensive",
+            1.0,
+            {"input": 900000, "output": 1},
+        )
+        self.assertEqual(self.out("next"), "run b")
+        self.scope("all")
+        self.assertIn("stop: burn rate:", self.out("next"))
+
+    def test_all_scope_retains_external_estimates(self) -> None:
+        self.run_md([("a", "-", "0", "approved")])
+        self.scope("all")
+        out = self.out(
+            "estimate", "--implementer-kind", "profile", "--budget-scope", "all"
+        )
+        self.assertIn(f"| 1 | a | 2 | 3 | 2 | {ONE} | {MAX} |", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,11 +2,10 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""The role-neutral runtime of task-flow's external producer roles (the planner today).
+"""The role-neutral runtime of task-flow's external producer roles (planner, backlog and reviewer).
 
 scripts/implement.py owns the implementer's API Session, tool dispatch, prompt assembly
-and accounting; this module is the reusable core a second role (the planner, later the
-backlog and reviewer of external-review-backlog) runs on without copying it: request
+and accounting; this module is the reusable core a second role (planner, backlog and reviewer) runs on without copying it: request
 retries, the fallback chain, usage/cost accounting with nullable (never fabricated)
 values, environment redaction and deadlines, plus the read-only tool surface a producer
 role gets (bounded read/list/search and a small argv-based read-only command allowlist,
@@ -239,14 +238,31 @@ class UsageLedger:
     def __init__(self, profiles: dict):
         self.profiles = profiles
         self.usage: dict[str, dict | None] = {}
+        self.known_usage: dict[str, dict] = {}
 
     def add_api(self, name: str, payload) -> dict:
         profile = self.profiles[name]
         usage = drivers.get(profile["driver"]).usage(payload)
-        entry = self.usage.setdefault(
+        raw = payload.get("usage") if isinstance(payload, dict) else None
+        required = (
+            ("prompt_tokens", "completion_tokens")
+            if profile["driver"] == "openai-loop"
+            else ("input_tokens", "output_tokens")
+        )
+        if not isinstance(raw, dict) or any(
+            not isinstance(raw.get(k), int)
+            or isinstance(raw.get(k), bool)
+            or raw[k] < 0
+            for k in required
+        ):
+            self.usage[name] = None
+            return {"input": 0, "cached": 0, "output": 0}
+        entry = self.known_usage.setdefault(
             name,
             {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0},
         )
+        if name not in self.usage:
+            self.usage[name] = entry
         entry["input"] += usage["input"]
         entry["cached"] += usage["cached"]
         entry["cache_write"] += usage["cache_write"]
@@ -261,10 +277,12 @@ class UsageLedger:
         if usage is None or malformed:
             self.usage[name] = None  # unknown usage stays null, never zero
             return
-        entry = self.usage.setdefault(
+        entry = self.known_usage.setdefault(
             name,
             {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0},
         )
+        if name not in self.usage:
+            self.usage[name] = entry
         for key in ("input", "cached", "reasoning", "output"):
             entry[key] += usage.get(key, 0)
 
@@ -308,7 +326,7 @@ class UsageLedger:
     def cost_known(self) -> float:
         """The subtotal of the known costs (additive metadata next to a null total)."""
         total = 0.0
-        for name, tokens in self.usage.items():
+        for name, tokens in self.known_usage.items():
             value = self.profile_cost(name, tokens)
             if value is not None:
                 total += value
@@ -323,6 +341,12 @@ class UsageLedger:
             for field_name in total:
                 total[field_name] += tokens[field_name]
         return total
+
+    def tokens_known(self) -> dict:
+        return {
+            key: sum(entry[key] for entry in self.known_usage.values())
+            for key in ("input", "cached", "output")
+        }
 
     def cost_text(self) -> str:
         cost = self.cost()
@@ -404,6 +428,69 @@ PRODUCER_TOOLS = [
 ]
 
 
+def review_excluded(path: Path) -> bool:
+    """Exclude narratives and git storage even through alternate resolved paths."""
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    return bool(
+        parts & {".work", ".git"}
+        or name == "status.md"
+        or re.fullmatch(r"(?:impl|review)-.*\.(?:json|jsonl|md)", name)
+    )
+
+
+def independence_problem(
+    task_dir: Path, round_number: int, candidate: dict, mode: str
+) -> str | None:
+    """Actual round metadata only; aliases, billing and gateway hosts prove nothing.
+
+    Existing implementer records lack verified provider identity. Such a record can
+    establish an API model ID but never establish a different provider. CLI model
+    configuration is not evidence of the model the CLI actually selected.
+    """
+    path = task_dir / f"impl-{round_number}.json"
+    if path.is_symlink():
+        return "current-round implementer identity is unverified (symlink metrics)"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "current-round implementer identity is unknown"
+    if (
+        not isinstance(record, dict)
+        or record.get("round", round_number) != round_number
+    ):
+        return "current-round implementer identity is missing or conflicting"
+    model = record.get("model")
+    chain = record.get("fallback_chain")
+    if (
+        not isinstance(chain, list)
+        or not chain
+        or any(not isinstance(entry, dict) for entry in chain)
+        or chain[-1].get("profile") != record.get("profile")
+        or chain[-1].get("outcome") != record.get("status")
+        or record.get("status") not in ("ok", "blocked", "failed")
+        or not isinstance(record.get("settings"), dict)
+    ):
+        return "current-round implementer identity is missing or conflicting"
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or "cli" in record
+        or record.get("kind") == "claude"
+        or record.get("profile") == "claude"
+        or candidate["driver"] == "cli"
+    ):
+        return "actual implementer or reviewer model identity is unverified"
+    if mode == "different-provider":
+        return "verified actual provider identity is unavailable in implementer metrics"
+    if model == candidate["model"]:
+        return "reviewer matches the actual implementer model"
+    # A profile model label cannot establish a provider difference in warn mode.
+    if mode == "warn":
+        return "model labels differ; actual provider independence remains unknown"
+    return None
+
+
 class ProducerTools:
     """The read-only tool surface of an external producer role.
 
@@ -421,8 +508,17 @@ class ProducerTools:
         self.roots = [Path(root).resolve() for root in roots]
         self.role = role
         self.command_timeout = command_timeout
+        self.review_inputs: set[Path] = set()
 
     def _inside_roots(self, resolved: Path) -> bool:
+        if resolved in self.review_inputs:
+            return True
+        if self.role == "external-reviewer" and review_excluded(
+            resolved.relative_to(self.worktree)
+            if resolved.is_relative_to(self.worktree)
+            else resolved
+        ):
+            return False
         return any(_is_relative_to(resolved, root) for root in self.roots)
 
     def _looks_like_path(self, arg: str) -> bool:
@@ -558,6 +654,10 @@ class ProducerTools:
         return "\n".join(matches) or "(no matches)"
 
     def run_command(self, args):
+        if self.role == "external-reviewer":
+            raise ToolError(
+                "denied: reviewer command tools are disabled; use the complete host-supplied diff and file tools"
+            )
         argv = args.get("argv")
         if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
             raise ToolError("error: argv must be a list of strings")
@@ -674,7 +774,11 @@ class RoleSession:
         heartbeat: float = 0.0,
         urlopen=None,
         sleep=time.sleep,
+        candidate_check=None,
+        cli_once=None,
     ):
+        self.candidate_check = candidate_check
+        self.cli_once = cli_once
         self.profiles = profiles
         self.start = profiles[profile_name]
         self.profile_name = profile_name
@@ -715,6 +819,27 @@ class RoleSession:
                     )
                     log(f"fallback profile {name} skipped: {skip}")
                     continue
+            if self.candidate_check is not None:
+                try:
+                    self.candidate_check(name)
+                except Refusal as exc:
+                    self.chain.append(
+                        {
+                            "profile": name,
+                            "outcome": "refused",
+                            "reason": str(exc),
+                            "retries": [],
+                        }
+                    )
+                    return SessionResult(
+                        "failed",
+                        str(exc),
+                        None,
+                        self.chain,
+                        self.repairs,
+                        self.turns,
+                        self.ledger,
+                    )
             status, reason, text, repairs = self._run_profile(
                 name, profile, interrupted
             )
@@ -753,6 +878,8 @@ class RoleSession:
         )
 
     def _run_profile(self, name: str, profile: dict, interrupted):
+        if profile["driver"] == "cli":
+            return self._run_cli_profile(name, profile)
         driver = drivers.get(profile["driver"])
         conversation = driver.start(self.system, self.user)
         if interrupted:
@@ -825,16 +952,16 @@ class RoleSession:
                 accepted, blocked, reasons = self.validator(text)
                 if accepted:
                     return ("blocked" if blocked else "ok"), "finished", text, repairs
-                if repairs < self.max_repairs:
+                if self.repairs + repairs < self.max_repairs:
                     repairs += 1
                     bounded = "\n".join(f"- {reason}" for reason in reasons[:10])
                     conversation.append(
                         {
                             "role": "user",
                             "content": (
-                                "Your previous answer was not a valid plan.md artifact. "
+                                "Your previous answer was not a valid role artifact. "
                                 "Fix exactly these problems and return the complete, "
-                                "raw plan.md again (no code fence around it):\n"
+                                "role artifact again (use its required format):\n"
                                 f"{bounded}"
                             ),
                         }
@@ -861,8 +988,71 @@ class RoleSession:
                 results.append((call_id, result))
             driver.append(conversation, reply, results)
 
+    def _run_cli_profile(self, name: str, profile: dict) -> tuple:
+        repairs = 0
+        extra = ""
+        while True:
+            try:
+                result = self.cli_once(profile, extra)
+            except cli_driver.CliRefused as exc:
+                return "unavailable", str(exc), None, repairs
+            self.turns += 1
+            self.ledger.add_cli(name, result.usage, result.usage_malformed)
+            if any(
+                re.search(pattern, result.stderr)
+                or re.search(pattern, result.final_message or "")
+                for pattern in profile["limit_patterns"]
+            ):
+                return (
+                    "unavailable",
+                    "a limit_pattern matched the bounded output",
+                    None,
+                    repairs,
+                )
+            if (
+                result.timed_out
+                or result.failure_event
+                or result.exit_code not in (0, None)
+            ):
+                return (
+                    "failed",
+                    f"CLI exit {result.exit_code}; timeout={result.timed_out}; failure={result.failure_event}",
+                    None,
+                    repairs,
+                )
+            cost = self.ledger.cost()
+            if (
+                self.start["max_cost_usd"] is not None
+                and cost is not None
+                and cost > self.start["max_cost_usd"]
+            ):
+                return "failed", "max_cost_usd exceeded", None, repairs
+            ok, blocked, reasons = self.validator(result.final_message or "")
+            if ok:
+                return (
+                    "blocked" if blocked else "ok",
+                    "finished",
+                    result.final_message,
+                    repairs,
+                )
+            if self.repairs + repairs >= self.max_repairs:
+                return (
+                    "failed",
+                    "the artifact stayed invalid after the single repair attempt: "
+                    + "; ".join(reasons[:5]),
+                    result.final_message,
+                    repairs,
+                )
+            repairs += 1
+            extra = (
+                "\nFix exactly these problems and return the complete role artifact:\n"
+                + "\n".join(reasons[:10])
+            )
+
     def _note_attempts(self, name: str, attempts: list) -> None:
         for index, attempt in enumerate(attempts):
+            if attempt["outcome"] != "ok":
+                self.ledger.usage[name] = None
             if attempt["outcome"] != "ok" and index + 1 < len(attempts):
                 self.retries.setdefault(name, []).append(
                     {
@@ -940,6 +1130,8 @@ def write_role_metrics(task_dir: Path, record: dict) -> Path:
     if path.is_symlink():
         raise Refusal(f"refusing to write through a symlink: {path}")
     temp = task_dir / f".{path.name}.tmp"
+    if temp.is_symlink():
+        raise Refusal(f"refusing to write through a symlink: {temp}")
     temp.write_text(text, encoding="utf-8", newline="")
     os.replace(temp, path)
     return path
@@ -966,8 +1158,16 @@ def load_role_metrics(task_dir: Path) -> list[dict]:
             )
             continue
         if isinstance(record, dict) and record.get("schema") == METRICS_SCHEMA:
+            record.setdefault("invocation_id", path.stem)
             records.append(record)
-    return records
+    unique = {}
+    for record in records:
+        key = (record.get("role"), record.get("invocation_id"))
+        if key in unique and unique[key] != record:
+            unique[key] = dict(unique[key], cost_usd=None, tokens=None)
+        else:
+            unique.setdefault(key, record)
+    return list(unique.values())
 
 
 def role_usd(task_dir: Path) -> tuple[float, bool]:
@@ -982,6 +1182,7 @@ def role_usd(task_dir: Path) -> tuple[float, bool]:
         cost = record.get("cost_usd")
         if cost is None:
             unknown = True
+            total += record.get("cost_known_usd", 0.0) or 0.0
         elif isinstance(cost, (int, float)) and not isinstance(cost, bool):
             total += cost
     return total, unknown
@@ -1017,6 +1218,7 @@ def impl_usd(task_dir: Path) -> tuple[float, bool]:
         cost = record.get("cost_usd")
         if cost is None:
             unknown = True
+            total += record.get("cost_known_usd", 0.0) or 0.0
         elif isinstance(cost, (int, float)) and not isinstance(cost, bool):
             total += cost
     return total, unknown
@@ -1027,7 +1229,7 @@ def invocation_usd(task_dir: Path) -> dict:
 
     Returns {"stages": {stage: (known sum, any unknown)}, "total": (sum, unknown),
     "files": <count of files read>}. role-*.json records contribute their record's
-    `role` stage (the planner today), impl-<n>.json files the "implementer" stage.
+    `role` stage (planner, backlog and reviewer), impl-<n>.json files the "implementer" stage.
     Every file name carries its invocation/round id, so re-reading is idempotent:
     a resume recomputes the same totals instead of double counting, and planner
     USD lands in the task's External USD alongside the implementer's. Unknown
@@ -1048,7 +1250,10 @@ def invocation_usd(task_dir: Path) -> dict:
     task_dir = Path(task_dir)
     for record in load_role_metrics(task_dir):
         files += 1
-        add(str(record.get("role") or "role"), record.get("cost_usd"))
+        stage = str(record.get("role") or "role")
+        add(stage, record.get("cost_usd"))
+        if record.get("cost_usd") is None:
+            add(stage, record.get("cost_known_usd", 0.0) or 0.0)
     impl_paths = (
         [
             path
@@ -1072,6 +1277,49 @@ def invocation_usd(task_dir: Path) -> dict:
         "total": (total, unknown),
         "files": files,
     }
+
+
+def invocation_tokens(directory: Path) -> tuple[int, bool]:
+    """Reported external input + output once per identity; known subtotal survives null."""
+    records = load_role_metrics(directory)
+    unknown = False
+    for path in sorted(Path(directory).glob("role-*.json")):
+        try:
+            if path.is_symlink():
+                raise ValueError("unverified metrics path")
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or record.get("schema") != METRICS_SCHEMA:
+                raise ValueError("unrecognized metrics schema")
+        except (OSError, ValueError):
+            unknown = True
+    for path in sorted(Path(directory).glob("impl-*.json")):
+        try:
+            if path.is_symlink():
+                raise ValueError("unverified metrics path")
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                raise TypeError("not a metrics object")
+            if record.get("kind") == "claude" or record.get("profile") == "claude":
+                continue
+            records.append(record)
+        except (OSError, ValueError, TypeError):
+            unknown = True
+    total = 0
+    for record in records:
+        tokens = record.get("tokens")
+        if tokens is None:
+            unknown = True
+            tokens = record.get("tokens_known")
+        if not isinstance(tokens, dict) or any(
+            not isinstance(tokens.get(key), int)
+            or isinstance(tokens.get(key), bool)
+            or tokens[key] < 0
+            for key in ("input", "output")
+        ):
+            unknown = True
+            continue
+        total += tokens["input"] + tokens["output"]
+    return total, unknown
 
 
 def redact_record(record, secrets: list[str]) -> dict:

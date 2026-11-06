@@ -72,6 +72,27 @@ MIN_REDACT_LENGTH = 4
 REDACTED = "***"
 PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
 ALLOWED_PLACEHOLDERS = {"worktree", "prompt_file", "last_message_file"}
+BENCH_ENV = "TASK_FLOW_BENCH_ENV"
+BENCH_SYSTEM_ENV = {
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "SYSTEMDRIVE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+}
+BENCH_TOOL_ENV = {
+    "codex": "CODEX_HOME",
+    "gemini": "GEMINI_CLI_HOME",
+    "copilot": "COPILOT_HOME",
+    "claude": "CLAUDE_CONFIG_DIR",
+    "opencode": "OPENCODE_CONFIG_DIR",
+}
 USAGE_INT_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -83,6 +104,58 @@ FAILURE_EVENT_TYPES = {"turn.failed", "error", "item.failed"}
 
 class CliRefused(Exception):
     """The command cannot be built or started; the attempt is unavailable."""
+
+
+def benchmark_environment(env: dict) -> dict:
+    """Apply only the benchmark's explicit policy; ordinary callers keep their env.
+
+    The harness supplies this control variable through pass_env. It is consumed
+    here, never forwarded to the tool. State is outside retained code/probe roots.
+    This limits accidental inheritance, not filesystem or network access.
+    """
+    if BENCH_ENV not in env:
+        return env
+    try:
+        policy = json.loads(env[BENCH_ENV])
+        tool, root = policy["tool"], Path(policy["root"])
+        approved = policy["pass_env"]
+        if tool not in BENCH_TOOL_ENV or not root.is_absolute():
+            raise ValueError("unsupported tool or non-absolute state root")
+        if not isinstance(approved, list) or not all(
+            isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            for name in approved
+        ):
+            raise ValueError("invalid approved environment names")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise CliRefused("invalid benchmark isolation policy") from exc
+    selected = {
+        name: value
+        for name, value in env.items()
+        if name.upper() in BENCH_SYSTEM_ENV or name in approved
+    }
+    for name, relative in {
+        "HOME": "home",
+        "USERPROFILE": "home",
+        "APPDATA": "appdata",
+        "LOCALAPPDATA": "localappdata",
+        "XDG_CONFIG_HOME": "config",
+        "XDG_DATA_HOME": "data",
+        "XDG_CACHE_HOME": "cache",
+        "XDG_STATE_HOME": "state",
+        BENCH_TOOL_ENV[tool]: "tool",
+        "TMP": "tmp",
+        "TEMP": "tmp",
+        "TMPDIR": "tmp",
+    }.items():
+        directory = root / relative
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CliRefused("benchmark state directory is unavailable") from exc
+        selected[name] = str(directory)
+    if tool == "copilot":
+        selected["COPILOT_AUTO_UPDATE"] = "false"
+    return selected
 
 
 @dataclass
@@ -420,6 +493,7 @@ def run_cli(
     """
     secrets = secrets or []
     worktree = Path(worktree)
+    env = benchmark_environment(env)
     with tempfile.TemporaryDirectory(prefix="task-flow-cli-") as tmp:
         prompt_file = Path(tmp) / "prompt.md"
         last_message_file = Path(tmp) / "last-message.txt"

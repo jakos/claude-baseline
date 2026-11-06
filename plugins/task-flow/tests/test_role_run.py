@@ -15,6 +15,7 @@ this repository's git state, a real model, a real credential or a login is invol
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -849,6 +850,551 @@ class UnicodePathTest(Base):
             code = role_run.main(repo.argv())
         self.assertEqual(code, 0)
         self.assertTrue((repo.task / "plan.md").is_file())
+
+
+class ReadRolesTest(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        from test_role_contracts import (
+            REVIEW_PLAN,
+            VALID_BACKLOG,
+            VALID_REVIEW,
+            checks_fixture,
+        )
+
+        self.backlog = VALID_BACKLOG
+        self.review = VALID_REVIEW
+        self.plan = REVIEW_PLAN
+        self.checks = checks_fixture
+        patcher = mock.patch.dict(
+            os.environ, {"FAKE_API_KEY": "fake-key", "FALLBACK_API_KEY": "backup-key"}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def backlog_repo(self, from_repo: bool = False, toml: str | None = None) -> tuple:
+        repo = self.repo(
+            toml or API_TOML.replace('planner = "fake"', 'backlog = "fake"')
+        )
+        run = repo.root / ".work" / "_autopilot" / "run-x"
+        run.mkdir(parents=True)
+        (run / "requirements.md").write_text(
+            "Original requirement.\n", encoding="utf-8"
+        )
+        args = [
+            "--role",
+            "backlog",
+            "--run-dir",
+            str(run),
+            "--project",
+            str(repo.root),
+            "--worktree",
+            "none",
+            "--heartbeat",
+            "0",
+        ]
+        if from_repo:
+            args.append("--from-repo")
+        return repo, run, args
+
+    def reviewer_repo(self, toml: str | None = None) -> tuple:
+        repo = self.repo(
+            toml or API_TOML.replace('planner = "fake"', 'reviewer = "fake"')
+        )
+        (repo.task / "status.md").write_text(
+            "- round: 1\n- worktree: none\n- base: main\n## Log\nEXCLUDED_NARRATIVE\n",
+            encoding="utf-8",
+        )
+        (repo.task / "plan.md").write_text(self.plan, encoding="utf-8")
+        (repo.task / "checks-1.md").write_text(self.checks(), encoding="utf-8")
+        (repo.task / "impl-1.json").write_text(
+            json.dumps(
+                {
+                    "model": "implementer-model",
+                    "profile": "alias",
+                    "status": "ok",
+                    "settings": {},
+                    "fallback_chain": [{"profile": "alias", "outcome": "ok"}],
+                    "narrative": "EXCLUDED_NARRATIVE",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (repo.task / "review-0.md").write_text("EXCLUDED_NARRATIVE", encoding="utf-8")
+        (repo.root / "src").mkdir()
+        (repo.root / "src" / "x.py").write_text(
+            "def feature(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
+        )
+        args = repo.argv("--round", "1")
+        args[1] = "reviewer"
+        return repo, args
+
+    @staticmethod
+    def fake_git(worktree: Path, argv: list[str]) -> str:
+        if argv[0] == "rev-parse":
+            return "abc123\n"
+        if argv[0] == "diff" and "--name-only" in argv:
+            return "src/x.py\0"
+        if argv[0] == "diff":
+            return "diff --git a/src/x.py b/src/x.py\n+return value + 1\n"
+        if argv[0] == "ls-files":
+            return ""
+        raise AssertionError(argv)
+
+    def execute(self, args: list[str], outputs: list[str]) -> tuple[int, list]:
+        calls = []
+        with (
+            mock.patch.object(role_run, "git_input", side_effect=self.fake_git),
+            mock.patch("autopilot.inspect", return_value="thin: no\n"),
+            patch_post(make_urlopen([api_payload(text) for text in outputs], calls)),
+        ):
+            code = role_run.main(args)
+        return code, calls
+
+    def test_api_backlog_and_envelope(self) -> None:
+        _repo, run, args = self.backlog_repo()
+        code, _ = self.execute(args, [self.backlog])
+        self.assertEqual(code, 0)
+        self.assertEqual((run / "backlog.md").read_text(encoding="utf-8"), self.backlog)
+        self.assertEqual(role_runtime.load_role_metrics(run)[0]["role"], "backlog")
+        _repo, run, args = self.backlog_repo(True)
+        envelope = json.dumps(
+            {
+                "requirements.md": "Original requirement.\n- Addition (README.md:1).\n",
+                "backlog.md": self.backlog,
+            }
+        )
+        code, _ = self.execute(args, [envelope])
+        self.assertEqual(code, 0)
+        before = {
+            name: (run / name).read_bytes()
+            for name in ("backlog.md", "requirements.md")
+        }
+        code, calls = self.execute(args, ['{"backlog.md":"bad"}'] * 2)
+        self.assertEqual((code, len(calls)), (1, 2))
+        self.assertEqual(before, {name: (run / name).read_bytes() for name in before})
+
+    def test_pair_rollback_preserves_bytes_and_absence(self) -> None:
+        _repo, run, _ = self.backlog_repo(True)
+        original_replace = role_run.os.replace
+        for existing in (True, False):
+            for name in ("requirements.md", "backlog.md"):
+                (run / name).unlink(missing_ok=True)
+                if existing:
+                    (run / name).write_bytes(b"original\r\nbytes\x00")
+            calls = []
+
+            def replace(source: Path, target: Path, calls: list = calls) -> None:
+                calls.append(target)
+                if len(calls) == 2:
+                    raise OSError("injected second replacement failure")
+                original_replace(source, target)
+
+            with (
+                mock.patch.object(role_run.os, "replace", side_effect=replace),
+                self.assertRaises(role_runtime.Refusal),
+            ):
+                role_run.publish_outputs(
+                    run, {"requirements.md": "new", "backlog.md": "new"}, "backlog.md"
+                )
+            for name in ("requirements.md", "backlog.md"):
+                self.assertEqual((run / name).exists(), existing)
+                if existing:
+                    self.assertEqual(
+                        (run / name).read_bytes(), b"original\r\nbytes\x00"
+                    )
+
+    def test_destinations_refused_before_contact(self) -> None:
+        repo, run, args = self.backlog_repo(True)
+        outside = repo.root / "outside.md"
+        outside.write_text("original", encoding="utf-8")
+        try:
+            (run / "backlog.md").symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(str(exc))
+        code, calls = self.execute(args, [self.backlog])
+        self.assertEqual((code, len(calls)), (2, 0))
+        self.assertEqual(outside.read_text(encoding="utf-8"), "original")
+
+    def test_reviewer_prompt_publication_and_invalid_output(self) -> None:
+        repo, args = self.reviewer_repo()
+        before = (repo.task / "status.md").read_bytes()
+        code, calls = self.execute(args, ["invalid", self.review])
+        self.assertEqual((code, len(calls)), (0, 2))
+        payload = json.loads(calls[0].data)
+        prompt = json.dumps(payload)
+        self.assertIn("base diff", prompt)
+        self.assertIn("changed files", prompt)
+        self.assertIn("def feature", prompt)
+        self.assertIn("Review checklist", prompt)
+        self.assertNotIn("EXCLUDED_NARRATIVE", prompt)
+        self.assertEqual((repo.task / "status.md").read_bytes(), before)
+        self.assertEqual(
+            (repo.task / "review-1.md").read_text(encoding="utf-8"), self.review
+        )
+        code, calls = self.execute(args, ["bad", "bad"])
+        self.assertEqual((code, len(calls)), (1, 2))
+        self.assertEqual(
+            (repo.task / "review-1.md").read_text(encoding="utf-8"), self.review
+        )
+
+    def test_review_transport_failure_preserves_artifact_and_usage_uncertainty(
+        self,
+    ) -> None:
+        repo, args = self.reviewer_repo()
+        review_path = repo.task / "review-1.md"
+        review_path.write_bytes(b"PREVIOUS REVIEW\r\n")
+        status = (repo.task / "status.md").read_bytes()
+        calls = []
+        with (
+            mock.patch.object(role_run, "git_input", side_effect=self.fake_git),
+            patch_post(make_urlopen([urllib.error.URLError("unavailable")] * 4, calls)),
+        ):
+            self.assertEqual(role_run.main(args), 1)
+        self.assertEqual(review_path.read_bytes(), b"PREVIOUS REVIEW\r\n")
+        self.assertEqual((repo.task / "status.md").read_bytes(), status)
+        record = role_runtime.load_role_metrics(repo.task)[0]
+        self.assertIsNone(record["tokens"])
+        self.assertIsNone(record["cost_usd"])
+
+    def test_strict_provider_and_warn_matching_identity(self) -> None:
+        config = API_TOML.replace('planner = "fake"', 'reviewer = "fake"')
+        repo, args = self.reviewer_repo(
+            config + '\n[gates]\nreviewer_independence = "different-provider"\n'
+        )
+        code, calls = self.execute(args, [self.review])
+        self.assertEqual((code, len(calls)), (2, 0))
+        repo, args = self.reviewer_repo(config)
+        (repo.task / "impl-1.json").write_text(
+            json.dumps(
+                {
+                    "model": "fake-model",
+                    "profile": "alias",
+                    "status": "ok",
+                    "settings": {},
+                    "fallback_chain": [{"profile": "alias", "outcome": "ok"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(role_run, "log") as log:
+            self.assertEqual(self.execute(args, [self.review])[0], 0)
+        self.assertTrue(any("matches" in str(call) for call in log.call_args_list))
+
+    def test_review_preflight_requires_complete_inputs(self) -> None:
+        for mutation in (
+            "round-zero",
+            "round-mismatch",
+            "missing-checks",
+            "bad-base",
+            "large-file",
+            "missing-file",
+            "deleted-binary",
+            "bad-checks",
+        ):
+            with self.subTest(mutation=mutation):
+                repo, args = self.reviewer_repo()
+                if mutation == "round-zero":
+                    args[-1] = "0"
+                elif mutation == "round-mismatch":
+                    args[-1] = "2"
+                elif mutation == "missing-checks":
+                    (repo.task / "checks-1.md").unlink()
+                elif mutation == "large-file":
+                    (repo.root / "src/x.py").write_text(
+                        "x" * (role_run.MAX_REQUIRED_INPUT + 1), encoding="utf-8"
+                    )
+                elif mutation in ("missing-file", "deleted-binary"):
+                    (repo.root / "src/x.py").unlink()
+                elif mutation == "bad-checks":
+                    (repo.task / "checks-1.md").write_text("missing", encoding="utf-8")
+                calls = []
+
+                def git(
+                    worktree: Path, argv: list[str], mutation: str = mutation
+                ) -> str:
+                    if mutation == "bad-base" or (
+                        mutation == "missing-file" and argv[0] == "show"
+                    ):
+                        raise role_runtime.Refusal("unresolved git input")
+                    if mutation == "deleted-binary" and argv[0] == "show":
+                        return "binary\0content"
+                    return self.fake_git(worktree, argv)
+
+                with (
+                    mock.patch.object(role_run, "git_input", side_effect=git),
+                    patch_post(make_urlopen([], calls)),
+                ):
+                    self.assertEqual(role_run.main(args), 2)
+                self.assertEqual(calls, [])
+                self.assertFalse((repo.task / "review-1.md").exists())
+
+    def test_api_exclusions_across_tools_and_symlinks(self) -> None:
+        repo, _args = self.reviewer_repo()
+        tools = role_runtime.ProducerTools(
+            repo.root, [repo.root, repo.task], "external-reviewer", 1
+        )
+        for path in (
+            repo.task / "status.md",
+            repo.task / "impl-1.json",
+            repo.task / "review-0.md",
+        ):
+            self.assertIn("denied", tools.execute("read_file", {"path": str(path)}))
+        self.assertNotIn(
+            "EXCLUDED_NARRATIVE",
+            tools.execute("grep", {"path": ".", "pattern": "EXCLUDED_NARRATIVE"}),
+        )
+
+        self.assertIn(
+            "denied",
+            tools.execute(
+                "run_command", {"argv": ["git", "show", "main:.work/task-x/status.md"]}
+            ),
+        )
+        try:
+            (repo.root / "alias.md").symlink_to(repo.task / "status.md")
+        except OSError:
+            return  # direct and recursive exclusions remain exercised on restricted Windows
+        self.assertIn("denied", tools.execute("read_file", {"path": "alias.md"}))
+        self.assertNotIn(
+            "EXCLUDED_NARRATIVE",
+            tools.execute("grep", {"path": ".", "pattern": "EXCLUDED_NARRATIVE"}),
+        )
+
+    def test_touched_alias_to_excluded_input_refused_before_contact(self) -> None:
+        repo, args = self.reviewer_repo()
+        touched = repo.root / "src/x.py"
+        original_resolve = Path.resolve
+
+        def resolve(path: Path, *args, **kwargs) -> Path:
+            # Exercise canonical-path policy even on Windows without symlink privileges.
+            if original_resolve(path) == original_resolve(touched):
+                return repo.task / "status.md"
+            return original_resolve(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "resolve", resolve):
+            code, calls = self.execute(args, [self.review])
+        self.assertEqual((code, len(calls)), (2, 0))
+        self.assertFalse((repo.task / "review-1.md").exists())
+
+    def test_independence_and_fallback_candidate(self) -> None:
+        config = (
+            API_TOML.replace('planner = "fake"', 'reviewer = "fake"')
+            + '\n[gates]\nreviewer_independence = "different-model"\n'
+        )
+        repo, args = self.reviewer_repo(config)
+        record = repo.task / "impl-1.json"
+        identity = json.loads(record.read_text(encoding="utf-8"))
+        record.write_text(
+            json.dumps(dict(identity, model="fake-model")),
+            encoding="utf-8",
+        )
+        code, calls = self.execute(args, [self.review])
+        self.assertEqual((code, len(calls)), (2, 0))
+        record.write_text(
+            json.dumps(dict(identity, model="other-model")),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.execute(args, [self.review])[0], 0)
+        record.write_text(
+            json.dumps({"model": "other-model", "cli": {"driver": "cli"}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.execute(args, [self.review])[0], 2)
+        record.unlink()
+        self.assertEqual(self.execute(args, [self.review])[0], 2)
+        fallback_config = config.replace(
+            "max_turns = 10", 'max_turns = 10\nfallback = ["fallback"]'
+        )
+        repo, args = self.reviewer_repo(fallback_config)
+        (repo.task / "impl-1.json").write_text(
+            json.dumps(dict(identity, model="fallback-model")), encoding="utf-8"
+        )
+        calls = []
+        unavailable = urllib.error.URLError("primary unavailable")
+        with (
+            mock.patch.object(role_run, "git_input", side_effect=self.fake_git),
+            patch_post(make_urlopen([unavailable] * 4, calls)),
+        ):
+            self.assertEqual(role_run.main(args), 1)
+        self.assertTrue(calls)
+        self.assertTrue(
+            all("fallback.example" not in request.full_url for request in calls)
+        )
+        self.assertFalse((repo.task / "review-1.md").exists())
+
+    def test_incomplete_or_conflicting_implementer_identity_is_unknown(self) -> None:
+        config = (
+            API_TOML.replace('planner = "fake"', 'reviewer = "fake"')
+            + '\n[gates]\nreviewer_independence = "different-model"\n'
+        )
+        for mutation in ("missing-chain", "conflicting-profile", "conflicting-status"):
+            with self.subTest(mutation=mutation):
+                repo, args = self.reviewer_repo(config)
+                path = repo.task / "impl-1.json"
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if mutation == "missing-chain":
+                    record.pop("fallback_chain")
+                elif mutation == "conflicting-profile":
+                    record["fallback_chain"][-1]["profile"] = "other"
+                else:
+                    record["status"] = "failed"
+                path.write_text(json.dumps(record), encoding="utf-8")
+                code, calls = self.execute(args, [self.review])
+                self.assertEqual((code, len(calls)), (2, 0))
+
+    def test_review_in_a_nested_task_worktree(self) -> None:
+        repo, args = self.reviewer_repo()
+        worktree = repo.task / "worktree"
+        (worktree / "src").mkdir(parents=True)
+        (worktree / "src/x.py").write_text(
+            "def feature(value: int) -> int:\n    return value + 1\n", encoding="utf-8"
+        )
+        (repo.task / "status.md").write_text(
+            "- round: 1\n- worktree: .work/task-x/worktree\n- base: main\n## Log\nEXCLUDED_NARRATIVE\n",
+            encoding="utf-8",
+        )
+        args[args.index("--worktree") + 1] = str(worktree)
+        code, calls = self.execute(args, [self.review])
+        self.assertEqual((code, len(calls)), (0, 1))
+        tools = role_runtime.ProducerTools(
+            worktree, [worktree, repo.root], "external-reviewer", 1
+        )
+        self.assertIn("def feature", tools.execute("read_file", {"path": "src/x.py"}))
+        self.assertIn("denied", tools.execute("read_file", {"path": "../status.md"}))
+
+    def test_cli_backlog_and_review(self) -> None:
+        runner = self.tmp / "read-role-cli.py"
+        runner.write_text(FAKE_CLI_RUNNER, encoding="utf-8")
+        with mock.patch.object(models, "VERIFIED_READ_ONLY_PROGRAMS", {"python"}):
+            for role, output in (("backlog", self.backlog), ("reviewer", self.review)):
+                spec = self.tmp / f"{role}-spec.json"
+                spec.write_text(json.dumps(["invalid", output]), encoding="utf-8")
+                config = (
+                    CLI_TOML.replace('"{python}"', json.dumps(sys.executable))
+                    .replace('"{runner}"', json.dumps(str(runner)))
+                    .replace('"{spec}"', json.dumps(str(spec)))
+                    .replace('planner = "fakecli"', f'{role} = "fakecli"')
+                )
+                if role == "backlog":
+                    repo, directory, args = self.backlog_repo(toml=config)
+                else:
+                    repo, args = self.reviewer_repo(config)
+                    directory = repo.task
+                with (
+                    mock.patch.object(role_run, "git_input", side_effect=self.fake_git),
+                    mock.patch("autopilot.inspect", return_value="thin: no\n"),
+                ):
+                    self.assertEqual(role_run.main(args), 0)
+                self.assertEqual(
+                    role_runtime.load_role_metrics(directory)[0]["repair_attempts"], 1
+                )
+                name = "backlog.md" if role == "backlog" else "review-1.md"
+                self.assertEqual((directory / name).read_text(encoding="utf-8"), output)
+
+
+class PlantedReviewFixturesTest(unittest.TestCase):
+    """Semantic oracles and contract acceptance are deliberately different measures."""
+
+    def test_frozen_defects_and_clean_control(self) -> None:
+        import role_contracts
+        from test_role_contracts import REVIEW_PLAN, VALID_REVIEW, checks_fixture
+
+        variants = {
+            "implementation-defect": (
+                "def feature(value: int) -> int:\n    return value - 1\n",
+                False,
+            ),
+            "missing-acceptance": (
+                "def feature(value: int) -> int:\n    return value + 1 if value >= 0 else value\n",
+                False,
+            ),
+            "out-of-scope": (
+                "def feature(value: int) -> int:\n    return value + 1\n",
+                True,
+            ),
+            "clean-control": (
+                "def feature(value: int) -> int:\n    return value + 1\n",
+                False,
+            ),
+        }
+        checks = role_contracts.parse_checks(
+            checks_fixture(), round_number=1, commands=["python test_feature.py"]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, (source, extra) in variants.items():
+                directory = Path(temporary) / name
+                directory.mkdir()
+                (directory / "feature.py").write_text(source, encoding="utf-8")
+                if extra:
+                    (directory / "unrelated.py").write_text(
+                        "UNREQUESTED = True\n", encoding="utf-8"
+                    )
+                namespace = runpy.run_path(str(directory / "feature.py"))
+                semantic_pass = (
+                    namespace["feature"](0) == 1
+                    and namespace["feature"](-2) == -1
+                    and not (directory / "unrelated.py").exists()
+                )
+                self.assertEqual(semantic_pass, name == "clean-control")
+                # A fake model saying PASS has valid syntax even for planted defects.
+                # This is never scored as the reviewer detecting the semantic defect.
+                self.assertTrue(
+                    role_contracts.validate_review(
+                        VALID_REVIEW, round_number=1, plan=REVIEW_PLAN, current=checks
+                    )
+                )
+
+    def test_known_usage_subtotals_and_duplicate_invocations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            record = {
+                "schema": "role-metrics/1",
+                "role": "reviewer",
+                "invocation_id": "same",
+                "cost_usd": None,
+                "cost_known_usd": 1.25,
+                "tokens": None,
+                "tokens_known": {"input": 100, "output": 20},
+            }
+            role_runtime.write_role_metrics(directory, record)
+            (directory / "role-reviewer-copy.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+            self.assertEqual(
+                role_runtime.invocation_usd(directory)["total"], (1.25, True)
+            )
+            self.assertEqual(role_runtime.invocation_tokens(directory), (120, True))
+            repo = Repo(directory / "r", API_TOML)
+            with mock.patch.object(
+                models, "user_file", return_value=directory / "absent"
+            ):
+                profiles, _ = models.load(repo.root)
+            ledger = role_runtime.UsageLedger(profiles)
+            ledger.add_api("fake", api_payload("answer"))
+            ledger.add_api("fake", {"choices": []})
+            ledger.add_api("fake", api_payload("answer"))
+            self.assertIsNone(ledger.tokens())
+            self.assertIsNone(ledger.cost())
+            self.assertEqual(ledger.tokens_known()["input"], 200)
+            self.assertGreater(ledger.cost_known(), 0)
+
+    def test_unreadable_role_usage_cannot_establish_a_known_token_total(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            role_runtime.write_role_metrics(
+                directory,
+                {
+                    "schema": "role-metrics/1",
+                    "role": "reviewer",
+                    "invocation_id": "known",
+                    "tokens": {"input": 100, "output": 20},
+                },
+            )
+            (directory / "role-backlog-broken.json").write_text(
+                "{incomplete", encoding="utf-8"
+            )
+            self.assertEqual(role_runtime.invocation_tokens(directory), (120, True))
 
 
 if __name__ == "__main__":

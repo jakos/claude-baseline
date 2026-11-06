@@ -398,6 +398,13 @@ class RulesTest(unittest.TestCase):
             with self.subTest(allowed=argv):
                 self.assertIsNone(rules.check_argv(argv, "external-planner"), argv)
 
+    def test_external_backlog_and_reviewer_boundaries(self) -> None:
+        for role in ("external-backlog", "external-reviewer"):
+            self.assertIsNone(rules.check_argv(["git", "status"], role))
+            self.assertIsNotNone(rules.check_argv(["python", "-c", "print(1)"], role))
+            self.assertIsNotNone(rules.check_write(".work/x/output.md", role))
+            self.assertIsNotNone(rules.check_argv(["git", "commit"], role))
+
     def test_external_planner_commands_and_writes(self):
         # the same leaves/commit/snooze denials as the external implementer
         for command in ("git push", "git commit -m x", "habit-snooze --snooze x"):

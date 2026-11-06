@@ -2,8 +2,7 @@
 # requires-python = ">=3.14"
 # dependencies = []
 # ///
-"""Bounded validation of a task-flow role artifact: plan.md today, later the backlog
-and review artifacts of external-review-backlog.
+"""Bounded validation of task-flow plan, requirements, backlog and review artifacts.
 
 The planner role (Claude subagent or external profile) must return exactly the plan.md
 contract of skills/workflow/SKILL.md, so the trusted runner — not the model — can check
@@ -444,6 +443,359 @@ def validate_plan(
         _check_gate(commands, gate_commands, reasons)
     _check_stack(text, stack, reasons)
     return Validation(not reasons, blocked=blocked, reasons=reasons, commands=commands)
+
+
+def _artifact_errors(text: str) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return ["the artifact is empty"]
+    if len(text) > MAX_ARTIFACT_CHARS:
+        return ["the artifact exceeds the size limit"]
+    if any(marker.search(text) for marker in TRUNCATION_MARKERS):
+        return ["the artifact contains a truncation marker"]
+    if text.lstrip().startswith(("```", "~~~")):
+        return ["return raw Markdown, without a wrapping fence"]
+    return []
+
+
+def validate_requirements(text: str, *, original: str = "") -> Validation:
+    """Preserve supplied requirements verbatim; cite every repository addition."""
+    reasons = _artifact_errors(text)
+    if original and original not in text:
+        reasons.append("existing requirements content must be preserved verbatim")
+    if not any(line.strip() and not line.startswith("#") for line in text.splitlines()):
+        reasons.append("requirements need non-heading content")
+    additions = text.replace(original, "", 1) if original else text
+    for line in additions.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        if not re.match(r"^\s*[-*] \S", line) or not re.search(
+            r"[\w./\\-]+:\d+\b", line
+        ):
+            reasons.append(
+                "each repository-derived requirement must be a bullet citing file:line"
+            )
+    return Validation(not reasons, reasons=reasons[:10])
+
+
+def backlog_envelope(text: str) -> dict[str, str]:
+    """Exact JSON object, with no duplicate, missing or additional members."""
+    import json
+
+    if not isinstance(text, str) or len(text) > 2 * MAX_ARTIFACT_CHARS + 10_000:
+        raise ValueError("backlog JSON envelope exceeds the size limit")
+
+    def unique(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate envelope member: {key}")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(text, object_pairs_hook=unique)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid backlog JSON envelope: {exc}") from exc
+    if not isinstance(data, dict) or set(data) != {"requirements.md", "backlog.md"}:
+        raise ValueError("envelope must contain only requirements.md and backlog.md")
+    if not all(isinstance(value, str) for value in data.values()):
+        raise ValueError("envelope values must be Markdown strings")
+    return data
+
+
+def validate_backlog(text: str, *, run_id: str, thin: bool) -> Validation:
+    reasons = _artifact_errors(text)
+    sections, order = _sections(text)
+    if not text.startswith(f"# Backlog: {run_id}\n"):
+        reasons.append("backlog title must match the requested run ID")
+    if [line for line in unfenced(text.splitlines()) if line.startswith("# ")] != [
+        f"# Backlog: {run_id}"
+    ]:
+        reasons.append("backlog must have exactly one title")
+    if order != ["Tasks", "Risks / open questions"]:
+        reasons.append(
+            "backlog needs exactly Tasks and Risks / open questions in order"
+        )
+    risks = "\n".join(sections.get("Risks / open questions", [])).strip()
+    blocked = risks.startswith("BLOCKED: yes\n") and bool(
+        risks.split("\n", 1)[1].strip()
+    )
+    if risks.startswith("BLOCKED:") and not blocked:
+        reasons.append("blocked backlog needs BLOCKED: yes followed by a question")
+    tasks = "\n".join(sections.get("Tasks", []))
+    chunks = re.split(r"^### (\d+)\. ([^\n]+)\n?", tasks, flags=re.MULTILINE)
+    if chunks[0].strip():
+        reasons.append("unexpected content before the first task")
+    count = (len(chunks) - 1) // 3
+    if count > 10 or (not count and not blocked):
+        reasons.append("backlog must have 1..10 tasks (zero only when blocked)")
+    seen = []
+    for index in range(count):
+        number, task_id, body = chunks[1 + index * 3 : 4 + index * 3]
+        if int(number) != index + 1:
+            reasons.append("task numbering must be sequential from 1")
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", task_id) or task_id in seen:
+            reasons.append("task IDs must be unique safe kebab slugs")
+        headings = re.findall(r"^(#{1,6}) (.*)$", body, re.MULTILINE)
+        if headings != [("####", name) for name in ("Goal", "Context", "Constraints")]:
+            reasons.append(
+                f"{task_id}: expected Goal, Context and Constraints headings"
+            )
+        parts = re.split(
+            r"^#### (?:Goal|Context|Constraints)\s*$", body, flags=re.MULTILINE
+        )
+        if len(parts) != 4 or any(not part.strip() for part in parts[1:]):
+            reasons.append(f"{task_id}: task sections must be non-empty")
+        dep = re.fullmatch(r"\s*- depends-on: (.+)\s*", parts[0])
+        dependencies = (
+            []
+            if dep and dep[1].strip() == "-"
+            else (dep[1].strip().split(", ") if dep else ["invalid"])
+        )
+        if len(set(dependencies)) != len(dependencies) or any(
+            d not in seen for d in dependencies
+        ):
+            reasons.append(f"{task_id}: dependencies must name unique earlier tasks")
+        if thin:
+            if index == 0 and (task_id != "bootstrap-project" or dependencies):
+                reasons.append(
+                    "thin repository must start with independent bootstrap-project"
+                )
+            if index > 0 and "bootstrap-project" not in dependencies:
+                reasons.append(
+                    "every later thin-repository task must depend on bootstrap-project"
+                )
+            if index == 0 and (
+                len(parts) != 4
+                or "requirements.md" not in parts[2]
+                or "dev-baseline:project-bootstrap" not in parts[2]
+            ):
+                reasons.append(
+                    "bootstrap Context must name requirements.md and the optional bootstrap skill"
+                )
+        elif task_id == "bootstrap-project":
+            reasons.append("non-thin repository must not include bootstrap-project")
+        seen.append(task_id)
+    return Validation(not reasons, blocked=blocked, reasons=reasons[:10])
+
+
+@dataclass
+class CheckEvidence:
+    results: dict[tuple[str, ...], str]
+    failures: dict[tuple[str, ...], set[str]]
+
+
+def parse_checks(text: str, *, round_number: int, commands: list[str]) -> CheckEvidence:
+    """Parse bounded checker evidence; missing/ambiguous evidence is a refusal."""
+    if _artifact_errors(text) or not text.startswith(
+        f"# Checks: round {round_number}\n"
+    ):
+        raise ValueError("invalid checks artifact or mismatched checks round")
+    sections, order = _sections(text)
+    if order != ["Failures", "Not run"]:
+        raise ValueError("checks require Failures and Not run sections")
+    results = {}
+    numbered = {}
+    for line in unfenced(sections[""]):
+        match = re.fullmatch(
+            r"\| (\d+) \| `+(.+?)`+ \| (PASS|FAIL|ERROR) \| ([^|]*) \| ([^|]*) \|", line
+        )
+        if not match:
+            if re.match(r"\|\s*\d+\s*\|", line):
+                raise ValueError("malformed checks row")
+            continue
+        identity = tuple(
+            gates.split_command(match[2].strip().replace(chr(92) + "|", "|"))
+        )
+        exit_value = match[4].strip()
+        if (match[3] == "PASS" and exit_value != "0") or (
+            match[3] != "PASS" and exit_value == "0"
+        ):
+            raise ValueError("checks result contradicts exit code")
+        if not re.fullmatch(r"-?\d+|-", exit_value):
+            raise ValueError("malformed checks exit code")
+        if identity in results or int(match[1]) in numbered:
+            raise ValueError("duplicate checks command or number")
+        results[identity] = match[3]
+        numbered[int(match[1])] = identity
+    expected = [tuple(gates.split_command(command)) for command in commands]
+    if list(results) != expected or list(numbered) != list(range(1, len(expected) + 1)):
+        raise ValueError("checks do not cover the plan commands exactly")
+    failures = {}
+    body = "\n".join(sections["Failures"])
+    parts = re.split(r"^### (\d+)\. `+(.+?)`+\s*$", body, flags=re.MULTILINE)
+    if parts[0].strip().lower() not in ("", "none"):
+        raise ValueError("unrecognized failure evidence")
+    for index in range((len(parts) - 1) // 3):
+        number, command, detail = parts[1 + index * 3 : 4 + index * 3]
+        identity = tuple(gates.split_command(command))
+        evidence = {
+            line.strip()
+            for line in detail.splitlines()
+            if line.strip() and not re.fullmatch(r"`{3,}|~{3,}", line.strip())
+        }
+        if (
+            numbered.get(int(number)) != identity
+            or identity in failures
+            or results.get(identity) not in ("FAIL", "ERROR")
+            or not evidence
+            or len(evidence) > 35
+            or not any(
+                re.search(
+                    r"test_\w+|\w+(?:Error|Exception)\b|\S+:\d+(?::\d+)?:\s*\S|(?:error|fatal|refused|cannot|not found|timed out)[: ]+\S.*",
+                    line,
+                    re.IGNORECASE,
+                )
+                for line in evidence
+            )
+            or any("truncated" in line.lower() for line in evidence)
+        ):
+            raise ValueError("malformed or insufficient failure evidence")
+        failures[identity] = evidence
+    if set(failures) != {
+        key for key, value in results.items() if value in ("FAIL", "ERROR")
+    }:
+        raise ValueError("every failing command needs bounded failure evidence")
+    return CheckEvidence(results, failures)
+
+
+def classify_checks(
+    current: CheckEvidence, baseline: CheckEvidence | None
+) -> tuple[set, set]:
+    preexisting = set()
+    introduced = set()
+    for command, evidence in current.failures.items():
+        if (
+            baseline
+            and baseline.results.get(command) in ("FAIL", "ERROR")
+            and evidence <= baseline.failures.get(command, set())
+        ):
+            preexisting.add(command)
+        else:
+            introduced.add(command)
+    return preexisting, introduced
+
+
+def validate_review(
+    text: str,
+    *,
+    round_number: int,
+    plan: str,
+    current: CheckEvidence,
+    baseline: CheckEvidence | None = None,
+) -> Validation:
+    reasons = _artifact_errors(text)
+    sections, order = _sections(text)
+    headings = [line for line in unfenced(text.splitlines()) if HEADING.match(line)]
+    if (
+        any(line.startswith("###") for line in headings)
+        or sum(line.startswith("# ") for line in headings) != 1
+    ):
+        reasons.append(
+            "review headings must follow the exact title and section hierarchy"
+        )
+    verdicts = [name for name in order if name.startswith("Verdict:")]
+    verdict = verdicts[0].partition(": ")[2] if len(verdicts) == 1 else ""
+    expected = [
+        "Acceptance criteria",
+        "Pre-existing failures",
+        "Findings",
+        "Scope",
+        f"Verdict: {verdict}",
+        "Fix list",
+    ]
+    if order != expected or verdict not in ("APPROVED", "CHANGES_REQUESTED"):
+        reasons.append(
+            "review must have the exact workflow sections and one valid verdict"
+        )
+    if not text.startswith(f"# Review: round {round_number}\n"):
+        reasons.append("review title must match the requested round")
+    plan_sections, _ = _sections(plan)
+    labels = [
+        f"AC{m[1]}"
+        for line in unfenced(plan_sections.get("Acceptance criteria", []))
+        if (m := AC_LINE.match(line))
+    ]
+    rows = []
+    failed = []
+    for line in sections.get("Acceptance criteria", []):
+        if not line.strip() or line.strip() in (
+            "| AC | Result | Evidence |",
+            "| --- | --- | --- |",
+        ):
+            continue
+        match = re.fullmatch(r"\| (AC\d+) \| (PASS|FAIL) \| (\S.*?) \|", line)
+        if not match:
+            reasons.append(
+                "each AC needs exactly one PASS/FAIL row with non-empty evidence"
+            )
+            continue
+        rows.append(match[1])
+        if not re.search(
+            r"(?::\d+|test_\w+|checks-\d+|exit\s+(?:code\s*)?\d+)", match[3]
+        ):
+            reasons.append(
+                f"{match[1]}: evidence needs file:line, test name or command output"
+            )
+        if match[2] == "FAIL":
+            failed.append(match[1])
+    if sorted(rows) != sorted(labels) or len(rows) != len(set(rows)):
+        reasons.append(
+            "review must cover every plan AC exactly once with no unknown ACs"
+        )
+    findings = [line for line in sections.get("Findings", []) if line.strip()]
+    blocking = False
+    if not findings:
+        reasons.append("Findings must contain numbered entries or none")
+    if findings != ["none"]:
+        for number, line in enumerate(findings, 1):
+            match = re.fullmatch(r"(\d+)\. \[(blocking|suggestion)\] (\S.*)", line)
+            if not match or int(match[1]) != number:
+                reasons.append(
+                    "findings must be sequential numbered blocking/suggestion entries, or none"
+                )
+            elif match[2] == "blocking":
+                blocking = True
+                if not re.search(r":\d+", match[3]):
+                    reasons.append(
+                        "blocking findings must include file:line evidence and a breaking state"
+                    )
+    scope = "\n".join(sections.get("Scope", [])).strip()
+    if not scope:
+        reasons.append("Scope is required")
+    fixes = [line for line in sections.get("Fix list", []) if line.strip()]
+    if fixes != ["none"]:
+        for number, line in enumerate(fixes, 1):
+            if not re.match(rf"^{number}\. \S", line):
+                reasons.append(
+                    "Fix list must be sequential non-empty instructions, or none"
+                )
+    preexisting, introduced = classify_checks(current, baseline)
+    prior = "\n".join(sections.get("Pre-existing failures", [])).strip()
+    if preexisting:
+        for command in preexisting:
+            if " ".join(command) not in prior or not any(
+                item in prior for item in current.failures[command]
+            ):
+                reasons.append(
+                    "Pre-existing failures must name each command and matching baseline evidence"
+                )
+        if "checks-0" not in prior:
+            reasons.append("Pre-existing failures must cite checks-0")
+    elif prior != "none":
+        reasons.append(
+            "Pre-existing failures must be none when no failure matches baseline"
+        )
+    must_fix = bool(introduced or failed or blocking or scope.lower() != "none")
+    if verdict == "APPROVED" and must_fix:
+        reasons.append(
+            "approval contradicts introduced failures, failed ACs, blocking findings or scope"
+        )
+    if verdict == "CHANGES_REQUESTED" and (not fixes or fixes == ["none"]):
+        reasons.append("CHANGES_REQUESTED needs a concrete Fix list")
+    if verdict == "APPROVED" and fixes != ["none"]:
+        reasons.append("APPROVED must have Fix list none")
+    return Validation(not reasons, reasons=reasons[:10])
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -42,23 +42,25 @@ Subcommands (exit 2 with a message on stderr and nothing on stdout when refusing
   optional fifth column `External USD` (a non-negative decimal, scientific notation
   accepted, or `unknown` per row); when present, `estimate` ends with an
   `external spent: <sum> USD` line (`at least` when a row is `unknown`), and the
-  column never influences `next`. When a task's `.work/<id>/` carries invocation
+  USD is never converted to tokens. When a task's `.work/<id>/` carries invocation
   files (`impl-<n>.json`, `role-*.json`), its USD row and the totals are recomputed
   from those invocation ids — planner USD included in the same cell — so a resume
   recomputes the same total instead of double counting, and `estimate` then also
   prints an `external by stage: planner: ..., implementer: ...` line. Unknown (null)
-  costs stay `unknown`, never zero. The `spent:` and `budget:` lines are about Claude
-  tokens only.
+  costs stay `unknown`, never zero. `--budget-scope claude|all` must match the saved
+  header (absent means claude). All scope adds reported external input/output tokens
+  once per invocation, including run-level backlog usage, and retains external-stage
+  estimates. Unknown usage prevents a finite all-scope budget from asserting fit.
 - `next <run-dir>`: one line, `run <id>`, `wait <id>: <phase>`, `stop: <reason>` or `done`.
   The circuit breaker. It is evaluated between tasks only: a task already in progress
   always gives `run <id>`. Triggers, first match wins: a task in progress; wrong direction
   (the last two finished tasks both failed); semi mode and a failed task not in
   continue-past; nothing runnable left (cannot finish, or done); burn rate (the last
   finished task used more than 2 x its max estimate); budget (spent + the next task's max
-  estimate exceeds the budget). All are counts and sums read from files, and all count
-  Claude tokens only: `--implementer-kind` is as in `estimate`, and under `profile` the
-  burn-rate and budget triggers compare Claude tokens with a Claude-only estimate
-  (IMPLEMENT = 0).
+  estimate exceeds the budget). All are counts and sums read from files. By default
+  they count Claude tokens only: under implementer kind `profile`, IMPLEMENT = 0.
+  All scope also counts reported external tokens and stops between tasks when unknown
+  usage prevents deciding a finite budget. USD remains separate under either scope.
 - `base <run-dir> <task-id>`: one line — `task/<id>` of the last `done` row of the
   `## Tasks` table in table order, or the run's `base:` header when no row is `done`.
   Refused when the id is not a row, when its phase is not `new`, `planned` or
@@ -374,6 +376,7 @@ def load_run(
     for_next: bool,
     external: bool = False,
     planner_external: bool = False,
+    budget_scope: str | None = None,
 ) -> dict:
     run_dir = Path(run_dir_arg).resolve()
     if not run_dir.is_dir():
@@ -387,6 +390,11 @@ def load_run(
     for key in ("mode", "budget", "planning-tokens", "continue-past", "bootstrap"):
         if key not in fields:
             raise Refusal(f"run.md header is missing '{key}'")
+    scope = fields.get("budget-scope", "claude")
+    if scope not in ("claude", "all"):
+        raise Refusal("budget-scope must be claude or all")
+    if budget_scope is not None and budget_scope != scope:
+        raise Refusal("--budget-scope conflicts with persisted run.md budget-scope")
     mode = fields["mode"]
     if mode not in ("semi", "full"):
         raise Refusal(f"mode must be semi or full, got {mode!r}")
@@ -488,7 +496,9 @@ def load_run(
                 # Legacy fixed-profile plans need not satisfy the new routing contract.
                 default_inputs = dict(zip(("steps", "criteria", "commands"), counts))
                 default_inputs["declared_paths"] = None
-        one_round, maximum = estimates(*counts, external=task_external)
+        one_round, maximum = estimates(
+            *counts, external=task_external and scope == "claude"
+        )
         tasks.append(
             {
                 "id": task_id,
@@ -558,6 +568,9 @@ def load_run(
     return {
         "mode": mode,
         "budget": budget,
+        "budget_scope": scope,
+        "run_dir": run_dir,
+        "backlog_usd": usd_value(fields.get("backlog-usd", "0"), "backlog-usd"),
         "planning": planning,
         "continue_past": continue_past,
         "tasks": tasks,
@@ -693,6 +706,45 @@ def spent(run: dict) -> tuple[int, bool]:
     return total, unknown
 
 
+def backlog_spent(run: dict) -> tuple[float, bool]:
+    directory = run.get("run_dir")
+    if directory is not None and any(Path(directory).glob("role-backlog-*.json")):
+        return role_runtime.invocation_usd(directory)["total"]
+    value = run.get("backlog_usd", 0.0)
+    return (value or 0.0, value is None)
+
+
+def budget_spent(run: dict) -> tuple[int, bool]:
+    total, unknown = spent(run)
+    if run.get("budget_scope", "claude") == "all":
+        directories = [Path(run["work"]) / task["id"] for task in run["tasks"]]
+        for task, directory in zip(run["tasks"], directories):
+            if (
+                not any(directory.glob("impl-*.json"))
+                and not any(directory.glob("role-*.json"))
+                and (
+                    task["usd"] is None
+                    or task["usd"] > 0
+                    or (
+                        task["phase"] in FINISHED_OK | FAILED
+                        and (run["external"] or run["planner_external"])
+                    )
+                )
+            ):
+                unknown = True
+        if run.get("backlog_usd", 0.0) is None and not any(
+            Path(run["run_dir"]).glob("role-backlog-*.json")
+        ):
+            unknown = True
+        if run.get("run_dir") is not None:
+            directories.append(Path(run["run_dir"]))
+        for directory in directories:
+            known, missing = role_runtime.invocation_tokens(directory)
+            total += known
+            unknown = unknown or missing
+    return total, unknown
+
+
 def external_spent(run: dict) -> tuple[float, bool]:
     """Sum of the known `External USD` values, and whether any row is unknown.
 
@@ -702,8 +754,7 @@ def external_spent(run: dict) -> tuple[float, bool]:
     so a resume recomputes the same total instead of double counting; the cell
     is the fallback when no invocation file exists yet.
     """
-    total = 0.0
-    unknown = False
+    total, unknown = backlog_spent(run)
     for task in run["tasks"]:
         spend = invocation_spend(run["work"], task["id"])
         if spend is not None:
@@ -735,6 +786,11 @@ def stage_spend(run: dict) -> dict | None:
     """
     stages: dict[str, tuple[float, bool]] = {}
     found = False
+    if run.get("run_dir") is not None and any(
+        Path(run["run_dir"]).glob("role-backlog-*.json")
+    ):
+        stages["backlog"] = backlog_spent(run)
+        found = True
     for task in run["tasks"]:
         task_dir = Path(run["work"]) / task["id"]
         if not task_dir.is_dir():
@@ -798,7 +854,18 @@ def estimate(run: dict) -> str:
             rows.append(
                 f"routing {task['id']}: unclassified/default; inputs {json.dumps(task['default_inputs'], sort_keys=True)}; profile {task['implementer']}"
             )
-    total, unknown = spent(run)
+    total, unknown = budget_spent(run)
+    if run.get("budget_scope", "claude") == "all":
+        rows.append(
+            "budget-scope: all (reported external tokens included; USD separate)"
+        )
+    if run.get("run_dir") is not None and any(
+        Path(run["run_dir"]).glob("role-backlog-*.json")
+    ):
+        known_backlog, unknown_backlog = backlog_spent(run)
+        rows.append(
+            f"backlog USD: {'at least ' if unknown_backlog else ''}{known_backlog:.6f}"
+        )
     rows.append(f"spent: {'at least ' if unknown else ''}{total} tokens")
     budget = run["budget"]
     if budget is None:
@@ -815,6 +882,11 @@ def estimate(run: dict) -> str:
         fits3 = total + sum(t["max"] for t in open_tasks) <= budget
         fits1 = total + sum(t["one_round"] for t in open_tasks) <= budget
         word = {True: "fits", False: "does not fit"}
+        if unknown and run.get("budget_scope") == "all":
+            word = {
+                True: "unknown usage; cannot assert fit",
+                False: "does not fit (usage also unknown)",
+            }
         rows.append(
             f"budget: {budget} tokens; pending at 3 rounds each: {word[fits3]}; "
             f"pending at 1 round each: {word[fits1]}"
@@ -840,7 +912,7 @@ def estimate(run: dict) -> str:
             f"{'at least ' if rounds_unknown else ''}{rounds_total}"
             f"{' (unknown)' if rounds_unknown else ''}"
         )
-    if run["has_usd"]:
+    if run["has_usd"] or stage_spend(run) is not None:
         usd_total, usd_unknown = external_spent(run)
         rows.append(
             f"external spent: {'at least ' if usd_unknown else ''}{usd_total:.2f} USD"
@@ -904,15 +976,22 @@ def next_step(run: dict) -> str:
 
     if finished:
         last = finished[-1]
-        if last["used"] is not None and last["used"] > BURN_FACTOR * last["max"]:
+        last_used = last["used"]
+        if run.get("budget_scope") == "all" and last_used is not None:
+            last_used += role_runtime.invocation_tokens(Path(run["work"]) / last["id"])[
+                0
+            ]
+        if last_used is not None and last_used > BURN_FACTOR * last["max"]:
             return (
-                f"stop: burn rate: {last['id']} used {last['used']}, "
+                f"stop: burn rate: {last['id']} used {last_used}, "
                 f"more than {BURN_FACTOR} x its estimate {last['max']}"
             )
 
     candidate = runnable[0]
-    total, _ = spent(run)
+    total, unknown = budget_spent(run)
     budget = run["budget"]
+    if budget is not None and run.get("budget_scope") == "all" and unknown:
+        return "stop: budget: unknown external usage prevents deciding a finite all-scope budget"
     if budget is not None and total + candidate["max"] > budget:
         return (
             f"stop: budget: spent {total} + next worst case {candidate['max']} "
@@ -950,6 +1029,8 @@ def main() -> int:
     next_parser.add_argument(
         "--planner-kind", choices=("claude", "profile"), default="claude"
     )
+    for budget_parser in (estimate_parser, next_parser):
+        budget_parser.add_argument("--budget-scope", choices=("claude", "all"))
     args = parser.parse_args()
 
     try:
@@ -967,6 +1048,7 @@ def main() -> int:
                 for_next=args.command == "next",
                 external=args.implementer_kind == "profile",
                 planner_external=args.planner_kind == "profile",
+                budget_scope=args.budget_scope,
             )
             output = estimate(run) if args.command == "estimate" else next_step(run)
     except Refusal as error:

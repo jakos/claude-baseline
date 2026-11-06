@@ -24,7 +24,9 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
+from unittest.mock import patch
 
 TESTS = Path(__file__).resolve().parent
 PLUGIN = TESTS.parent
@@ -142,7 +144,16 @@ class BenchFixture(unittest.TestCase):
 
     def git(self, cwd, *args, check=True):
         done = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            [
+                "git",
+                "-C",
+                str(cwd),
+                "-c",
+                "user.name=bench-test",
+                "-c",
+                "user.email=bench-test@example.invalid",
+                *args,
+            ],
             capture_output=True,
             encoding="utf-8",
             timeout=60,
@@ -404,6 +415,322 @@ class SettingsForTest(BenchFixture):
         self.assertEqual(reloaded["command"], ["codex", "exec", "-"])
 
 
+class CliBenchmarkTest(BenchFixture):
+    def configure_cli(self, *, usage: bool = False, limit: bool = False) -> None:
+        self.state = self.root / "private-state"
+        self.fake = self.root / "fake_cli.py"
+        self.usage = usage
+        body = (
+            "import sys, os, json, pathlib, subprocess\n"
+            "if '--version' in sys.argv:\n print('fake-cli 1.2'); sys.exit(0)\n"
+            "sys.stdin.read()\n"
+            "assert 'UNRELATED_SECRET' not in os.environ\n"
+            "assert 'FAKE_KEY' not in os.environ\n"
+            "assert pathlib.Path(os.environ['CODEX_HOME']).name == 'tool'\n"
+            "assert not pathlib.Path('hidden_check.py').exists()\n"
+            "pathlib.Path('calc.py').write_text('def add(a, b):\\n    return a + b\\n', encoding='utf-8')\n"
+            "subprocess.run(['git','add','calc.py'], check=True)\n"
+            "subprocess.run(['git','-c','user.name=Fake','-c','user.email=fake@example.com','commit','-qm','implementation'], check=True)\n"
+            "pathlib.Path('test_added.py').write_text('pass\\n', encoding='utf-8')\n"
+        )
+        if limit:
+            body += "print('quota exhausted'); sys.exit(1)\n"
+        elif usage:
+            body += "print(json.dumps({'type':'turn.completed', 'usage': {'input_tokens':123, 'cached_input_tokens':23, 'output_tokens':9}}))\n"
+        else:
+            body += "print('done')\n"
+        write_file(self.fake, body)
+        settings = {
+            "driver": "cli",
+            "model": "fake-model",
+            "billing": "subscription",
+            "command": [sys.executable, str(self.fake)],
+            "prompt_via": "stdin",
+            "benchmark_version_command": [sys.executable, str(self.fake), "--version"],
+            "benchmark_isolation": "codex",
+            "usage_format": "codex-jsonl" if usage else "none",
+            "limit_patterns": ["quota exhausted"],
+            "subscription_monthly_usd": 20,
+        }
+        write_file(
+            self.models_path,
+            "[profiles.fake]\n"
+            + "\n".join(f"{k} = {toml_value(v)}" for k, v in settings.items())
+            + "\n",
+        )
+        self.make_case()
+
+    def resume_cli(self, *extra: str) -> subprocess.CompletedProcess:
+        return self.bench(
+            "run",
+            "--resume",
+            "r1",
+            "--project",
+            str(self.project),
+            "--cases-dir",
+            str(self.cases),
+            "--out",
+            str(self.out),
+            *extra,
+        )
+
+    def test_committing_cli_null_accounting_and_resume(self) -> None:
+        self.configure_cli()
+        done = self.bench(
+            *self.run_args(
+                extra=[
+                    "--cli-state-dir",
+                    str(self.state),
+                    "--keep-code",
+                    "--repeat",
+                    "2",
+                ]
+            ),
+            extra_env={"UNRELATED_SECRET": "private"},
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        rows = self.rows()
+        self.assertEqual([r["outcome"] for r in rows], ["accepted", "accepted"])
+        row = rows[0]
+        self.assertIsNone(row["tokens"])
+
+        self.assertIsNone(row["cost_usd"])
+        self.assertIsNone(row["api_spend_usd"])
+        self.assertIsNone(row["subscription_cost_usd"])
+        self.assertEqual(row["subscription_monthly_usd"], 20)
+        evidence = row["state_evidence"]
+        self.assertEqual(evidence["tool_created_commits"], 1)
+        self.assertIn("calc.py", evidence["changed_paths"])
+        self.assertEqual(evidence["visible_test_changes"], {"test_added.py": "A"})
+        self.assertEqual(row["hidden"], "pass")
+        self.assertEqual(row["provenance"]["version"], "fake-cli 1.2")
+        for repeat in (1, 2):
+            self.assertTrue(
+                (self.state / "r1" / "c1" / "fake" / str(repeat) / "tool").is_dir()
+            )
+        self.assertNotIn(HIDDEN_MARKER, json.dumps(rows))
+        for path in (self.out / "r1" / "runs").rglob("*"):
+            self.assertNotEqual(path.name, "hidden_check.py")
+        original = (self.out / "r1" / "results.jsonl").read_bytes()
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.out / "r1" / "results.jsonl").read_bytes(), original)
+        self.assertIn("unknown", self.report())
+        self.assertIn("fake-cli 1.2", self.report())
+
+    def test_api_run_can_extend_with_cli_and_resume(self) -> None:
+        self.configure_cli()
+        server = self.fix_calc_server()
+        self.add_profile("api", server)
+        done = self.run_bench(profiles="api")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        done = self.bench(
+            "run",
+            "--extend",
+            "r1",
+            "--profiles",
+            "fake",
+            "--project",
+            str(self.project),
+            "--out",
+            str(self.out),
+            "--cases-dir",
+            str(self.cases),
+            "--timeout-seconds",
+            "120",
+            "--cli-state-dir",
+            str(self.state),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual([r["outcome"] for r in self.rows()], ["accepted", "accepted"])
+        self.assertEqual(len(server.requests), 2)
+
+    def test_codex_usage_once_and_limit_is_terminal_unavailable(self) -> None:
+        self.configure_cli(usage=True)
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(
+            self.rows()[0]["tokens"], {"input": 123, "cached": 23, "output": 9}
+        )
+        self.assertGreater(self.rows()[0]["implement_seconds"], 0)
+        self.configure_cli(limit=True)
+        done = self.run_bench(
+            run_id="limited", extra=["--cli-state-dir", str(self.state)]
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        row = self.rows("limited")[0]
+        self.assertEqual(row["outcome"], "unavailable")
+        self.assertEqual(len(row["attempts"]), 1)
+        self.assertIsNone(row["tokens"])
+        results = self.out / "limited" / "results.jsonl"
+        completed = results.read_bytes()
+        done = self.bench(
+            "run",
+            "--resume",
+            "limited",
+            "--project",
+            str(self.project),
+            "--cases-dir",
+            str(self.cases),
+            "--out",
+            str(self.out),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(results.read_bytes(), completed)
+
+    def test_resume_refuses_cli_changes_before_mutation(self) -> None:
+        self.configure_cli()
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        run = self.out / "r1"
+        originals = {p: p.read_bytes() for p in run.rglob("*") if p.is_file()}
+        source = self.models_path.read_text(encoding="utf-8")
+        for old, new in (
+            ("fake-model", "changed-model"),
+            (
+                f"command = {toml_value([sys.executable, str(self.fake)])}",
+                f"command = {toml_value([sys.executable, str(self.fake), '--changed'])}",
+            ),
+            ('usage_format = "none"', 'usage_format = "codex-jsonl"'),
+            ('benchmark_isolation = "codex"', 'benchmark_isolation = "claude"'),
+            ('prompt_via = "stdin"', 'prompt_via = "arg"'),
+        ):
+            write_file(self.models_path, source.replace(old, new))
+            done = self.resume_cli()
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        write_file(self.models_path, source)
+        write_file(
+            self.fake,
+            self.fake.read_text(encoding="utf-8").replace(
+                "fake-cli 1.2", "fake-cli 2.0"
+            ),
+        )
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("provenance", done.stderr)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+
+    def test_extension_adds_distinct_cli_and_preserves_shared_provenance(self) -> None:
+        self.configure_cli()
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        original = (self.out / "r1" / "results.jsonl").read_bytes()
+        source = self.models_path.read_text(encoding="utf-8")
+        write_file(
+            self.models_path,
+            source + source.replace("[profiles.fake]", "[profiles.second]"),
+        )
+        done = self.bench(
+            "run",
+            "--extend",
+            "r1",
+            "--profiles",
+            "second",
+            "--project",
+            str(self.project),
+            "--out",
+            str(self.out),
+            "--cases-dir",
+            str(self.cases),
+            "--timeout-seconds",
+            "120",
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(
+            (self.out / "r1" / "results.jsonl").read_bytes().startswith(original)
+        )
+        self.assertEqual([r["profile"] for r in self.rows()], ["fake", "second"])
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for filename in ("config.toml", "config.json", "copilot-instructions.md"):
+            with self.subTest(filename=filename):
+                config = self.state / "r1" / "c1" / "fake" / "1" / "tool" / filename
+                write_file(config, "# changed settings\n")
+                before = (self.out / "r1" / "run.json").read_bytes()
+                done = self.resume_cli()
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual((self.out / "r1" / "run.json").read_bytes(), before)
+                config.unlink()
+
+    def test_cli_missing_tools_or_isolation_are_explicitly_unavailable(self) -> None:
+        self.configure_cli()
+        done = self.run_bench()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.rows()[0]["outcome"], "unavailable")
+        self.assertIn("isolation", self.rows()[0]["reason"])
+        source = self.models_path.read_text(encoding="utf-8")
+        source = source.replace(
+            toml_value(sys.executable), toml_value(str(self.root / "missing-cli"))
+        )
+        write_file(self.models_path, source)
+        done = self.run_bench(
+            run_id="missing", extra=["--cli-state-dir", str(self.state)]
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.rows("missing")[0]["outcome"], "unavailable")
+        self.assertIn("unavailable", self.rows("missing")[0]["provenance"])
+
+    def test_cli_provenance_redacts_secrets_and_local_paths(self) -> None:
+        self.configure_cli()
+        profiles, _ = bench.models.load(self.project)
+        profile = profiles["fake"]
+        secret = "private-auth-value"
+        profile["command"].extend(
+            [
+                secret,
+                "--api-key=inline-credential",
+                "https://user:url-password@example.com",
+            ]
+        )
+        with patch.dict(os.environ, {"UNRELATED_TOKEN": secret}):
+            evidence = bench.cli_provenance(profile, self.project)
+            recorded = bench.recorded_settings(profile)
+        self.assertNotIn(secret, json.dumps([evidence, recorded]))
+        self.assertNotIn("inline-credential", json.dumps([evidence, recorded]))
+        self.assertNotIn("url-password", json.dumps([evidence, recorded]))
+        self.assertNotIn(str(self.root), json.dumps([evidence, recorded]))
+        self.assertIn("argv_sha256", evidence)
+
+    def test_state_inspection_covers_all_file_states_and_test_changes(self) -> None:
+        code = self.root / "scratch"
+        base = bench.export_base(self.src, self.base_sha, code)
+        write_file(code / "tests" / "test_modify.py", "before\n")
+        write_file(code / "tests" / "test_delete.py", "before\n")
+        self.git(code, "add", "-A")
+        self.git(code, "commit", "-qm", "tests")
+        base = self.git(code, "rev-parse", "HEAD").stdout.strip()
+        write_file(code / "calc.py", CALC_OK)
+        self.git(code, "add", "calc.py")
+        self.git(code, "commit", "-qm", "fix")
+        write_file(code / "mul.py", MUL_OK)
+        self.git(code, "add", "mul.py")
+        write_file(code / "tools" / "check.py", "# unstaged\n")
+        write_file(code / "new.txt", "untracked\n")
+        write_file(code / "tests" / "test_modify.py", "after\n")
+        (code / "tests" / "test_delete.py").unlink()
+        write_file(code / "tests" / "test_add.py", "added\n")
+        index_before = (code / ".git" / "index").read_bytes()
+        result = bench.inspect_state(code, base)
+        self.assertEqual(
+            result["visible_test_changes"],
+            {
+                "tests/test_add.py": "A",
+                "tests/test_delete.py": "D",
+                "tests/test_modify.py": "M",
+            },
+        )
+        self.assertTrue(
+            {"calc.py", "mul.py", "tools/check.py", "new.txt"}.issubset(
+                result["changed_paths"]
+            )
+        )
+        self.assertEqual(result["tool_created_commits"], 1)
+        self.assertEqual((code / ".git" / "index").read_bytes(), index_before)
+
+
 class ParseChecksTest(unittest.TestCase):
     CHECKS0 = (
         "# Checks: round 0\n"
@@ -618,7 +945,11 @@ class RunTest(BenchFixture):
         self.assertEqual(row["billing"], "api")
         self.assertTrue(row["cost_known"])
         self.assertTrue(row["fingerprint"].startswith("sha256:"))
-        self.assertEqual(row["harness_version"], 1)
+        self.assertEqual(row["harness_version"], 3)
+        self.assertEqual(row["round1_hidden"], "pass")
+        self.assertEqual(row["earliest_hidden_pass_round"], 1)
+        self.assertEqual(row["hidden_observations"], [{"round": 1, "result": "pass"}])
+        self.assertEqual(len(row["attempts"]), 1)
         self.assertEqual(row["n"], 1)
         self.assertEqual(row["case"], "c1")
         self.assertEqual(row["profile"], "fake")
@@ -660,6 +991,7 @@ class RunTest(BenchFixture):
         row = self.rows("r1")[0]
         self.assertEqual(row["outcome"], "accepted")
         self.assertEqual(row["accepted_round"], 2)
+        self.assertEqual(row["hidden_observations"], [{"round": 2, "result": "pass"}])
         self.assertEqual(row["rounds"], 2)
         task = self.out / "r1" / "runs" / "1" / ".work" / "c1"
         review1 = (task / "review-1.md").read_text(encoding="utf-8")
@@ -692,6 +1024,7 @@ class RunTest(BenchFixture):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         row = self.rows("np")[0]
         self.assertEqual(row["outcome"], "no_progress")
+        self.assertEqual(len(row["attempts"]), 2)
         self.assertEqual(row["rounds"], 2)
         self.assertIsNone(row["accepted_round"])
         self.assertEqual(len(server.requests), 4)  # no round 3 request
@@ -728,6 +1061,7 @@ class RunTest(BenchFixture):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         row = self.rows("rc")[0]
         self.assertEqual(row["outcome"], "round_cap")
+        self.assertEqual(len(row["attempts"]), 3)
         self.assertEqual(row["rounds"], 3)
         self.assertEqual(row["hidden"], "not_run")
         self.assertEqual(len(server2.requests), 6)
@@ -819,6 +1153,8 @@ class RunTest(BenchFixture):
         row = self.rows("r1")[0]
         self.assertEqual(row["outcome"], "accepted")
         self.assertEqual(row["hidden"], "fail")
+        self.assertEqual(len(row["attempts"]), 1)
+        self.assertEqual(row["round1_hidden"], "fail")
         report = self.report("r1")
         failures = report.split("## Failures", 1)[1]
         self.assertIn("n=1", failures)
@@ -1069,10 +1405,18 @@ class RunTest(BenchFixture):
         fake_claude = self.root / "fake_claude.py"
         write_file(
             fake_claude,
-            r"""import json, re, sys
+            r"""import json, re, sys, subprocess
 from pathlib import Path
 argv = sys.argv[1:]
 task = Path(argv[argv.index('--add-dir') + 1])
+assert not (task.parent / '_hidden').exists()
+assert not (Path.cwd() / 'hidden_check.py').exists()
+objects = subprocess.run(['git', 'cat-file', '--batch-all-objects', '--batch'], capture_output=True).stdout
+assert b'hidden-marker-9f3a2b' not in objects
+for path in task.rglob('*'):
+    if path.is_file():
+        assert b'HIDDEN OK' not in path.read_bytes()
+        assert b'hidden_check.py' not in path.read_bytes()
 prompt = argv[argv.index('-p') + 1]
 round_n = re.search(r'review-(\d+)\.md', prompt).group(1)
 here = Path(__file__).resolve().parent
@@ -1140,6 +1484,16 @@ print(json.dumps({'total_cost_usd': 0.5, 'usage': {
         self.assertEqual(row["outcome"], "accepted")
         self.assertEqual(row["accepted_round"], 2)
         task2 = self.out / "r2" / "runs" / "1" / ".work" / "c1"
+        self.assertEqual(
+            row["hidden_observations"],
+            [{"round": 1, "result": "pass"}, {"round": 2, "result": "pass"}],
+        )
+        self.assertNotIn(
+            "hidden_check.py", json.dumps([r["body"] for r in server2.requests])
+        )
+        self.assertNotIn(
+            HIDDEN_MARKER, json.dumps([r["body"] for r in server2.requests])
+        )
         self.assertIn(
             "## Verdict: CHANGES_REQUESTED",
             (task2 / "review-1.md").read_text(encoding="utf-8"),
@@ -1155,6 +1509,31 @@ print(json.dumps({'total_cost_usd': 0.5, 'usage': {
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse((self.root / "calls.txt").exists())
         self.assertEqual(self.rows("r3")[0]["review_cost_usd"], 0.0)
+
+        # An earlier hidden pass never becomes the final result of a blocked round.
+        write_file(self.root / "verdicts.txt", "CHANGES_REQUESTED\n")
+        server4 = self.server(
+            [
+                reply(tool_call("write_file", {"path": "calc.py", "content": CALC_OK})),
+                reply(content="done"),
+                reply(tool_call("blocked", {"reason": "plan cannot be implemented"})),
+            ]
+        )
+        self.add_profile("fake4", server4)
+        done = self.run_bench(
+            "r4",
+            profiles="fake4",
+            extra=["--review", "--claude-command", claude_command],
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row = self.rows("r4")[0]
+        self.assertEqual(row["outcome"], "blocked")
+        self.assertEqual(row["hidden"], "not_run")
+        self.assertEqual(row["round1_hidden"], "pass")
+        self.assertEqual(row["earliest_hidden_pass_round"], 1)
+        self.assertEqual(
+            len(row["attempts"]), 3
+        )  # implement, review, blocked implement
 
     def test_refusals_create_nothing(self):
         server = self.fix_calc_server()
@@ -1690,6 +2069,34 @@ class MergeTest(BenchFixture):
         self.assertIn("case c1 differs", done.stderr)
         self.assertFalse((self.out / "m1").exists())
 
+    def test_refuses_incompatible_measurements_and_prompt_inputs(self) -> None:
+        self.canned("a1", ["p1"], [canned_row("a1", 1, "p1")])
+        self.canned("a2", ["p1"], [canned_row("a2", 1, "p1")])
+        path = self.out / "a2" / "run.json"
+        original = path.read_bytes()
+        for field, value in (
+            ("harness_version", 2),
+            ("review", True),
+            ("measurement", {"infra_retries": 9}),
+        ):
+            meta = json.loads(original)
+            meta[field] = value
+            write_file(path, json.dumps(meta))
+            done = self.merge("a1", "a2")
+            self.assertEqual(done.returncode, 2, done.stderr)
+            self.assertIn(f"{field} differs", done.stderr)
+            self.assertFalse((self.out / "m1").exists())
+        path.write_bytes(original)
+        for rid, digest in (("a1", "old"), ("a2", "new")):
+            path = self.out / rid / "run.json"
+            meta = json.loads(path.read_bytes())
+            meta["prompt_hashes"] = {"p1": {"extra.md": digest}}
+            write_file(path, json.dumps(meta))
+        done = self.merge("a1", "a2")
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("profile prompt inputs differ", done.stderr)
+        self.assertFalse((self.out / "m1").exists())
+
     def test_refuses_existing_target_and_single_source(self):
         self.canned("a1", ["p1"], [canned_row("a1", 1, "p1")])
         self.canned("a2", ["p1"], [canned_row("a2", 1, "p1")])
@@ -1880,6 +2287,628 @@ class RoutingEvidenceTest(unittest.TestCase):
             "missing routing evidence is unknown",
             "\n".join(bench.routing_report(rows, {})),
         )
+
+
+class RecoveryProtocolTest(BenchFixture):
+    def resume(self, *extra: str) -> subprocess.CompletedProcess:
+        return self.bench(
+            "run",
+            "--resume",
+            "r1",
+            "--out",
+            str(self.out),
+            "--project",
+            str(self.project),
+            "--cases-dir",
+            str(self.cases),
+            *extra,
+        )
+
+    def test_resume_missing_only_and_complete_no_calls(self) -> None:
+        server = self.fix_calc_server()
+        self.add_profile("fake", server)
+        self.make_case()
+        done = self.run_bench(extra=["--repeat", "2", "--max-cost-usd", "0.0049"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        path = self.out / "r1" / "results.jsonl"
+        original = path.read_bytes()
+        calls = len(server.requests)
+        self.assertEqual(self.resume().returncode, 0)
+        self.assertEqual(len(server.requests), calls)
+        self.assertEqual(path.read_bytes(), original)
+        # Simulate interruption before the second cell was started.
+        first = original.splitlines(keepends=True)[0]
+        path.write_bytes(first)
+        done = self.resume()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(path.read_bytes().splitlines(keepends=True)[0], first)
+        self.assertEqual(self.rows()[1]["outcome"], "skipped")
+        self.assertEqual(len(server.requests), calls)
+
+    def test_subscription_cap_runs_repeats_and_resumes_mixed_profiles(self) -> None:
+        subscription = self.fix_calc_server()
+        api = self.fix_calc_server()
+        for server in (subscription, api):
+            server.responses.extend(list(server.responses))
+        self.add_profile("sub", subscription, billing="subscription")
+        self.add_profile("api", api)
+        self.make_case()
+        done = self.run_bench(
+            profiles="sub,api", extra=["--repeat", "2", "--max-cost-usd", "10"]
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        rows = self.rows()
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([r["outcome"] for r in rows], ["accepted"] * 4)
+        self.assertTrue(all(not r["cost_known"] for r in rows if r["profile"] == "sub"))
+        self.assertTrue(all(r["cost_known"] for r in rows if r["profile"] == "api"))
+        path = self.out / "r1" / "results.jsonl"
+        original = path.read_bytes()
+        calls = [len(s.requests) for s in (subscription, api)]
+        self.assertEqual(self.resume().returncode, 0)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual([len(s.requests) for s in (subscription, api)], calls)
+        # Keep completed subscription evidence and resume just the missing API cell.
+        lines = original.splitlines(keepends=True)
+        missing = next(i for i, row in enumerate(rows) if row["profile"] == "api")
+        retained = b"".join(line for i, line in enumerate(lines) if i != missing)
+        path.write_bytes(retained)
+        write_file(
+            path.parent / "runs" / "50" / "attempts" / "impl-1-1.json",
+            json.dumps(
+                {
+                    "billing": "subscription",
+                    "cost_usd": None,
+                    "cost_known": False,
+                    "state": "pending",
+                }
+            ),
+        )
+        api.responses.extend(
+            [
+                reply(tool_call("write_file", {"path": "calc.py", "content": CALC_OK})),
+                reply(content="done"),
+            ]
+        )
+        done = self.resume()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(path.read_bytes().startswith(retained))
+        self.assertEqual([r["outcome"] for r in self.rows()], ["accepted"] * 4)
+        self.assertEqual(len(subscription.requests), calls[0])
+        self.assertEqual(len(api.requests), calls[1] + 2)
+
+    def test_subscription_unknown_cost_allows_multiple_reviewed_rounds(self) -> None:
+        runner, case = self.configured_runner(review=True, max_cost_usd=10)
+        runner.profiles["fake"]["billing"] = "subscription"
+
+        def review(round_n: int, task: Path, code: Path, base: str) -> tuple:
+            verdict = "CHANGES_REQUESTED" if round_n == 1 else "APPROVED"
+            write_file(
+                task / f"review-{round_n}.md",
+                f"## Verdict: {verdict}\n## Fix list\n1. Inspect the implementation.\n",
+            )
+            return verdict, 0.0, {}, None
+
+        with (
+            patch.object(
+                runner,
+                "implement",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as implement,
+            patch.object(runner, "review_once", side_effect=review) as reviewer,
+        ):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertEqual(row["accepted_round"], 2)
+        self.assertEqual(implement.call_count, 2)
+        self.assertEqual(reviewer.call_count, 2)
+        self.assertFalse(runner.billing_unknown)
+        self.assertFalse(row["cost_known"])
+        self.assertTrue(all(not a["cost_known"] for a in row["attempts"]))
+
+    def test_resume_runs_missing_cell_and_avoids_interrupted_scratch(self) -> None:
+        server = self.fix_calc_server()
+        self.add_profile("fake", server)
+        self.make_case()
+        self.assertEqual(self.run_bench(extra=["--repeat", "2"]).returncode, 0)
+        path = self.out / "r1" / "results.jsonl"
+        first = path.read_bytes().splitlines(keepends=True)[0]
+        path.write_bytes(first)
+        interrupted = self.out / "r1" / "runs" / "3"
+        write_file(
+            interrupted / "attempts" / "impl-1-1.json",
+            json.dumps(
+                {
+                    "cost_usd": 0.25,
+                    "cost_known": True,
+                    "state": "complete",
+                    "tokens": {"input": 42},
+                    "seconds": 2,
+                }
+            ),
+        )
+        server.responses.extend(
+            [
+                reply(tool_call("write_file", {"path": "calc.py", "content": CALC_OK})),
+                reply(content="done"),
+            ]
+        )
+        calls = len(server.requests)
+        done = self.resume()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["repeat"], 2)
+        self.assertEqual(rows[1]["n"], 4)
+        self.assertEqual(rows[1]["outcome"], "accepted")
+        self.assertEqual(len(server.requests), calls + 2)
+        self.assertEqual(path.read_bytes().splitlines(keepends=True)[0], first)
+        meta = json.loads((path.parent / "run.json").read_text())
+        self.assertAlmostEqual(
+            sum(a.get("cost_usd") or 0 for a in meta["interrupted_attempts"]),
+            0.25,
+        )
+        before = path.read_bytes()
+        self.assertEqual(self.resume().returncode, 0)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(server.requests), calls + 2)
+
+    def configured_runner(self, **overrides: object) -> tuple[bench.Runner, dict]:
+        server = self.server([])
+        self.add_profile("fake", server)
+        case = bench.load_case(self.make_case())
+        case.update(
+            base_commit=self.base_sha,
+            result_commit=self.result_sha,
+            hidden_files=["hidden_check.py"],
+        )
+        options = {
+            "out": str(self.out),
+            "resume": None,
+            "extend": None,
+            "run_id": "unit",
+            "repeat": 1,
+            "review": False,
+            "review_model": None,
+            "max_cost_usd": None,
+            "timeout_seconds": None,
+            "keep_code": True,
+            "infra_retries": 2,
+        }
+        options.update(overrides)
+        runner = bench.Runner(
+            SimpleNamespace(**options), self.project, {"c1": case}, ["fake"]
+        )
+        return runner, case
+
+    def test_terminal_outcomes_never_retry(self) -> None:
+        runner, case = self.configured_runner()
+        for index, (exit_code, reason) in enumerate(
+            (
+                (1, "max_turns reached"),
+                (1, "max_cost_usd reached"),
+                (3, "BLOCKED: wrong plan"),
+                (2, "configuration failure"),
+                (1, "HTTP 429 in arbitrary textual error"),
+                (1, "unknown failure"),
+            ),
+            1,
+        ):
+            with self.subTest(reason=reason):
+                with patch.object(
+                    runner,
+                    "implement",
+                    return_value=subprocess.CompletedProcess([], exit_code, reason, ""),
+                ) as implement:
+                    row = runner.run_one(case, "fake", 1, index)
+                self.assertEqual(implement.call_count, 1)
+                self.assertEqual(len(row["attempts"]), 1)
+
+    def test_timeout_keeps_usage_from_prior_failed_attempt(self) -> None:
+        runner, case = self.configured_runner(infra_retries=1)
+        calls = []
+
+        def implement(
+            task: Path, code: Path, round_n: int, name: str
+        ) -> subprocess.CompletedProcess:
+            calls.append(round_n)
+            if len(calls) == 2:
+                raise subprocess.TimeoutExpired([], 1)
+            write_file(
+                task / "impl-1.json",
+                json.dumps(
+                    {
+                        "cost_usd": 0.125,
+                        "tokens": {"input": 123},
+                        "infrastructure_failure": {
+                            "kind": "connection",
+                            "retryable": True,
+                        },
+                    }
+                ),
+            )
+            return subprocess.CompletedProcess([], 1, "transport failed", "")
+
+        with patch.object(runner, "implement", side_effect=implement):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(row["tokens"]["input"], 123)
+        self.assertEqual(row["cost_usd"], 0.125)
+        self.assertEqual(runner.spent, 0.125)
+        self.assertFalse(row["cost_known"])
+        self.assertEqual(len(row["attempts"]), 2)
+
+    def test_cli_unknown_total_keeps_known_attempt_work_and_budget(self) -> None:
+        runner, case = self.configured_runner(infra_retries=1)
+        runner.profiles["fake"].update(
+            driver="cli", billing="subscription", command=[sys.executable, "fake.py"]
+        )
+        calls = []
+
+        def implement(
+            task: Path, code: Path, round_n: int, name: str
+        ) -> subprocess.CompletedProcess:
+            calls.append(round_n)
+            metrics = {"cost_usd": None, "tokens": None}
+            if len(calls) == 1:
+                metrics = {
+                    "cost_usd": 0.125,
+                    "tokens": {"input": 123},
+                    "infrastructure_failure": {"kind": "connection", "retryable": True},
+                }
+            write_file(task / "impl-1.json", json.dumps(metrics))
+            return subprocess.CompletedProcess(
+                [], 1, "failed: all profiles unavailable: quota exhausted", ""
+            )
+
+        with patch.object(runner, "implement", side_effect=implement):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(row["outcome"], "unavailable")
+        self.assertIsNone(row["tokens"])
+        self.assertIsNone(row["cost_usd"])
+        self.assertEqual(row["known_tokens"], {"input": 123})
+        self.assertEqual(row["known_cost_usd"], 0.125)
+        runner.append_row(row)
+        self.assertEqual(runner.spent, 0.125)
+
+    def test_reviewer_timeout_bound_restore_and_budget(self) -> None:
+        runner, _case = self.configured_runner(infra_retries=1)
+        run = self.root / "review-cell"
+        task, code = run / ".work" / "c1", run / "code"
+        write_file(code / "file.txt", "original")
+        write_file(task / "status.md", "original")
+        runner.attempts, runner.cell_spent, runner.billing_unknown = [], 0.0, False
+        calls = []
+
+        def review(round_n: int, task: Path, code: Path, base: str) -> tuple:
+            calls.append(round_n)
+            self.assertEqual((code / "file.txt").read_text(), "original")
+            if len(calls) == 1:
+                write_file(code / "file.txt", "partial")
+                write_file(task / "review-1.md", "partial")
+                raise subprocess.TimeoutExpired([], 1)
+            self.assertFalse((task / "review-1.md").exists())
+            runner.review_usage_known = True
+            return "APPROVED", 0.25, {"input": 7}, None
+
+        with patch.object(runner, "review_once", side_effect=review):
+            verdict, cost, tokens, error = runner.review_round(1, task, code, "base")
+        self.assertEqual(
+            (verdict, cost, tokens["input"], error), ("APPROVED", 0.25, 7, None)
+        )
+        self.assertEqual(calls, [1, 1])
+        self.assertEqual(len(runner.attempts), 2)
+        runner.attempts, runner.cell_spent, runner.billing_unknown = [], 0.0, False
+        runner.max_cost_usd, runner.spent = 1.0, 0.0
+        with patch.object(
+            runner, "review_once", side_effect=subprocess.TimeoutExpired([], 1)
+        ) as review_mock:
+            result = runner.review_round(1, task, code, "base")
+        self.assertIsNotNone(result[3])
+        self.assertEqual(review_mock.call_count, 1)
+
+    def test_resume_refusals_preserve_evidence(self) -> None:
+        server = self.fix_calc_server()
+        self.add_profile("fake", server)
+        self.make_case()
+        self.assertEqual(self.run_bench().returncode, 0)
+        directory = self.out / "r1"
+        path = directory / "results.jsonl"
+        original = path.read_bytes()
+        damaged_records = [original[:-1], original + original, b"{}\n", b"bad\n"]
+        for key, value in (
+            ("review_tokens", "broken"),
+            ("seconds", -1),
+            ("hidden_observations", [{"round": 0, "result": "pass"}]),
+            ("review", True),
+            ("attempts", ["broken"]),
+        ):
+            row = json.loads(original)
+            row[key] = value
+            damaged_records.append((json.dumps(row) + "\n").encode())
+        for damaged in damaged_records:
+            path.write_bytes(damaged)
+            before = {
+                p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()
+            }
+            done = self.resume()
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertIn("restore the original records", done.stderr)
+            self.assertEqual(
+                before,
+                {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()},
+            )
+        path.write_bytes(original)
+        for extra in (
+            ("--infra-retries", "0"),
+            ("--repeat", "2"),
+            ("--review",),
+            ("--profiles", "other"),
+            ("--max-cost-usd", "5"),
+            ("--review-model", "different"),
+        ):
+            done = self.resume(*extra)
+            self.assertEqual(done.returncode, 2, done.stderr)
+            self.assertEqual(path.read_bytes(), original)
+        write_file(
+            self.models_path,
+            self.models_path.read_text().replace("fake-model", "changed-model"),
+        )
+        self.assertEqual(self.resume().returncode, 2)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_prompt_content_changes_refuse_resume_without_mutation(self) -> None:
+        server = self.fix_calc_server()
+        prompt = self.project / "extra.md"
+        write_file(prompt, "Original instructions")
+        self.add_profile("fake", server, prompt_extras=[str(prompt)])
+        self.make_case()
+        self.assertEqual(self.run_bench().returncode, 0)
+        directory = self.out / "r1"
+        before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        write_file(prompt, "Changed instructions")
+        done = self.resume()
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("profile measurement settings changed", done.stderr)
+        self.assertEqual(
+            before, {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        )
+        self.assertEqual(len(server.requests), 2)
+
+    def test_rate_limit_recovery_is_additionally_bounded(self) -> None:
+        for retries, statuses, expected, outcome in (
+            (0, [429], 1, "unavailable"),
+            (1, [429, 503], 2, "unavailable"),
+            (2, [429], 3, "accepted"),
+        ):
+            with self.subTest(retries=retries):
+                server = self.server(
+                    statuses
+                    + [
+                        reply(
+                            tool_call(
+                                "write_file", {"path": "calc.py", "content": CALC_OK}
+                            ),
+                            usage=U1,
+                        ),
+                        reply(content="done", usage=U2),
+                    ]
+                )
+                name = f"fake{retries}"
+                self.add_profile(name, server)
+                if not (self.cases / "c1").exists():
+                    self.make_case()
+                rid = f"r{retries}"
+                done = self.run_bench(
+                    rid, profiles=name, extra=["--infra-retries", str(retries)]
+                )
+                self.assertEqual(done.returncode, 0, done.stderr)
+                row = self.rows(rid)[0]
+                self.assertEqual(row["outcome"], outcome)
+                self.assertEqual(
+                    len(row["attempts"]), expected if outcome != "accepted" else 2
+                )
+                self.assertEqual(len(server.requests), expected)
+                self.assertFalse(row["cost_known"])
+                self.assertGreater(row["seconds"], 0)
+
+    def test_request_and_harness_retry_counts_are_independently_bounded(self) -> None:
+        server = self.server(
+            [
+                429,
+                429,
+                reply(tool_call("write_file", {"path": "calc.py", "content": CALC_OK})),
+                reply(content="done"),
+            ]
+        )
+        self.add_profile("fake", server, retries=1)
+        self.make_case()
+        done = self.run_bench(extra=["--infra-retries", "1"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        row = self.rows()[0]
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertEqual(len(row["attempts"]), 2)
+        self.assertEqual(len(server.requests), 4)
+
+    def test_visible_timeout_does_not_retry_infrastructure(self) -> None:
+        runner, case = self.configured_runner()
+
+        def gates(task: Path, code: Path, round_n: int) -> subprocess.CompletedProcess:
+            result = "PASS" if round_n == 0 else "ERROR"
+            write_file(
+                task / f"checks-{round_n}.md",
+                f"# Checks: round {round_n}\n| 1 | `visible` | {result} | 1 | 1s |\n",
+            )
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with (
+            patch.object(runner, "gates", side_effect=gates),
+            patch.object(
+                runner,
+                "implement",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as implement,
+        ):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(row["outcome"], "no_progress")
+        self.assertEqual(implement.call_count, 2)
+        self.assertEqual([a["attempt"] for a in row["attempts"]], [1, 1])
+        self.assertEqual(row["hidden_observations"], [])
+
+    def test_hidden_failures_do_not_change_multi_round_review(self) -> None:
+        runner, case = self.configured_runner(review=True)
+        calls = []
+
+        def implement(
+            task: Path, code: Path, round_n: int, name: str
+        ) -> subprocess.CompletedProcess:
+            write_file(task / f"impl-{round_n}.json", json.dumps({"cost_usd": 0.1}))
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def review(round_n: int, task: Path, code: Path, base: str) -> tuple:
+            calls.append(round_n)
+            for path in task.rglob("*"):
+                if path.is_file():
+                    data = path.read_bytes()
+                    self.assertNotIn(b"hidden_check.py", data)
+                    self.assertNotIn(HIDDEN_MARKER.encode(), data)
+            self.assertFalse((code / "hidden_check.py").exists())
+            verdict = "CHANGES_REQUESTED" if round_n == 1 else "APPROVED"
+            write_file(
+                task / f"review-{round_n}.md",
+                f"## Verdict: {verdict}\n## Fix list\n1. Inspect the implementation.\n",
+            )
+            runner.review_usage_known = True
+            return verdict, 0.2, {}, None
+
+        with (
+            patch.object(runner, "implement", side_effect=implement),
+            patch.object(runner, "review_once", side_effect=review),
+        ):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertEqual(row["accepted_round"], 2)
+        self.assertEqual(
+            row["hidden_observations"],
+            [{"round": 1, "result": "fail"}, {"round": 2, "result": "fail"}],
+        )
+        self.assertEqual(row["hidden"], "fail")
+        self.assertEqual(row["round1_hidden"], "fail")
+        self.assertIsNone(row["earliest_hidden_pass_round"])
+        self.assertAlmostEqual(row["cost_usd"] + row["review_cost_usd"], 0.6)
+
+    def test_authentication_and_model_limit_are_terminal(self) -> None:
+        for i, responses in enumerate(([401], [reply(content="done")])):
+            server = self.server(responses)
+            name = f"fake{i}"
+            self.add_profile(name, server, max_turns=1)
+            if not (self.cases / "c1").exists():
+                self.make_case()
+            done = self.run_bench(f"r{i}", profiles=name)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(len(self.rows(f"r{i}")[0]["attempts"]), 1)
+            self.assertEqual(len(server.requests), 1)
+
+    def test_snapshot_restores_index_untracked_task_and_code(self) -> None:
+        run = self.root / "cell"
+        code, task = run / "code", run / ".work" / "c1"
+        bench.export_base(self.src, self.base_sha, code)
+        write_file(code / "untracked.txt", "original")
+        write_file(task / "status.md", "original status")
+        write_file(code / "calc.py", CALC_OK)
+        self.git(code, "add", "calc.py")
+        before_index = (code / ".git" / "index").read_bytes()
+        runner = object.__new__(bench.Runner)
+        runner.infra_retries, runner.max_cost_usd = 1, None
+        runner.profiles = {"fake": {"billing": "api"}}
+        runner.spent, runner.cell_spent = 0.0, 0.0
+        runner.billing_unknown, runner.attempts = False, []
+        calls = []
+
+        def implement(
+            task: Path, code: Path, round_n: int, name: str
+        ) -> subprocess.CompletedProcess:
+            calls.append(round_n)
+            if len(calls) == 1:
+                write_file(code / "untracked.txt", "partial")
+                write_file(code / "calc.py", CALC_WRONG2)
+                write_file(code / "added.txt", "partial")
+                self.git(code, "add", "-A")
+                write_file(task / "status.md", "partial status")
+                metrics = {
+                    "infrastructure_failure": {"kind": "connection", "retryable": True},
+                    "cost_usd": 0.1,
+                }
+            else:
+                self.assertEqual((code / "calc.py").read_text(), CALC_OK)
+                self.assertEqual((code / "untracked.txt").read_text(), "original")
+                self.assertFalse((code / "added.txt").exists())
+                self.assertEqual((task / "status.md").read_text(), "original status")
+                self.assertEqual((code / ".git" / "index").read_bytes(), before_index)
+                metrics = {"cost_usd": 0.2}
+            write_file(task / "impl-1.json", json.dumps(metrics))
+            return subprocess.CompletedProcess([], 1 if len(calls) == 1 else 0, "", "")
+
+        with (
+            patch.object(runner, "implement", side_effect=implement),
+            patch.object(runner, "write_models"),
+        ):
+            done = runner.recovered_implement(task, code, 1, "fake")
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(calls, [1, 1])
+        self.assertAlmostEqual(runner.round_metrics["cost_usd"], 0.3)
+        self.assertEqual(len(list((run / "attempts").glob("*.json"))), 2)
+
+    def test_probe_mutation_and_timeout_cannot_change_implementation(self) -> None:
+        case_dir = self.make_case()
+        case = bench.load_case(case_dir)
+        case.update(
+            base_commit=self.base_sha,
+            result_commit=self.result_sha,
+            hidden_files=["hidden_check.py"],
+        )
+        code = self.root / "cell" / "code"
+        bench.export_base(self.src, self.base_sha, code)
+        write_file(code / "untracked.txt", "keep")
+        runner = object.__new__(bench.Runner)
+        locations = []
+
+        def gates(task: Path, probe: Path, round_n: int) -> None:
+            locations.append(probe.parents[1])
+            self.assertNotIn(str(code.parent), str(probe))
+            self.assertEqual((probe / "untracked.txt").read_text(), "keep")
+            write_file(probe / "untracked.txt", "mutated")
+            raise subprocess.TimeoutExpired([], 1)
+
+        with patch.object(runner, "gates", side_effect=gates):
+            self.assertEqual(runner.run_hidden(case, code, None, True), "error")
+        self.assertEqual((code / "untracked.txt").read_text(), "keep")
+        self.assertFalse((code / "hidden_check.py").exists())
+        self.assertTrue(all(not p.exists() for p in locations))
+
+    def test_repeat_eligibility_and_legacy_unknown(self) -> None:
+        for count in (1, 4, 5):
+            rows = [
+                dict(canned_row("r1", n, "fake"), repeat=n) for n in range(1, count + 1)
+            ]
+            meta = {
+                "repeat": count,
+                "cases": ["c1"],
+                "profiles": ["fake"],
+                "harness_version": 1,
+                "review": False,
+            }
+            expected = "descriptive ranking" if count == 5 else "exploratory"
+            self.assertEqual(bench.eligibility(rows, meta, "c1", "fake"), expected)
+            text = "\n".join(bench.protocol_report(rows, meta))
+            self.assertIn(f"0/{count}; {count} unavailable", text)
+            self.assertEqual(text, "\n".join(bench.protocol_report(rows, meta)))
+            self.assertIn(
+                "exploratory", "\n".join(bench.protocol_report(rows[:-1], meta))
+            )
+        self.assertEqual(bench.quantile([1, 2, 3, 4], 0.25), 1.75)
 
 
 if __name__ == "__main__":

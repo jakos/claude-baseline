@@ -69,6 +69,8 @@ ROLES = frozenset(
         "backlog",
         "external-implementer",
         "external-planner",
+        "external-backlog",
+        "external-reviewer",
     }
 )
 CLAUDE_ROLES = frozenset({"planner", "implementer", "checker", "reviewer", "backlog"})
@@ -76,7 +78,9 @@ READ_ONLY_ROLES = frozenset({"planner", "reviewer", "backlog"})
 # The external producer roles: a model that only reads and returns artifact text, which
 # the trusted runner validates and publishes. Their run_command argv is held to
 # READ_ONLY_PROGRAMS by check_argv, and they may not write any file.
-EXTERNAL_PRODUCER_ROLES = frozenset({"external-planner"})
+EXTERNAL_PRODUCER_ROLES = frozenset(
+    {"external-planner", "external-backlog", "external-reviewer"}
+)
 # The read-only command allowlist of an external producer role's run_command. Anything
 # else — interpreters (python, node, ...), shells, uv/uvx, env, xargs, make — is denied
 # by name, because the deny regexes alone cannot see what a program does.

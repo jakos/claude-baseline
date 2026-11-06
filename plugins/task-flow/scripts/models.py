@@ -83,7 +83,7 @@ billing = "subscription" on driver "cli"):
                               no other interpolation)
   read_only_command           same shape and placeholders as `command`, but used
                               instead of `command` by producer roles that must not
-                              write (the planner): the argv is verified read-only
+                              write (planner, backlog and reviewer): the argv is verified read-only
                               (verify_read_only_command; initially only a Codex
                               `exec --sandbox read-only` command that captures the
                               final message with -o {last_message_file} passes),
@@ -110,8 +110,7 @@ billing = "subscription" on driver "cli"):
                               (default [])
 
 [roles] keys: planner, implementer, checker, reviewer, backlog. Values: "claude",
-"claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (planner and
-implementer only), "script" (checker only: run scripts/gates.py instead of the checker
+"claude:opus", "claude:sonnet", "claude:haiku" (any role), a profile name (planner, implementer, backlog and reviewer only), "script" (checker only: run scripts/gates.py instead of the checker
 agent). The implementer key also accepts a table form, [roles.implementer] with
 `default = "<profile>"`, optional bands and complete S/M thresholds. The default
 normalizes to the same scalar value; resolve_implementer applies task-aware rules. A scalar and a table never merge across the user and project files: whichever
@@ -153,12 +152,12 @@ ROLES = {"planner", "implementer", "checker", "reviewer", "backlog"}
 # Roles that may name a [profiles.<name>] instead of a Claude value. The planner is a
 # producer role: it only reads and returns artifact text, which the trusted runner
 # publishes, so a "cli" profile serving it needs a verified read_only_command.
-PROFILE_ROLES = {"planner", "implementer"}
-PRODUCER_ROLES = {"planner"}
+PROFILE_ROLES = {"planner", "implementer", "backlog", "reviewer"}
+PRODUCER_ROLES = {"planner", "backlog", "reviewer"}
 # Strict keys of the alternative implementer table. Unknown keys remain errors.
 ROLE_TABLE_KEYS = {"implementer": {"default", "bands", "thresholds"}}
 DIMENSIONS = ("steps", "criteria", "commands", "declared_paths")
-GATES_KEYS = {"command_timeout_seconds"}
+GATES_KEYS = {"command_timeout_seconds", "reviewer_independence"}
 GATES_DEFAULT_TIMEOUT = 600
 CLAUDE_VALUES = {"claude", "claude:opus", "claude:sonnet", "claude:haiku"}
 PROMPT_VIAS = {"stdin", "file", "arg"}
@@ -168,6 +167,9 @@ USAGE_FORMATS = {"codex-jsonl", "none"}
 CLI_PLACEHOLDERS = {"worktree", "prompt_file", "last_message_file"}
 # Keys that only make sense on driver "cli" (they are refused on the API drivers).
 CLI_ONLY_KEYS = {
+    "benchmark_isolation",
+    "benchmark_version_command",
+    "subscription_monthly_usd",
     "command",
     "read_only_command",
     "timeout_seconds",
@@ -390,6 +392,13 @@ PROFILE_KEYS = {
     "usage_format": (_check_choice(USAGE_FORMATS), False, "none"),
     "pass_env": (_check_env_name_list, False, []),
     "limit_patterns": (_check_regex_list, False, []),
+    "benchmark_isolation": (
+        _check_choice({"codex", "gemini", "copilot", "opencode", "claude"}),
+        False,
+        None,
+    ),
+    "benchmark_version_command": (_check_str_list, False, None),
+    "subscription_monthly_usd": (_check_num(0), False, None),
 }
 
 
@@ -469,6 +478,12 @@ def _validate_gates(path: Path, gates) -> dict:
     for key, value in gates.items():
         if key not in GATES_KEYS:
             raise ConfigError(f"{path}: gates.{key}: unknown key")
+        if key == "reviewer_independence":
+            if value not in ("warn", "different-model", "different-provider"):
+                raise ConfigError(
+                    f"{path}: gates.{key}: use warn, different-model or different-provider"
+                )
+            continue
         try:
             _check_num(0, strict=True)(value)
         except (ValueError, TypeError) as exc:
@@ -1035,7 +1050,8 @@ def gates(project_root: Path | None = None) -> dict:
     return {
         "command_timeout_seconds": merged.get(
             "command_timeout_seconds", GATES_DEFAULT_TIMEOUT
-        )
+        ),
+        "reviewer_independence": merged.get("reviewer_independence", "warn"),
     }
 
 
@@ -1120,7 +1136,7 @@ def resolve_role_profile(
     "api", "cli" or "script"; profile is the profile name or None; billing is the
     profile's billing or "subscription (Claude Code)" / "none (script)". The
     override must name an enabled configured profile — never a free-form model or
-    command. A producer role (the planner) on a driver "cli" profile, and every
+    command. A producer role (planner, backlog and reviewer) on a driver "cli" profile, and every
     fallback in its chain, must carry a verified read_only_command. Raises
     ConfigError with file/key diagnostics.
     """

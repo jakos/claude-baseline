@@ -53,3 +53,5 @@ that task-flow's planner can each plan. You never change source files — only f
 
 Return one paragraph: the number of tasks, their dependencies, whether a bootstrap task
 was added, and whether the backlog is blocked.
+
+When the external runner supplies a transport adapter, return only the requested artifact: raw backlog Markdown for ordinary decomposition, or the exact two-member JSON envelope for repository gathering. The runner owns publication and never creates tasks from blocked output.

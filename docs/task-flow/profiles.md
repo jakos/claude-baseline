@@ -24,8 +24,8 @@ cost no context. Agents read them by path.
    `plan.md → Profiles` names it.
 
 Separate from these detection profiles, a workflow *stage* can also be delegated to an
-external model profile from `models.toml` — today the planner, via
-`[roles] planner = "<profile>"` or a one-run `--planner <profile>` — see
+external model profile from `models.toml` — planner, backlog and reviewer, via their role keys; the planner also supports
+a one-run `--planner <profile>` — see
 [External planner](external-implementer.md#external-planner-a-producer-role) and
 [Configuration](configuration.md#external-planner).
 
@@ -38,3 +38,9 @@ See [Configuration](configuration.md#deterministic-implementer-routing) for both
 alternatives and strict validation. No thresholds are enabled or recommended by default.
 Profile-specific limits and fallback chains remain unchanged; routing never promotes
 a model because a round failed.
+
+External reviewers receive the declared profiles' Review checklists and full readable
+touched files. Model profiles do not replace detection profiles or their conventions.
+Backlog/reviewer model defaults stay Claude until configured. Independence settings
+compare actual round metadata; aliases, billing and unverifiable CLI labels do not prove
+provider independence. See [reviewer configuration](configuration.md#external-backlog-and-reviewer).

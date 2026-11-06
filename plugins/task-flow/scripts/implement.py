@@ -91,6 +91,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1176,6 +1177,7 @@ def post(
     headers = driver.headers(key)
     retries = profile["retries"]
     last = "no attempt made"
+    failure = None
     for attempt in range(retries + 1):
         delay = None
         started = time.monotonic()
@@ -1200,6 +1202,7 @@ def post(
             detail = exc.read()[:300].decode("utf-8", errors="replace")
             code = exc.code
             if code in (408, 429) or code >= 500:
+                failure = {"kind": "http", "status": code, "retryable": True}
                 last = f"HTTP {code}"
                 outcome = last
                 delay = retry_after(exc.headers)
@@ -1222,6 +1225,20 @@ def post(
             OSError,
             ValueError,
         ) as exc:
+            failure = (
+                {"kind": "timeout", "retryable": True}
+                if is_timeout(exc)
+                else {"kind": "connection", "retryable": True}
+                if isinstance(
+                    exc,
+                    (ConnectionError, socket.gaierror, http.client.RemoteDisconnected),
+                )
+                or (
+                    isinstance(exc, urllib.error.URLError)
+                    and isinstance(exc.reason, (ConnectionError, socket.gaierror))
+                )
+                else None
+            )
             last = f"{type(exc).__name__}: {one_line(exc, 120)}"
             outcome = "timeout" if is_timeout(exc) else last
         if attempts is not None:
@@ -1242,7 +1259,9 @@ def post(
             if attempts is not None:
                 attempts[-1]["wait"] = wait
             time.sleep(wait)
-    raise Unavailable(f"{last} after {retries + 1} attempts")
+    error = Unavailable(f"{last} after {retries + 1} attempts")
+    error.infrastructure_failure = failure
+    raise error
 
 
 class Session:
@@ -1465,6 +1484,7 @@ class Session:
                     log(f"fallback profile {name} skipped: {skip}")
                     continue
             self.active = name
+            self.infrastructure_failure = None
             status, reason = self.run_profile(name, profile, interrupted)
             self.chain.append(
                 {
@@ -1527,6 +1547,9 @@ class Session:
                             profile, key, self.body(profile, conversation), attempts
                         )
                 except Unavailable as exc:
+                    self.infrastructure_failure = getattr(
+                        exc, "infrastructure_failure", None
+                    )
                     self.note_attempts(name, attempts, self.turns + 1)
                     return "unavailable", str(exc)
                 except Fatal as exc:
@@ -1765,6 +1788,7 @@ class Session:
             secrets,
         )
         if result.timed_out:
+            self.infrastructure_failure = {"kind": "process_timeout", "retryable": True}
             return (
                 "failed",
                 f"{name}: timed out after {profile['timeout_seconds']:g} s and was killed"
@@ -1819,6 +1843,7 @@ def write_metrics(
         "duration_seconds": round(time.monotonic() - started, 3),
         "status": status,
         "reason": reason,
+        "infrastructure_failure": getattr(session, "infrastructure_failure", None),
         "fallback_chain": session.chain,
         "settings": session.settings(),
         "files_changed": files,

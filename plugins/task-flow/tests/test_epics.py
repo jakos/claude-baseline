@@ -1013,6 +1013,50 @@ class SpendTest(Fixture):
         self.task("b", "escalated", round_n="3", verdict="CHANGES_REQUESTED")
         self.epic(epic_text(state="paused", active_run="r1"))
 
+    def test_backlog_and_reviewer_spend_scope_survive_resume(self) -> None:
+        import json
+
+        self.run_md(
+            state="paused",
+            rows=(("1", "a", "-", "1000", "0"), ("2", "b", "a", "0", "0")),
+        )
+        run = self.root / ".work/_autopilot/r1"
+        path = run / "run.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "- budget:", "- budget-scope: all\n- budget:"
+            ),
+            encoding="utf-8",
+        )
+        (run / "role-backlog-gather.json").write_text(
+            json.dumps(
+                {
+                    "schema": "role-metrics/1",
+                    "role": "backlog",
+                    "invocation_id": "gather",
+                    "cost_usd": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.root / ".work/a/role-reviewer-r1.json").write_text(
+            json.dumps(
+                {
+                    "schema": "role-metrics/1",
+                    "role": "reviewer",
+                    "invocation_id": "r1",
+                    "cost_usd": None,
+                    "cost_known_usd": 0.5,
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = self.out("status", ".", "demo")
+        self.assertIn("- external USD: at least 1.50", out)
+        self.assertIn("- backlog USD: 1.000000", out)
+        self.assertIn("- budget-scope: all", out)
+        self.assertEqual(out, self.out("status", ".", "demo"))
+
     def test_status_totals_include_planning_tokens(self):
         self.run_md(
             state="paused",
