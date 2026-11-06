@@ -144,7 +144,16 @@ class BenchFixture(unittest.TestCase):
 
     def git(self, cwd, *args, check=True):
         done = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            [
+                "git",
+                "-C",
+                str(cwd),
+                "-c",
+                "user.name=bench-test",
+                "-c",
+                "user.email=bench-test@example.invalid",
+                *args,
+            ],
             capture_output=True,
             encoding="utf-8",
             timeout=60,

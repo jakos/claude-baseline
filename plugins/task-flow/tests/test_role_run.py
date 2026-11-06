@@ -1168,7 +1168,7 @@ class ReadRolesTest(Base):
 
         def resolve(path: Path, *args, **kwargs) -> Path:
             # Exercise canonical-path policy even on Windows without symlink privileges.
-            if path == touched:
+            if original_resolve(path) == original_resolve(touched):
                 return repo.task / "status.md"
             return original_resolve(path, *args, **kwargs)
 
