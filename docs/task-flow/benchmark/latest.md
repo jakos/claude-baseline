@@ -56,43 +56,44 @@ Legacy version-1 publication predates the per-round probe. Version 2 requires a 
 
 ## S
 
-| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted |
-|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
-| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 1/1 | 518,138 / 478,208 / 18,325 | $0.0999 ($0.0999–$0.0999) | $0.0999 |
-| mistral-small | mistral-small-2603 | 1 | 0/1 (0%) | 0 | 0/1 | n/a (0 accepted) | $0.1089 ($0.1089–$0.1089) | n/a (0 accepted) |
-| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 1/1 | 1,716,338 / 1,066,752 / 36,766 | $0.1478 ($0.1478–$0.1478) | $0.1478 |
-| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 1/1 | 584,038 / 558,464 / 7,890 | $0.0210 ($0.0210–$0.0210) | $0.0210 |
+| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted | Seconds per run, median (min-max) |
+|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 1/1 | 518,138 / 478,208 / 18,325 | $0.0999 ($0.0999–$0.0999) | $0.0999 | 191.4 (191.4–191.4); time to accepted; single sample; merged run |
+| mistral-small | mistral-small-2603 | 1 | 0/1 (0%) | 0 | 0/1 | n/a (0 accepted) | $0.1089 ($0.1089–$0.1089) | n/a (0 accepted) | 689.5 (689.5–689.5); 0 accepted; time until stop; single sample; merged run; mixed turn limits |
+| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 1/1 | 1,716,338 / 1,066,752 / 36,766 | $0.1478 ($0.1478–$0.1478) | $0.1478 | 1323.4 (1323.4–1323.4); time to accepted; single sample; merged run; mixed turn limits |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 1/1 | 584,038 / 558,464 / 7,890 | $0.0210 ($0.0210–$0.0210) | $0.0210 | 101.3 (101.3–101.3); time to accepted; single sample; merged run; mixed turn limits |
 
 ## M
 
-| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted |
-|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
-| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 1/1 | 669,263 / 621,824 / 21,209 | $0.1213 ($0.1213–$0.1213) | $0.1213 |
-| mistral-small | mistral-small-2603 | 1 | 1/1 (100%) | 3 | 1/1 | 3,479,045 / 3,272,640 / 55,132 | $0.1131 ($0.1131–$0.1131) | $0.1131 |
-| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 1/1 | 2,005,164 / 1,410,048 / 40,084 | $0.1516 ($0.1516–$0.1516) | $0.1516 |
-| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 1/1 | 600,710 / 568,448 / 7,707 | $0.0229 ($0.0229–$0.0229) | $0.0229 |
+| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted | Seconds per run, median (min-max) |
+|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 1/1 | 669,263 / 621,824 / 21,209 | $0.1213 ($0.1213–$0.1213) | $0.1213 | 247.1 (247.1–247.1); time to accepted; single sample; merged run |
+| mistral-small | mistral-small-2603 | 1 | 1/1 (100%) | 3 | 1/1 | 3,479,045 / 3,272,640 / 55,132 | $0.1131 ($0.1131–$0.1131) | $0.1131 | 621.3 (621.3–621.3); time to accepted; single sample; merged run; mixed turn limits |
+| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 1/1 | 2,005,164 / 1,410,048 / 40,084 | $0.1516 ($0.1516–$0.1516) | $0.1516 | 693.1 (693.1–693.1); time to accepted; single sample; merged run; mixed turn limits |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 1/1 | 600,710 / 568,448 / 7,707 | $0.0229 ($0.0229–$0.0229) | $0.0229 | 107.2 (107.2–107.2); time to accepted; single sample; merged run; mixed turn limits |
 
 ## L
 
-| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted |
-|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
-| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 0/1 | 3,113,615 / 3,002,880 / 59,370 | $0.4124 ($0.4124–$0.4124) | $0.4124 |
-| mistral-small | mistral-small-2603 | 1 | 0/1 (0%) | 0 | 0/1 | n/a (0 accepted) | $0.1120 ($0.1120–$0.1120) | n/a (0 accepted) |
-| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 0/1 | 14,886,663 / 12,676,608 / 165,597 | $0.7946 ($0.7946–$0.7946) | $0.7946 |
-| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 0/1 | 2,491,769 / 2,420,736 / 24,946 | $0.0682 ($0.0682–$0.0682) | $0.0682 |
+| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted | Seconds per run, median (min-max) |
+|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 1 | 1/1 (100%) | 1 | 0/1 | 3,113,615 / 3,002,880 / 59,370 | $0.4124 ($0.4124–$0.4124) | $0.4124 | 660.7 (660.7–660.7); time to accepted; single sample; merged run |
+| mistral-small | mistral-small-2603 | 1 | 0/1 (0%) | 0 | 0/1 | n/a (0 accepted) | $0.1120 ($0.1120–$0.1120) | n/a (0 accepted) | 410.9 (410.9–410.9); 0 accepted; time until stop; single sample; merged run; mixed turn limits |
+| glm-flash | zai-glm-5-3-flash | 1 | 1/1 (100%) | 1 | 0/1 | 14,886,663 / 12,676,608 / 165,597 | $0.7946 ($0.7946–$0.7946) | $0.7946 | 2593.6 (2593.6–2593.6); time to accepted; single sample; merged run; mixed turn limits |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 1 | 1/1 (100%) | 1 | 0/1 | 2,491,769 / 2,420,736 / 24,946 | $0.0682 ($0.0682–$0.0682) | $0.0682 | 325.3 (325.3–325.3); time to accepted; single sample; merged run; mixed turn limits |
 
 ## All
 
-| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted |
-|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
-| mistral-large | mistral-large-4-0 | 3 | 3/3 (100%) | 1 | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.1213 ($0.0999–$0.4124) | $0.2112 |
-| mistral-small | mistral-small-2603 | 3 | 1/3 (33%) | 3 | 1/3 | 11,666,879 / 11,073,632 / 131,571 | $0.1120 ($0.1089–$0.1131) | $0.3340 |
-| glm-flash | zai-glm-5-3-flash | 3 | 3/3 (100%) | 1 | 2/3 | 6,202,722 / 5,051,136 / 80,816 | $0.1516 ($0.1478–$0.7946) | $0.3647 |
-| deepseek-flash | deepseek-v4-1-flash-1017 | 3 | 3/3 (100%) | 1 | 2/3 | 1,225,506 / 1,182,549 / 13,514 | $0.0229 ($0.0210–$0.0682) | $0.0374 |
+| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | Tokens per accepted (in / cached / out) | Cost per run median (min–max) | Cost per accepted | Seconds per run, median (min-max) |
+|  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 3 | 3/3 (100%) | 1 | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.1213 ($0.0999–$0.4124) | $0.2112 | 247.1 (191.4–660.7); time to accepted; merged run |
+| mistral-small | mistral-small-2603 | 3 | 1/3 (33%) | 3 | 1/3 | 11,666,879 / 11,073,632 / 131,571 | $0.1120 ($0.1089–$0.1131) | $0.3340 | 621.3 (621.3–621.3); time to accepted; single sample; merged run; mixed turn limits |
+| glm-flash | zai-glm-5-3-flash | 3 | 3/3 (100%) | 1 | 2/3 | 6,202,722 / 5,051,136 / 80,816 | $0.1516 ($0.1478–$0.7946) | $0.3647 | 1323.4 (693.1–2593.6); time to accepted; merged run; mixed turn limits |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 3 | 3/3 (100%) | 1 | 2/3 | 1,225,506 / 1,182,549 / 13,514 | $0.0229 ($0.0210–$0.0682) | $0.0374 | 107.2 (101.3–325.3); time to accepted; merged run; mixed turn limits |
 
 ## Notes
 
 - no reviewer ran, so review cost is 0 (`--review` was off)
+- Times use total wall seconds, to one decimal: accepted rows only (time to accepted), or all non-skipped finished rows when none accepted (0 accepted; time until stop); empty populations are n/a. Acceptance is separate from hidden pass. Elapsed time includes provider and network latency, rate-limit waits and retries when they occur; configured retry counts do not establish observed attempts. Provider load, turn counts and time of day affect timings; repeated cells can vary. Compare times only within one published run's table, never across days. Overlapping model min-max spreads do not support an ordering; non-overlap alone does not establish one. Merged runs and mixed turn limits prevent strict like-for-like comparisons. All pools different cases, not identical repeats. With one repeat each case/profile cell's time is a single sample, not a measurement of typical performance, even when All pools several cases. UTC row start window: 2026-11-02T08:47:50Z to 2026-11-02T13:31:24Z (first to last available non-skipped start, not completion).
 - this run merges rows of the runs `first-pass-2`, `rerun-100-turns`, `rerun-small-task-list`; each row records its `source_run` in the saved results.jsonl
 - profile `mistral-small` ran with different turn limits (2 row(s) at 100 turns, 1 row(s) at 60 turns); rows are not strictly like for like
 - profile `glm-flash` ran with different turn limits (1 row(s) at 100 turns, 2 row(s) at 60 turns); rows are not strictly like for like

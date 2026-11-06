@@ -169,12 +169,14 @@ Repeat evidence: exploratory; minimum five completed independent repeats per cas
 
 Version 1 predates the per-round probe; version 2 requires a new baseline.
 
-| Profile | Model | Accepted | Hidden pass | Tokens per accepted (in / cached / out) | Cost per accepted |
-|  --- |  --- |  --- |  --- |  --- | --- |
-| mistral-large | mistral-large-4-0 | 3/3 (100%) | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.2112 |
-| mistral-small | mistral-small-2603 | 1/3 (33%) | 1/3 | 11,666,879 / 11,073,632 / 131,571 | $0.3340 |
-| glm-flash | zai-glm-5-3-flash | 3/3 (100%) | 2/3 | 6,202,722 / 5,051,136 / 80,816 | $0.3647 |
-| deepseek-flash | deepseek-v4-1-flash-1017 | 3/3 (100%) | 2/3 | 1,225,506 / 1,182,549 / 13,514 | $0.0374 |
+| Profile | Model | Accepted | Hidden pass | Tokens per accepted (in / cached / out) | Cost per accepted | Seconds per run, median (min-max) |
+|  --- |  --- |  --- |  --- |  --- |  --- | --- |
+| mistral-large | mistral-large-4-0 | 3/3 (100%) | 2/3 | 1,433,672 / 1,367,637 / 32,968 | $0.2112 | 247.1 (191.4–660.7); time to accepted; merged run |
+| mistral-small | mistral-small-2603 | 1/3 (33%) | 1/3 | 11,666,879 / 11,073,632 / 131,571 | $0.3340 | 621.3 (621.3–621.3); time to accepted; single sample; merged run; mixed turn limits |
+| glm-flash | zai-glm-5-3-flash | 3/3 (100%) | 2/3 | 6,202,722 / 5,051,136 / 80,816 | $0.3647 | 1323.4 (693.1–2593.6); time to accepted; merged run; mixed turn limits |
+| deepseek-flash | deepseek-v4-1-flash-1017 | 3/3 (100%) | 2/3 | 1,225,506 / 1,182,549 / 13,514 | $0.0374 | 107.2 (101.3–325.3); time to accepted; merged run; mixed turn limits |
+
+Times use total wall seconds, to one decimal: accepted rows only (time to accepted), or all non-skipped finished rows when none accepted (0 accepted; time until stop); empty populations are n/a. Acceptance is separate from hidden pass. Elapsed time includes provider and network latency, rate-limit waits and retries when they occur; configured retry counts do not establish observed attempts. Provider load, turn counts and time of day affect timings; repeated cells can vary. Compare times only within one published run's table, never across days. Overlapping model min-max spreads do not support an ordering; non-overlap alone does not establish one. Merged runs and mixed turn limits prevent strict like-for-like comparisons. All pools different cases, not identical repeats. With one repeat each case/profile cell's time is a single sample, not a measurement of typical performance, even when All pools several cases. UTC row start window: 2026-11-02T08:47:50Z to 2026-11-02T13:31:24Z (first to last available non-skipped start, not completion).
 
 Note: this run merges rows of the runs `first-pass-2`, `rerun-100-turns`, `rerun-small-task-list`; each row records its `source_run` in the saved results.jsonl
 

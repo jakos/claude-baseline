@@ -407,6 +407,33 @@ spread meaningful, so add repeats only after the first pass is affordable.
   their fingerprint and harness version are equal; with no saved runs the table reads
   `No saved runs yet.`
 
+Published tables and the README show `Seconds per run, median (min-max)` from
+saved total `seconds`, not `implement_seconds`, rounded to one decimal place.
+For each profile and size (including All), accepted rows supply the median,
+minimum and maximum and the label `time to accepted`. Acceptance follows the
+existing outcome and is independent of hidden-test success. When none accepted,
+all non-skipped finished rows supply `0 accepted; time until stop`; this can
+include early failures and does not describe successful completion. Empty
+populations show `n/a`. Skipped rows never supply a time.
+
+Total wall time includes provider and network latency, rate-limit waits and
+retries when they occur. Configured retry counts are not observed retry attempts.
+Provider load, turn counts and time of day affect elapsed time, so repeated cells
+can vary. The UTC start window runs from the first to the last available
+non-skipped row start, not the end of execution. Missing timestamps are reported
+as incomplete coverage or an unavailable window; no starts are inferred.
+
+With one repeat, each case/profile cell's time is a single sample, not a
+measurement of typical performance. All pools different cases, even with one
+repeat; these are not identical repeat samples. A displayed population containing
+only one row is labelled `single sample` even in a run configured for more repeats.
+Compare times only within one published run's table, never across days.
+Overlapping model min-max spreads do not support an ordering; non-overlap alone
+also does not establish one. Merged rows reuse source work and cannot support
+strict like-for-like comparisons. The time figures carry `merged run` and,
+for affected profiles, `mixed turn limits` markers beside them; consult the
+source-run and turn-limit notes before interpreting the table.
+
 ## When to re-run
 
 Re-run when something measured changes: a new model or a new price, a new profile, or a

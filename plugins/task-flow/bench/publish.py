@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -61,7 +62,7 @@ REQUIRED_RUN_KEYS = (
 TABLE_HEADER = (
     "| Profile | Model | Runs | Accepted | Rounds (median) | Hidden pass | "
     "Tokens per accepted (in / cached / out) | Cost per run median (min–max) | "
-    "Cost per accepted |"
+    "Cost per accepted | Seconds per run, median (min-max) |"
 )
 CHART_WIDTH = 760
 CHART_BAR_X = 180
@@ -184,6 +185,19 @@ def check_comparable(meta: dict, rows: list) -> None:
 def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dict:
     accepted = [r for r in prows if r["outcome"] == "accepted"]
     done = [r for r in prows if r["outcome"] != "skipped"]
+    # Total wall time follows acceptance, independently of hidden-test results.
+    # Only when nothing was accepted do finished failures describe time until stop.
+    population = accepted if accepted else done
+    seconds = [r["seconds"] for r in population]
+    time_text = "n/a"
+    if seconds:
+        label = "time to accepted" if accepted else "0 accepted; time until stop"
+        time_text = (
+            f"{bench.median(seconds):.1f} ({min(seconds):.1f}–{max(seconds):.1f})"
+            f"; {label}"
+        )
+        if len(seconds) == 1:
+            time_text += "; single sample"
     runs = len(prows)
     pct = (100 * len(accepted)) // runs if runs else 0
     reasons: list[str] = []
@@ -238,6 +252,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         per_accepted, cost_label = None, "n/a (0 accepted)"
     return {
         "profile": name,
+        "time_text": time_text,
         "label": name + (" (partial)" if partial else ""),
         "model": model,
         "billing": billing,
@@ -337,6 +352,19 @@ def summarize(meta: dict, rows: list) -> dict:
                 f"profile `{cell['profile']}` is partial — {'; '.join(cell['partial_reasons'])}"
             )
     merged_from = meta.get("merged_from")
+    for cells in tables.values():
+        for cell in cells:
+            if merged_from:
+                cell["time_text"] += "; merged run"
+            limits = {
+                (r.get("settings") or {}).get("max_turns")
+                for r in rows
+                if r["profile"] == cell["profile"] and r["outcome"] != "skipped"
+            }
+            if len(limits) > 1:
+                cell["time_text"] += "; mixed turn limits"
+    time_note = _time_note(rows, repeat)
+    notes.append(time_note)
     if merged_from:
         notes.append(
             "this run merges rows of the runs "
@@ -379,6 +407,7 @@ def summarize(meta: dict, rows: list) -> dict:
         "all": all_cells,
         "profile_info": profile_info,
         "notes": notes,
+        "time_note": time_note,
         "failures": failures,
         "rows": rows,
         "chart_alt": chart_alt,
@@ -388,6 +417,49 @@ def summarize(meta: dict, rows: list) -> dict:
 
 
 # ---------------------------------------------------------------------------- rendering (P4–P8)
+
+
+def _time_note(rows: list[dict], repeat: int) -> str:
+    text = (
+        "Times use total wall seconds, to one decimal: accepted rows only (time to "
+        "accepted), or all non-skipped finished rows when none accepted (0 accepted; "
+        "time until stop); empty populations are n/a. Acceptance is separate from hidden pass. "
+        "Elapsed time includes provider and network latency, rate-limit waits and retries "
+        "when they occur; configured retry counts do not establish observed attempts. "
+        "Provider load, turn counts and time of day affect timings; repeated cells can vary. "
+        "Compare times only within one published run's table, never across days. "
+        "Overlapping model min-max spreads do not support an ordering; non-overlap alone "
+        "does not establish one. Merged runs and mixed turn limits prevent strict "
+        "like-for-like comparisons. All pools different cases, not identical repeats. "
+    )
+    if repeat == 1:
+        text += (
+            "With one repeat each case/profile cell's time is a single sample, not a "
+            "measurement of typical performance, even when All pools several cases. "
+        )
+    else:
+        text += "Any displayed population of one is labelled single sample. "
+    finished = [r for r in rows if r["outcome"] != "skipped"]
+    starts = []
+    for row in finished:
+        value = row.get("started_at")
+        if value:
+            try:
+                start = datetime.fromisoformat(value)
+            except ValueError:
+                continue
+            if start.tzinfo is not None:
+                starts.append(start.astimezone(UTC))
+    if starts:
+        first, last = (
+            v.isoformat().replace("+00:00", "Z") for v in (min(starts), max(starts))
+        )
+        text += f"UTC row start window: {first} to {last} (first to last available non-skipped start, not completion)."
+        if len(starts) < len(finished):
+            text += f" Incomplete timestamp coverage: {len(starts)}/{len(finished)} non-skipped rows."
+    else:
+        text += "UTC row start window unavailable: no timestamp coverage for non-skipped rows."
+    return text
 
 
 def replace_block(text: str, start: str, end: str, body: str) -> str:
@@ -449,13 +521,13 @@ def parse_page_meta(text: str) -> dict | None:
 
 
 def _table_lines(cells: list) -> list[str]:
-    lines = [TABLE_HEADER, "| " + " --- | " * 8 + "--- |"]
+    lines = [TABLE_HEADER, "| " + " --- | " * 9 + "--- |"]
     for cell in cells:
         lines.append(
             f"| {cell['label']} | {cell['model']} | {cell['runs']} | "
             f"{cell['accepted_text']} | {cell['rounds_text']} | {cell['hidden_pass']} | "
             f"{cell['tokens_text']} | {cell['cost_per_run_text']} | "
-            f"{cell['cost_per_accepted_text']} |"
+            f"{cell['cost_per_accepted_text']} | {cell['time_text']} |"
         )
     return lines
 
@@ -697,15 +769,17 @@ def render_readme_block(summary: dict, rel: str) -> str:
     lines.append("")
     lines.append(
         "| Profile | Model | Accepted | Hidden pass | "
-        "Tokens per accepted (in / cached / out) | Cost per accepted |"
+        "Tokens per accepted (in / cached / out) | Cost per accepted | "
+        "Seconds per run, median (min-max) |"
     )
-    lines.append("| " + " --- | " * 5 + "--- |")
+    lines.append("| " + " --- | " * 6 + "--- |")
     for cell in summary["all"]:
         lines.append(
             f"| {cell['label']} | {cell['model']} | {cell['accepted_text']} | "
             f"{cell['hidden_pass']} | {cell['tokens_text']} | "
-            f"{cell['cost_per_accepted_text']} |"
+            f"{cell['cost_per_accepted_text']} | {cell['time_text']} |"
         )
+    lines.extend(["", summary["time_note"]])
     for note in summary.get("notes", []):
         if note.startswith("this run merges") or "different turn limits" in note:
             lines.append("")
