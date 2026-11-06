@@ -154,6 +154,10 @@ def newest_run(results_dir) -> str | None:
 def check_comparable(meta: dict, rows: list) -> None:
     """P2a: one fingerprint and harness version across the rows, equal to run.json's."""
     run_id = meta.get("run_id", "?")
+    try:
+        bench.check_cli_comparable(rows, meta)
+    except bench.BenchError as exc:
+        raise PublishError(str(exc)) from exc
     if any(r.get("review", meta["review"]) != meta["review"] for r in rows):
         raise PublishError(f"run {run_id} mixes review modes")
     fingerprints = {str(row.get("fingerprint", "")) for row in rows}
@@ -194,7 +198,7 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         )
     partial = bool(reasons)
     tokens = None
-    if accepted:
+    if accepted and all(r.get("tokens") is not None for r in done):
         tokens = {}
         for kind in ("input", "cached", "output"):
             total = sum(
@@ -246,6 +250,8 @@ def _profile_cell(name: str, prows: list, group_cases: list, repeat: int) -> dic
         "tokens_text": (
             " / ".join(f"{tokens[kind]:,}" for kind in ("input", "cached", "output"))
             if tokens
+            else "unknown"
+            if accepted
             else "n/a (0 accepted)"
         ),
         "cost_known": known,
@@ -305,6 +311,8 @@ def summarize(meta: dict, rows: list) -> dict:
         tokens_text = (
             f"in {tokens['input']:,}, cached {tokens['cached']:,}, out {tokens['output']:,}"
             if tokens
+            else "unknown"
+            if cell["accepted"]
             else "n/a (0 accepted)"
         )
         chart_parts.append(
@@ -504,6 +512,7 @@ def render_latest(summary: dict, prev: dict | None) -> str:
             "not comparable with earlier runs."
         )
         lines.append("")
+    lines.extend(bench.provenance_report(summary["rows"], summary))
     lines.extend(bench.protocol_report(summary["rows"], summary))
     lines += [f"![{summary['chart_alt']}](latest.svg)", ""]
     for size in [*summary["sizes"], "All"]:
@@ -604,7 +613,7 @@ def render_chart(summary: dict) -> str:
                 f"· out {cell['tokens']['output']:,}"
             )
         else:
-            value = "n/a (0 accepted)"
+            value = "unknown" if cell["accepted"] else "n/a (0 accepted)"
         out.append(
             f'    <text x="{CHART_VALUE_X}" y="{y + 13}" font-family="{CHART_FONT}" '
             f'font-size="12" fill="{TEXT_COLOR}">{escape(value)}</text>'

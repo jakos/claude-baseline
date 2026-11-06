@@ -18,6 +18,17 @@
 - fingerprint: `sha256:dbd92482d92322582311aadf791120363e2f61aa46aaa6ed9cae3850543aa91e`
 - task-flow version: 0.12.0
 
+## Tool provenance and accounting
+
+Plan fees are contextual, never measured per-run charges. Unknown marginal cost stays unknown.
+
+| Profile | Tool / version | Isolation / limitations | API implementation spend USD | Subscription marginal USD | Plan USD/month (context) |
+| --- | --- | --- | --- | --- | --- |
+| mistral-large | unknown / unknown | unknown | 0.633575 | unknown | unknown |
+| mistral-small | unknown / unknown | unknown | 0.334034 | unknown | unknown |
+| glm-flash | unknown / unknown | unknown | 1.09404 | unknown | unknown |
+| deepseek-flash | unknown / unknown | unknown | 0.112145 | unknown | unknown |
+
 ## Per-case repeat evidence
 
 Total known work: USD 2.17379; tokens 72643642; wall seconds 7964.78; 0 interrupted attempt records; billing known.

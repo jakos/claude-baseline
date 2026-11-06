@@ -99,6 +99,100 @@ prompt_extras = []                     # files whose contents are appended to th
 # max_tokens_param = "max_tokens"
 # extra_body = {}
 
+# Benchmark-only preset examples, in run priority order. All remain disabled.
+# Documentation checked 2026-11-06; authenticated test: untested (ALL five).
+# Read bench/README.md's tool/authentication matrix before enabling any preset.
+# Pin an installed CLI build yourself; provenance records its actual --version and
+# executable digest and refuses changed versions on resume/extension.
+# benchmark_isolation is consumed only by bench.py with --cli-state-dir. It selects
+# per-cell HOME/XDG/tool directories; ordinary implementer defaults are unchanged.
+# benchmark_version_command is an optional argv override (default: tool --version).
+# subscription_monthly_usd is optional contextual plan pricing, NEVER run spend.
+# Never put credentials in command/config; provision auth by the documented route.
+
+# Codex first, before 2026-11-25. Documented ChatGPT account workflow; untested.
+# User logs into each cell's CODEX_HOME with file credential storage; no auth copied.
+# [profiles.bench-codex]
+# driver = "cli"
+# model = "gpt-5.2-codex"
+# billing = "subscription"
+# command = ["codex", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-c", 'cli_auth_credentials_store="file"', "-m", "gpt-5.2-codex", "-"]
+# prompt_via = "stdin"
+# usage_format = "codex-jsonl"
+# benchmark_isolation = "codex"
+# benchmark_version_command = ["codex", "--version"]
+# timeout_seconds = 900
+# pass_env = []
+# limit_patterns = ['(?i)usage limit', '(?i)quota exhausted']
+# fallback = []
+# enabled = false
+# subscription_monthly_usd = 20.0 # illustration only: replace with actual plan fee
+
+# Gemini CLI: documented API-key route; Google-login subscription unresolved.
+# Documentation checked 2026-11-06; authenticated test: untested.
+# [profiles.bench-gemini]
+# driver = "cli"
+# model = "gemini-2.5-pro"
+# billing = "api"
+# api_key_env = "GEMINI_API_KEY"
+# pass_env = ["GEMINI_API_KEY"]
+# command = ["gemini", "-p", "Implement the task supplied on stdin.", "--approval-mode", "yolo", "--model", "gemini-2.5-pro"]
+# prompt_via = "stdin"
+# usage_format = "none"
+# benchmark_isolation = "gemini"
+# timeout_seconds = 900
+# fallback = []
+# enabled = false
+
+# Copilot CLI: unresolved subscription terms; NOT available to the manual checklist.
+# Documentation checked 2026-11-06; authenticated test: untested.
+# A native executable is required for arg transport on Windows; .cmd/.bat refuses.
+# [profiles.bench-copilot]
+# driver = "cli"
+# model = "claude-sonnet-4.5"
+# billing = "subscription"
+# pass_env = ["COPILOT_GITHUB_TOKEN"]
+# command = ["copilot", "--allow-all-tools", "--model", "claude-sonnet-4.5", "-p"]
+# prompt_via = "arg"
+# usage_format = "none" # JSON output is JSONL; no Copilot usage parser is supplied
+# benchmark_isolation = "copilot"
+# timeout_seconds = 900
+# fallback = []
+# enabled = false
+
+# OpenCode: OpenAI API key only; own Go/Zen and upstream subscriptions unresolved.
+# Documentation checked 2026-11-06; authenticated test: untested.
+# Native executable on Windows: arg transport cannot use an npm .cmd/.bat shim.
+# [profiles.bench-opencode]
+# driver = "cli"
+# model = "openai/gpt-5.2-codex"
+# billing = "api"
+# api_key_env = "OPENAI_API_KEY"
+# pass_env = ["OPENAI_API_KEY"]
+# command = ["opencode", "run", "--model", "openai/gpt-5.2-codex"]
+# prompt_via = "arg"
+# usage_format = "none"
+# benchmark_isolation = "opencode"
+# timeout_seconds = 900
+# fallback = []
+# enabled = false
+
+# Claude: API-key route only; automated subscription route unresolved here.
+# Documentation checked 2026-11-06; authenticated test: untested.
+# [profiles.bench-claude]
+# driver = "cli"
+# model = "claude-sonnet-4-5-20250929"
+# billing = "api"
+# api_key_env = "ANTHROPIC_API_KEY"
+# pass_env = ["ANTHROPIC_API_KEY"]
+# command = ["claude", "-p", "--model", "claude-sonnet-4-5-20250929", "--allowedTools", "Read,Edit,Write,Bash"]
+# prompt_via = "stdin"
+# usage_format = "none"
+# benchmark_isolation = "claude"
+# timeout_seconds = 900
+# fallback = []
+# enabled = false
+
 [roles]
 # One key per task-flow role. Each value is one of:
 #   "claude"                  run the Claude subagent; its agent file's model frontmatter applies

@@ -167,6 +167,9 @@ USAGE_FORMATS = {"codex-jsonl", "none"}
 CLI_PLACEHOLDERS = {"worktree", "prompt_file", "last_message_file"}
 # Keys that only make sense on driver "cli" (they are refused on the API drivers).
 CLI_ONLY_KEYS = {
+    "benchmark_isolation",
+    "benchmark_version_command",
+    "subscription_monthly_usd",
     "command",
     "read_only_command",
     "timeout_seconds",
@@ -389,6 +392,13 @@ PROFILE_KEYS = {
     "usage_format": (_check_choice(USAGE_FORMATS), False, "none"),
     "pass_env": (_check_env_name_list, False, []),
     "limit_patterns": (_check_regex_list, False, []),
+    "benchmark_isolation": (
+        _check_choice({"codex", "gemini", "copilot", "opencode", "claude"}),
+        False,
+        None,
+    ),
+    "benchmark_version_command": (_check_str_list, False, None),
+    "subscription_monthly_usd": (_check_num(0), False, None),
 }
 
 

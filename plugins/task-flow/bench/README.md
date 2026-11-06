@@ -29,6 +29,44 @@ uv run --script plugins/task-flow/bench/bench.py <command>
 
 ## Cases
 
+### CLI tool/authentication matrix (checked 2026-11-06)
+
+All authenticated tests: **untested**. These are interface and terms checks, not
+permission inferred from a login. Recheck the linked terms for the actual account
+before confirming a run. Unresolved subscription routes are excluded from the
+manual checklist until resolved.
+
+| Tool | Headless command / output | Configuration isolation | Authentication, billing and scripted subscription status |
+| --- | --- | --- | --- |
+| Codex | [`codex exec`, stdin `-`, `--json`](https://learn.chatgpt.com/docs/non-interactive-mode); Codex JSONL parser | [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables), file credential store; OS policies and repository instructions still apply | [User runs `codex login` in the isolated home](https://learn.chatgpt.com/docs/auth), using ChatGPT; noninteractive account workflows are documented. [Plan quota/credits](https://learn.chatgpt.com/docs/pricing), not a measured dollar charge. API-key login is a separate API route. Account/admin restrictions still require user review. |
+| Gemini CLI | [`gemini -p`, stdin context, text / JSON / stream-json](https://geminicli.com/docs/cli/headless/); preset uses text, usage unknown | [`GEMINI_CLI_HOME`](https://geminicli.com/docs/reference/configuration/); system/project configuration remains possible | [`GEMINI_API_KEY` or cached Google login](https://geminicli.com/docs/get-started/authentication/). [Quotas/prices](https://geminicli.com/docs/resources/quota-and-pricing/) and [terms differ by auth route](https://geminicli.com/docs/resources/tos-privacy/). API key is the proposed test route; subscription Google-login automation remains unresolved here and is excluded. |
+| Copilot CLI | [`copilot -p`, `--output-format json` emits JSONL](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference); no usage parser | [`COPILOT_HOME`](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference), auto-update disabled; managed settings remain | User provisions `COPILOT_GITHUB_TOKEN` through GitHub's documented authentication. [Plan allowances/billing](https://docs.github.com/en/copilot/get-started/plans) apply. Programmatic operation is documented, but this benchmark's subscription terms review is unresolved; excluded from checklist pending account-specific review of [GitHub terms](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service). |
+| OpenCode | [`opencode run`, text / JSON events](https://opencode.ai/docs/cli/); no usage parser | [XDG configuration](https://opencode.ai/docs/config/), separate data/cache/state directories; project/system configuration remains | [Providers and authentication](https://opencode.ai/docs/providers/) are separate contracts. OpenCode's own Go/Zen service is not an upstream subscription entitlement. Proposed route: user-provided OpenAI API key, API billing. OpenCode Go/Zen and every upstream OAuth/subscription route remain unresolved for this checklist; none is recommended by a working login. |
+| Claude | [`claude -p`, stdin, text / JSON / stream-json](https://code.claude.com/docs/en/headless); no usage parser | [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/settings); managed/project settings still apply | Proposed route: user-provided `ANTHROPIC_API_KEY`, API billing. [Costs](https://code.claude.com/docs/en/costs) distinguish plan and API usage; [legal guidance](https://code.claude.com/docs/en/legal-and-compliance) identifies applicable agreements. Pro/Max automated subscription route remains unresolved here and excluded pending terms review. |
+
+Only official CLI clients are proposed. No third-party adapter receives subscription
+credentials. Provider terms, quotas and pricing can change independently of CLI
+flags. No numeric subscription fee is assumed: record the user's actual plan fee
+as contextual information, never as measured marginal run spending.
+
+Additional checked evidence: [Copilot authentication](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)
+documents user-owned fine-grained PATs with Copilot Requests permission (classic PATs
+are unsupported); [additional product terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features#github-copilot)
+select different agreements by purchaser/account. OpenCode's own [Go pricing](https://opencode.ai/docs/go/),
+[Zen model pricing](https://opencode.ai/docs/zen/) and [service terms](https://opencode.ai/legal/terms-of-service)
+do not grant upstream provider subscription rights. No Go/Zen or upstream subscription
+route is cleared here. Codex's [automation guidance](https://learn.chatgpt.com/docs/non-interactive-mode)
+distinguishes invocation-scoped API keys from advanced account-auth CI workflows,
+and excludes the latter workflow for public/open-source repositories. This checklist
+is for local user-run native CLI sessions, not CI credential seeding; unresolved
+account or organizational restrictions still exclude a route from execution.
+Codex's applicable [Terms of Use](https://openai.com/policies/terms-of-use/)
+and [Service Terms](https://openai.com/policies/service-terms/#4-codex-and-code-generation)
+also govern the documented native-client workflow; the former links regional and
+business agreements. The interface documentation does not override those agreements
+or authorize credential sharing, scraping or quota circumvention. Resolve any
+account-specific conflict before including that route in the confirmed run.
+
 The suite currently has three frozen cases, all built from finished tasks of this
 repository:
 
@@ -156,7 +194,7 @@ uv run --script plugins/task-flow/bench/bench.py run \
     --profiles a,b [--cases id,id|all] [--repeat N] [--max-cost-usd X] [--review] \
     [--review-model M] [--claude-command JSON] [--run-id ID] [--extend ID] [--out D] \
     [--infra-retries N] \
-    [--cases-dir D] [--project D] [--timeout-seconds S] [--keep-code]
+    [--cases-dir D] [--project D] [--timeout-seconds S] [--keep-code] [--cli-state-dir D]
 
 uv run --script plugins/task-flow/bench/bench.py report <run-id> [--out D] [--project D]
 
@@ -236,6 +274,103 @@ through `scripts/launch.py`).
   marker pair, a malformed `run.json` / `results.jsonl`, an existing history target.
 
 ## Running a first pass
+
+### Manual CLI run checklist
+
+Do not run authenticated benchmarks without the user's explicit confirmation of
+the profiles, models, account routes, quotas and spending limits. No authenticated
+measurement was performed when these presets were added.
+
+1. **Codex first, before 2026-11-25.** Review the dated matrix above, pin an installed
+   CLI build and enable only `bench-codex` from the commented template. Check the
+   selected model is available to the account. Set an explicit run id and a private
+   `--cli-state-dir` separate from `--out`. Nothing copies personal configuration.
+2. Prepare each cell's private state at
+   `<state>/<run-id>/<case>/<profile>/<repeat>/`. The tool home is `tool/`; HOME and
+   USERPROFILE are `home/`, XDG roots are `config/`, `data/`, `cache/`, `state/`.
+   For Codex, set CODEX_HOME to that cell's `tool/` and run `codex login` yourself
+   with file credential storage (`cli_auth_credentials_store = "file"` in its
+   `config.toml`). Repeat the documented user login for every scheduled cell;
+   never copy an entire personal directory or extract credentials. Retain this
+   private state outside saved/published artifacts and restore your shell's env
+   after preparation. The harness creates empty state directories if absent, but
+   never logs in. API-key routes instead require the named env var in `pass_env`.
+   Gemini stores user files under `tool/.gemini/`; the other tool-specific overrides
+   point directly at `tool/`. OpenCode also uses the isolated XDG directories.
+3. One exploratory pass is 3 cases × 1 profile × 1 repeat = **3 cells**, up to
+   **9 implementation rounds**, plus at most two infrastructure attempts per round
+   by default. Five repeats mean **15 cells / up to 45 rounds** per profile.
+   All five tools at five repeats mean **75 cells / up to 225 rounds**, before
+   retries and optional review. Plan subscription quota exposure for the entire
+   CLI-owned loop, not one request per round. Record the actual subscription fee
+   using optional `subscription_monthly_usd`; it is context, not marginal spend.
+4. For API routes, verify current model input/cached/output prices and estimate
+   `sum((uncached_input * P_input + cached_input * P_cached + output * P_output)
+   / 1_000_000)` across attempts. Add reviewer charges/limits for a separate
+   `--review` subset. Set provider/account spending limits and a CLI deadline.
+   `--max-cost-usd` limits the API loop and later scheduling, **not a CLI's internal
+   spending**. Other CLI presets use `usage_format = "none"`; tokens and cost are
+   null and an API budget cannot be enforced inside that invocation. An unknown
+   API charge stops subsequent scheduling under a harness cap. Never interpret
+   unknown usage as zero or estimate tokens from text length.
+5. After user confirmation, this command runs the exploratory Codex pass (all
+   paths relative to the current project; provision the matching state first):
+
+   ```
+   uv run --script plugins/task-flow/bench/bench.py run --profiles bench-codex --run-id cli-codex-20261106 --repeat 1 --infra-retries 0 --keep-code --cli-state-dir .bench-private --out .work/_bench
+   ```
+
+   Review unavailable/failed outcomes and test-change evidence as data. Keep the
+   original run; choose a fresh run id for changed settings. Next consider Gemini
+   API, then Copilot **only after its unresolved terms review**, OpenCode API,
+   then Claude API. Google-login, OpenCode Go/Zen/upstream subscriptions and Claude
+   subscription routes stay excluded until their terms decisions are resolved.
+6. `--keep-code` retains code for later scoring. Disk scales with cells, attempt
+   backups during execution, retained scratch repositories and private CLI state;
+   measure local free space before scheduling, since no fixed size is promised.
+   `save` keeps only run metadata, rows and report, **not code or credentials**.
+   Archive scoring code separately after inspecting it for secrets. After scoring,
+   remove only that run's scratch `runs/<n>/code/` directories and its private
+   `<state>/<run-id>/` directories; preserve `run.json`, `results.jsonl`, attempts
+   and reports. Check resolved paths before manual removal. Revoke/logout credentials
+   through each tool's documented user flow before removing private state.
+
+`benchmark_isolation` selects one supported tool policy; unsupported/missing policy,
+missing executable/version probe, or omitted `--cli-state-dir` produces an explicit
+unavailable cell. `benchmark_version_command` optionally overrides the version-only
+argv; it must be an offline version command, never an agent invocation. Neither key
+changes ordinary implementer defaults. Only PATH, PATHEXT, Windows system/launcher
+variables, locale and temporary-directory variables plus explicit `pass_env` names
+reach the tool; HOME, app-data, temp and XDG roots are overridden per cell. Copilot
+auto-update is disabled. Do not approve personal config-path env vars.
+
+Provenance records executable name/digest, version, sanitized argv, model, billing,
+usage parser, approved env names, isolation limitations and configuration digests.
+The configuration digest covers `config.toml`, `config.json`, `settings.json`,
+`settings.local.json`, `mcp.json`, `mcp-config.json`, `lsp-config.json`,
+`opencode.json`, `opencode.jsonc`, `cli.json`, `AGENTS.md`, `GEMINI.md`, `CLAUDE.md`
+and `copilot-instructions.md` in prepared cell state. Only digests are recorded,
+including for mixed settings/auth files such as Copilot's `config.json`; separate
+auth files, sessions and logs are excluded. Executable argument files are hashed too.
+Do not add unrecorded plugins/extensions or managed config between repeats: managed
+settings and OS credential stores are residual access, not fully captured isolation.
+Suite fingerprints remain extendable; per-profile fingerprints include resolved
+settings and CLI provenance. Resume and extension recheck existing profiles and
+refuse changed settings/provenance before changing run artifacts. Legacy provenance
+is explicitly unknown and cannot establish a compatible CLI resume.
+
+API and CLI loops differ: the CLI owns prompts, tools, repository instructions,
+configuration and network access. `rules.py` does not govern its internal loop.
+Per-cell state isolation is not a security sandbox. History-free scratch repositories
+prevent local history access but cannot prevent network retrieval of public solutions
+or tests. Hidden probes remain disposable and outside implementation roots.
+
+Final state is measured against an immutable harness-owned base through a temporary
+index, covering committed, staged, unstaged and untracked files without changing the
+CLI's index. Commit/reflog evidence includes descendant commits soft-reset by the
+ordinary implementer. Visible-test additions, modifications and deletions are reported
+alongside scope exceptions; green gates do not imply untouched tests. A malicious
+tool can erase its reflog, so commit counts are observed evidence, not an audit proof.
 
 Three cases × 3 or 4 profiles × `--repeat 1` is a first pass:
 
@@ -362,11 +497,12 @@ The size and All tables are cross-case summaries, not independent repeat samples
 - **Hidden tests stay hidden.** Hidden files, commands and captured output never exist
   in the implementation checkout, task folder, index or git objects. Probe copies are
   deleted before implementers or reviewers run; only harness-owned observations survive.
-- **`--max-cost-usd X` caps the whole run.** Each run's models file gets
+- **`--max-cost-usd X` caps the API loop and later scheduling.** Each API run's models file gets
   `max_cost_usd` = the smaller of the profile's own value and the remaining budget, and
   `fallback = []` — a measurement measures one profile, a silent fallback would
   attribute another model's work to it. Runs after a cap (or an `unavailable` profile)
   are recorded as `skipped`, never dropped.
+  A CLI owns internal spending; apply provider limits separately (see the checklist).
 - Every profile is resolved with `models.load(--project)` before anything runs; an
   unknown, disabled or keyless profile is a refusal.
 
@@ -399,7 +535,7 @@ recomputes the fingerprint from the current case files with the stored repeat an
 flag; on mismatch it exits 2 naming the first differing component (case id and field,
 or repeat / harness version). It refuses a profile already in the run and `--cases` /
 `--repeat` / `--review` values that differ from the run; otherwise it appends rows with n
-continuing and regenerates `report.md`. Raise `HARNESS_VERSION` (currently `2`, a
+continuing and regenerates `report.md`. Raise `HARNESS_VERSION` (currently `3`, a
 constant in `bench.py`) whenever a change alters what is measured.
 
 ## Durability

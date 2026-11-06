@@ -31,6 +31,15 @@ format, all commands and flags, the run layout, isolation and safety, and the li
 
 ## Measurement protocol (version 2)
 
+CLI documentation and authentication review: **2026-11-06**; every authenticated
+tool test is **untested**. The [tool/authentication matrix](../../plugins/task-flow/bench/README.md#cli-toolauthentication-matrix-checked-2026-11-06)
+links official invocation, output, isolation, authentication, pricing and terms
+evidence for Codex, Gemini CLI, Copilot CLI, OpenCode and Claude. Codex's official
+account workflow is documented; Gemini Google-login, Copilot and Claude subscription
+benchmark routes remain unresolved here. OpenCode Go/Zen and each upstream provider
+require separate terms decisions. Unresolved routes are excluded from the manual
+checklist until resolved; a login is not evidence of permission.
+
 The saved `first-pass-2` and `combined-100` measurements use harness version 1 and
 one repeat. Their outcomes and turn limits differ; merged rows reuse source work,
 so a merge is not independent repeat evidence. Uncontrolled cold-versus-warm
@@ -89,10 +98,11 @@ a disposable hidden-test copy before acceptance or review.
 flowchart TD
   cases["frozen cases: bench/cases/"]
   profs["profiles from models.toml"]
-  reps["repeats"]
   comb["case x profile x repeat"]
   scratch["scratch repository exported from the base"]
   rounds["up to 3 rounds: implement.py, gates.py judges"]
+  cli["opt-in CLI: per-cell state, explicit env, version provenance; CLI owns tools/network"]
+  state["immutable-base final state: commits, index, working files; visible-test evidence"]
   hidden["hidden tests from the case's result commit"]
   results["results.jsonl"]
   report["report.md"]
@@ -100,9 +110,12 @@ flowchart TD
   decision["decision: you set [roles] implementer"]
   cases --> comb
   profs --> comb
-  reps --> comb
   comb --> scratch
   scratch --> rounds
+  scratch --> cli
+  cli --> rounds
+  rounds --> state
+  state --> results
   rounds -->|each green round| hidden
   rounds --> results
   hidden --> results
@@ -113,8 +126,60 @@ flowchart TD
 
 The diagram cannot carry: the scratch repository is exported from the case's base
 commit and has no history, so the implementer can never read the hidden tests from git;
-the decision at the end is yours — `[roles] implementer` in `models.toml` picks what the
+network retrieval of public solutions or tests remains possible. A CLI owns its
+prompts, tools, repository instructions, configuration and network access;
+`rules.py` does not control its internal loop. State isolation is not a security
+sandbox. Final-state evidence includes committed, staged, unstaged and untracked
+changes against the original base, plus visible-test additions/modifications/deletions.
+Green gates alone do not establish untouched tests. The decision at the end is yours — `[roles] implementer` in `models.toml` picks what the
 next real task uses.
+
+### Manual CLI comparison
+
+Require explicit user confirmation before any authenticated run. Follow the
+[manual checklist](../../plugins/task-flow/bench/README.md#manual-cli-run-checklist):
+Codex first **before 2026-11-25**, then Gemini API, Copilot only after resolving
+its subscription terms, OpenCode API and Claude API. All authenticated tests are
+currently untested. Do not substitute a third-party subscription adapter.
+
+Use a pinned local executable, reviewed model/argv, `benchmark_isolation` and an
+explicit `--cli-state-dir` separate from `--out`. The user provisions auth in each
+cell's private tool home through documented login or approved env names; personal
+config directories are never copied. `benchmark_version_command` is an optional
+offline version probe override. Record the actual plan fee with optional
+`subscription_monthly_usd`; unknown marginal subscription cost stays null.
+No CLI-specific setting changes ordinary implementer defaults.
+
+Three frozen cases × one profile × one repeat = **3 cells / up to 9 rounds**;
+five repeats = **15 cells / up to 45 rounds** per profile. Five tools at five repeats
+would schedule **75 cells / up to 225 rounds**, plus bounded infrastructure retries
+and reviewer work when selected. Check subscription quota exposure for the full
+CLI loop. For API estimates, multiply uncached input, cached input and output tokens
+by their verified per-million prices, divide by 1,000,000 and sum all attempts.
+Set provider spending limits and deadlines; `--max-cost-usd` cannot cap a CLI's
+internal loop. Missing API usage stops later scheduling under a harness cap.
+Budget reviewer charges/limits separately for an explicit `--review` subset.
+
+After confirmation and private auth preparation, the Codex command is:
+
+```
+uv run --script plugins/task-flow/bench/bench.py run --profiles bench-codex --run-id cli-codex-20261106 --repeat 1 --infra-retries 0 --keep-code --cli-state-dir .bench-private --out .work/_bench
+```
+
+Keep `--keep-code` for later scoring. Measure free disk space for retained code,
+private CLI state and attempts. `save` preserves metadata/rows/report, not code or
+credentials. Archive scoring inputs separately after secret inspection. After
+scoring, remove only that run's scratch code and private state after logout/revocation;
+preserve run metadata, results, attempts and reports. Verify resolved cleanup paths.
+
+Reports and published pages separate API spend, unknown subscription marginal cost
+and contextual plan fees; they show tool versions, isolation limitations, acceptance,
+hidden pass, rounds, coverage and wall time. Historical provenance is unknown.
+Harness version 3 changes final-state measurement; saved versions remain readable.
+Suite identity plus per-profile settings/provenance fingerprints prevent changed
+CLI versions, argv, model, usage parser or isolation settings from pooling silently.
+Adding a distinct profile remains supported. Never present a CLI/API comparison as
+isolating model quality from agent-harness differences.
 
 ## Re-running, adding a model and publishing
 

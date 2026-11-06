@@ -172,6 +172,8 @@ KEPT = [
     (BENCH_README, "Adding a case"),
     (BENCH_README, "Commands"),
     (BENCH_README, "Running a first pass"),
+    (BENCH_README, "Manual CLI run checklist"),
+    (BENCH_README, "CLI tool/authentication matrix (checked 2026-11-06)"),
     (BENCH_README, "Reading the outputs"),
     (BENCH_README, "When to re-run"),
     (BENCH_README, "Adding a profile"),
@@ -193,7 +195,7 @@ BLOCKS_BEFORE = {
 BLOCKS_AFTER = {
     "README.md": 1,
     PLUGIN_README: 2,
-    BENCH_README: 8,
+    BENCH_README: 9,
     "docs/README.md": 0,
     "docs/dev-baseline.md": 6,
     "docs/development.md": 4,
@@ -208,13 +210,16 @@ BLOCKS_AFTER = {
     "docs/task-flow/enforcement.md": 0,
     "docs/task-flow/profiles.md": 0,
     "docs/task-flow/releasing.md": 1,
-    "docs/task-flow/benchmark.md": 2,
+    "docs/task-flow/benchmark.md": 3,
 }
 # Non-Mermaid fenced blocks added by later tasks, per file, on top of BLOCKS_BEFORE;
 # the conservation check in test_fenced_block_counts adds them. Added by the task
 # docs-with-diagrams: the five setup-guide blocks (two plugin-dir shells, two key-setting
 # shells, one models.toml example).
 BLOCKS_ADDED = {
+    # bench-cli-profiles: one confirmed-run example in each benchmark guide.
+    BENCH_README: 1,
+    "docs/task-flow/benchmark.md": 1,
     "docs/task-flow/setup.md": 5,
     # Added by the task readme-front-page: the front page keeps one fenced block (the
     # quick-start install block, delta 0 against the post-split count), and the plugin

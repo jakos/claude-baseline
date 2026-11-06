@@ -406,6 +406,322 @@ class SettingsForTest(BenchFixture):
         self.assertEqual(reloaded["command"], ["codex", "exec", "-"])
 
 
+class CliBenchmarkTest(BenchFixture):
+    def configure_cli(self, *, usage: bool = False, limit: bool = False) -> None:
+        self.state = self.root / "private-state"
+        self.fake = self.root / "fake_cli.py"
+        self.usage = usage
+        body = (
+            "import sys, os, json, pathlib, subprocess\n"
+            "if '--version' in sys.argv:\n print('fake-cli 1.2'); sys.exit(0)\n"
+            "sys.stdin.read()\n"
+            "assert 'UNRELATED_SECRET' not in os.environ\n"
+            "assert 'FAKE_KEY' not in os.environ\n"
+            "assert pathlib.Path(os.environ['CODEX_HOME']).name == 'tool'\n"
+            "assert not pathlib.Path('hidden_check.py').exists()\n"
+            "pathlib.Path('calc.py').write_text('def add(a, b):\\n    return a + b\\n', encoding='utf-8')\n"
+            "subprocess.run(['git','add','calc.py'], check=True)\n"
+            "subprocess.run(['git','-c','user.name=Fake','-c','user.email=fake@example.com','commit','-qm','implementation'], check=True)\n"
+            "pathlib.Path('test_added.py').write_text('pass\\n', encoding='utf-8')\n"
+        )
+        if limit:
+            body += "print('quota exhausted'); sys.exit(1)\n"
+        elif usage:
+            body += "print(json.dumps({'type':'turn.completed', 'usage': {'input_tokens':123, 'cached_input_tokens':23, 'output_tokens':9}}))\n"
+        else:
+            body += "print('done')\n"
+        write_file(self.fake, body)
+        settings = {
+            "driver": "cli",
+            "model": "fake-model",
+            "billing": "subscription",
+            "command": [sys.executable, str(self.fake)],
+            "prompt_via": "stdin",
+            "benchmark_version_command": [sys.executable, str(self.fake), "--version"],
+            "benchmark_isolation": "codex",
+            "usage_format": "codex-jsonl" if usage else "none",
+            "limit_patterns": ["quota exhausted"],
+            "subscription_monthly_usd": 20,
+        }
+        write_file(
+            self.models_path,
+            "[profiles.fake]\n"
+            + "\n".join(f"{k} = {toml_value(v)}" for k, v in settings.items())
+            + "\n",
+        )
+        self.make_case()
+
+    def resume_cli(self, *extra: str) -> subprocess.CompletedProcess:
+        return self.bench(
+            "run",
+            "--resume",
+            "r1",
+            "--project",
+            str(self.project),
+            "--cases-dir",
+            str(self.cases),
+            "--out",
+            str(self.out),
+            *extra,
+        )
+
+    def test_committing_cli_null_accounting_and_resume(self) -> None:
+        self.configure_cli()
+        done = self.bench(
+            *self.run_args(
+                extra=[
+                    "--cli-state-dir",
+                    str(self.state),
+                    "--keep-code",
+                    "--repeat",
+                    "2",
+                ]
+            ),
+            extra_env={"UNRELATED_SECRET": "private"},
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        rows = self.rows()
+        self.assertEqual([r["outcome"] for r in rows], ["accepted", "accepted"])
+        row = rows[0]
+        self.assertIsNone(row["tokens"])
+
+        self.assertIsNone(row["cost_usd"])
+        self.assertIsNone(row["api_spend_usd"])
+        self.assertIsNone(row["subscription_cost_usd"])
+        self.assertEqual(row["subscription_monthly_usd"], 20)
+        evidence = row["state_evidence"]
+        self.assertEqual(evidence["tool_created_commits"], 1)
+        self.assertIn("calc.py", evidence["changed_paths"])
+        self.assertEqual(evidence["visible_test_changes"], {"test_added.py": "A"})
+        self.assertEqual(row["hidden"], "pass")
+        self.assertEqual(row["provenance"]["version"], "fake-cli 1.2")
+        for repeat in (1, 2):
+            self.assertTrue(
+                (self.state / "r1" / "c1" / "fake" / str(repeat) / "tool").is_dir()
+            )
+        self.assertNotIn(HIDDEN_MARKER, json.dumps(rows))
+        for path in (self.out / "r1" / "runs").rglob("*"):
+            self.assertNotEqual(path.name, "hidden_check.py")
+        original = (self.out / "r1" / "results.jsonl").read_bytes()
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.out / "r1" / "results.jsonl").read_bytes(), original)
+        self.assertIn("unknown", self.report())
+        self.assertIn("fake-cli 1.2", self.report())
+
+    def test_api_run_can_extend_with_cli_and_resume(self) -> None:
+        self.configure_cli()
+        server = self.fix_calc_server()
+        self.add_profile("api", server)
+        done = self.run_bench(profiles="api")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        done = self.bench(
+            "run",
+            "--extend",
+            "r1",
+            "--profiles",
+            "fake",
+            "--project",
+            str(self.project),
+            "--out",
+            str(self.out),
+            "--cases-dir",
+            str(self.cases),
+            "--timeout-seconds",
+            "120",
+            "--cli-state-dir",
+            str(self.state),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual([r["outcome"] for r in self.rows()], ["accepted", "accepted"])
+        self.assertEqual(len(server.requests), 2)
+
+    def test_codex_usage_once_and_limit_is_terminal_unavailable(self) -> None:
+        self.configure_cli(usage=True)
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(
+            self.rows()[0]["tokens"], {"input": 123, "cached": 23, "output": 9}
+        )
+        self.assertGreater(self.rows()[0]["implement_seconds"], 0)
+        self.configure_cli(limit=True)
+        done = self.run_bench(
+            run_id="limited", extra=["--cli-state-dir", str(self.state)]
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        row = self.rows("limited")[0]
+        self.assertEqual(row["outcome"], "unavailable")
+        self.assertEqual(len(row["attempts"]), 1)
+        self.assertIsNone(row["tokens"])
+        results = self.out / "limited" / "results.jsonl"
+        completed = results.read_bytes()
+        done = self.bench(
+            "run",
+            "--resume",
+            "limited",
+            "--project",
+            str(self.project),
+            "--cases-dir",
+            str(self.cases),
+            "--out",
+            str(self.out),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(results.read_bytes(), completed)
+
+    def test_resume_refuses_cli_changes_before_mutation(self) -> None:
+        self.configure_cli()
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        run = self.out / "r1"
+        originals = {p: p.read_bytes() for p in run.rglob("*") if p.is_file()}
+        source = self.models_path.read_text(encoding="utf-8")
+        for old, new in (
+            ("fake-model", "changed-model"),
+            (
+                f"command = {toml_value([sys.executable, str(self.fake)])}",
+                f"command = {toml_value([sys.executable, str(self.fake), '--changed'])}",
+            ),
+            ('usage_format = "none"', 'usage_format = "codex-jsonl"'),
+            ('benchmark_isolation = "codex"', 'benchmark_isolation = "claude"'),
+            ('prompt_via = "stdin"', 'prompt_via = "arg"'),
+        ):
+            write_file(self.models_path, source.replace(old, new))
+            done = self.resume_cli()
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        write_file(self.models_path, source)
+        write_file(
+            self.fake,
+            self.fake.read_text(encoding="utf-8").replace(
+                "fake-cli 1.2", "fake-cli 2.0"
+            ),
+        )
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("provenance", done.stderr)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+
+    def test_extension_adds_distinct_cli_and_preserves_shared_provenance(self) -> None:
+        self.configure_cli()
+        done = self.run_bench(extra=["--cli-state-dir", str(self.state)])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        original = (self.out / "r1" / "results.jsonl").read_bytes()
+        source = self.models_path.read_text(encoding="utf-8")
+        write_file(
+            self.models_path,
+            source + source.replace("[profiles.fake]", "[profiles.second]"),
+        )
+        done = self.bench(
+            "run",
+            "--extend",
+            "r1",
+            "--profiles",
+            "second",
+            "--project",
+            str(self.project),
+            "--out",
+            str(self.out),
+            "--cases-dir",
+            str(self.cases),
+            "--timeout-seconds",
+            "120",
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(
+            (self.out / "r1" / "results.jsonl").read_bytes().startswith(original)
+        )
+        self.assertEqual([r["profile"] for r in self.rows()], ["fake", "second"])
+        done = self.resume_cli()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for filename in ("config.toml", "config.json", "copilot-instructions.md"):
+            with self.subTest(filename=filename):
+                config = self.state / "r1" / "c1" / "fake" / "1" / "tool" / filename
+                write_file(config, "# changed settings\n")
+                before = (self.out / "r1" / "run.json").read_bytes()
+                done = self.resume_cli()
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual((self.out / "r1" / "run.json").read_bytes(), before)
+                config.unlink()
+
+    def test_cli_missing_tools_or_isolation_are_explicitly_unavailable(self) -> None:
+        self.configure_cli()
+        done = self.run_bench()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.rows()[0]["outcome"], "unavailable")
+        self.assertIn("isolation", self.rows()[0]["reason"])
+        source = self.models_path.read_text(encoding="utf-8")
+        source = source.replace(
+            toml_value(sys.executable), toml_value(str(self.root / "missing-cli"))
+        )
+        write_file(self.models_path, source)
+        done = self.run_bench(
+            run_id="missing", extra=["--cli-state-dir", str(self.state)]
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.rows("missing")[0]["outcome"], "unavailable")
+        self.assertIn("unavailable", self.rows("missing")[0]["provenance"])
+
+    def test_cli_provenance_redacts_secrets_and_local_paths(self) -> None:
+        self.configure_cli()
+        profiles, _ = bench.models.load(self.project)
+        profile = profiles["fake"]
+        secret = "private-auth-value"
+        profile["command"].extend(
+            [
+                secret,
+                "--api-key=inline-credential",
+                "https://user:url-password@example.com",
+            ]
+        )
+        with patch.dict(os.environ, {"UNRELATED_TOKEN": secret}):
+            evidence = bench.cli_provenance(profile, self.project)
+            recorded = bench.recorded_settings(profile)
+        self.assertNotIn(secret, json.dumps([evidence, recorded]))
+        self.assertNotIn("inline-credential", json.dumps([evidence, recorded]))
+        self.assertNotIn("url-password", json.dumps([evidence, recorded]))
+        self.assertNotIn(str(self.root), json.dumps([evidence, recorded]))
+        self.assertIn("argv_sha256", evidence)
+
+    def test_state_inspection_covers_all_file_states_and_test_changes(self) -> None:
+        code = self.root / "scratch"
+        base = bench.export_base(self.src, self.base_sha, code)
+        write_file(code / "tests" / "test_modify.py", "before\n")
+        write_file(code / "tests" / "test_delete.py", "before\n")
+        self.git(code, "add", "-A")
+        self.git(code, "commit", "-qm", "tests")
+        base = self.git(code, "rev-parse", "HEAD").stdout.strip()
+        write_file(code / "calc.py", CALC_OK)
+        self.git(code, "add", "calc.py")
+        self.git(code, "commit", "-qm", "fix")
+        write_file(code / "mul.py", MUL_OK)
+        self.git(code, "add", "mul.py")
+        write_file(code / "tools" / "check.py", "# unstaged\n")
+        write_file(code / "new.txt", "untracked\n")
+        write_file(code / "tests" / "test_modify.py", "after\n")
+        (code / "tests" / "test_delete.py").unlink()
+        write_file(code / "tests" / "test_add.py", "added\n")
+        index_before = (code / ".git" / "index").read_bytes()
+        result = bench.inspect_state(code, base)
+        self.assertEqual(
+            result["visible_test_changes"],
+            {
+                "tests/test_add.py": "A",
+                "tests/test_delete.py": "D",
+                "tests/test_modify.py": "M",
+            },
+        )
+        self.assertTrue(
+            {"calc.py", "mul.py", "tools/check.py", "new.txt"}.issubset(
+                result["changed_paths"]
+            )
+        )
+        self.assertEqual(result["tool_created_commits"], 1)
+        self.assertEqual((code / ".git" / "index").read_bytes(), index_before)
+
+
 class ParseChecksTest(unittest.TestCase):
     CHECKS0 = (
         "# Checks: round 0\n"
@@ -620,7 +936,7 @@ class RunTest(BenchFixture):
         self.assertEqual(row["billing"], "api")
         self.assertTrue(row["cost_known"])
         self.assertTrue(row["fingerprint"].startswith("sha256:"))
-        self.assertEqual(row["harness_version"], 2)
+        self.assertEqual(row["harness_version"], 3)
         self.assertEqual(row["round1_hidden"], "pass")
         self.assertEqual(row["earliest_hidden_pass_round"], 1)
         self.assertEqual(row["hidden_observations"], [{"round": 1, "result": "pass"}])
@@ -2212,6 +2528,40 @@ class RecoveryProtocolTest(BenchFixture):
         self.assertEqual(runner.spent, 0.125)
         self.assertFalse(row["cost_known"])
         self.assertEqual(len(row["attempts"]), 2)
+
+    def test_cli_unknown_total_keeps_known_attempt_work_and_budget(self) -> None:
+        runner, case = self.configured_runner(infra_retries=1)
+        runner.profiles["fake"].update(
+            driver="cli", billing="subscription", command=[sys.executable, "fake.py"]
+        )
+        calls = []
+
+        def implement(
+            task: Path, code: Path, round_n: int, name: str
+        ) -> subprocess.CompletedProcess:
+            calls.append(round_n)
+            metrics = {"cost_usd": None, "tokens": None}
+            if len(calls) == 1:
+                metrics = {
+                    "cost_usd": 0.125,
+                    "tokens": {"input": 123},
+                    "infrastructure_failure": {"kind": "connection", "retryable": True},
+                }
+            write_file(task / "impl-1.json", json.dumps(metrics))
+            return subprocess.CompletedProcess(
+                [], 1, "failed: all profiles unavailable: quota exhausted", ""
+            )
+
+        with patch.object(runner, "implement", side_effect=implement):
+            row = runner.run_one(case, "fake", 1, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(row["outcome"], "unavailable")
+        self.assertIsNone(row["tokens"])
+        self.assertIsNone(row["cost_usd"])
+        self.assertEqual(row["known_tokens"], {"input": 123})
+        self.assertEqual(row["known_cost_usd"], 0.125)
+        runner.append_row(row)
+        self.assertEqual(runner.spent, 0.125)
 
     def test_reviewer_timeout_bound_restore_and_budget(self) -> None:
         runner, _case = self.configured_runner(infra_retries=1)

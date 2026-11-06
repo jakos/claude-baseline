@@ -1121,6 +1121,78 @@ class RoutingEvidenceTest(unittest.TestCase):
         self.assertIn("Computed routing evidence", publish.render_latest(summary, None))
 
 
+class CliPublicationTest(unittest.TestCase):
+    def test_cli_null_usage_provenance_cost_context_and_determinism(self) -> None:
+        row = canned_row(
+            "cli",
+            1,
+            "c1",
+            "S",
+            "codex",
+            billing="subscription",
+            cost_known=False,
+            cost=None,
+            settings={"driver": "cli", "command": ["codex", "exec", "-"]},
+        )
+        row.update(
+            tokens=None,
+            api_spend_usd=None,
+            subscription_cost_usd=None,
+            subscription_monthly_usd=20,
+            provenance={
+                "tool": "codex",
+                "version": "codex 1.2",
+                "isolation": "per-cell-home-xdg-v1",
+                "limitations": "network remains accessible",
+            },
+        )
+        meta = {
+            "run_id": "cli",
+            "created": "2026-11-06",
+            "harness_version": 1,
+            "fingerprint": FP1,
+            "profiles": ["codex"],
+            "cases": ["c1"],
+            "repeat": 1,
+            "review": False,
+        }
+        publish.check_comparable(meta, [row])
+        summary = publish.summarize(meta, [row])
+        page = publish.render_latest(summary, None)
+        self.assertEqual(
+            page, publish.render_latest(publish.summarize(meta, [row]), None)
+        )
+        for text in (
+            "codex 1.2",
+            "network remains accessible",
+            "API implementation spend USD",
+            "Subscription marginal USD",
+            "20",
+            "Coverage / scheduled",
+            "Wall seconds",
+            "Rounds (median)",
+        ):
+            self.assertIn(text, page)
+        self.assertIsNone(summary["all"][0]["tokens"])
+        self.assertIn("unknown", page)
+        legacy = dict(row, provenance=None)
+        self.assertIn(
+            "unknown / unknown",
+            publish.render_latest(publish.summarize(meta, [legacy]), None),
+        )
+
+    def test_incompatible_cli_versions_or_settings_refuse(self) -> None:
+        row = canned_row("cli", 1, "c1", "S", "codex", settings={"driver": "cli"})
+        row["provenance"] = {"version": "1"}
+        meta = {"review": False, "fingerprint": FP1, "harness_version": 1}
+        for changed in (
+            dict(row, provenance={"version": "2"}),
+            dict(row, settings={"driver": "cli", "usage_format": "none"}),
+        ):
+            with self.assertRaises(publish.PublishError):
+                publish.check_comparable(meta, [row, changed])
+
+
 class RepeatProtocolTest(unittest.TestCase):
     def test_unknown_api_billing_and_interrupted_work_remain_explicit(self) -> None:
         rows = small_rows()

@@ -747,6 +747,50 @@ declared_paths = 5
             {"command_timeout_seconds": 600, "reviewer_independence": "warn"},
         )
 
+    def test_benchmark_presets_are_disabled_valid_and_ordered(self) -> None:
+        text = TEMPLATE.read_text(encoding="utf-8")
+        blocks: list[list[str]] = []
+        for line in text.splitlines():
+            if line.startswith("# [profiles.bench-"):
+                blocks.append([line[2:]])
+            elif blocks and line.startswith("# ") and " = " in line:
+                key = line[2:].split(" = ", 1)[0]
+                if key in models.PROFILE_KEYS:
+                    blocks[-1].append(line[2:])
+            elif line == "[roles]":
+                break
+        self.project("\n".join("\n".join(block) for block in blocks))
+        profiles, _ = models.load(self.repo)
+        self.assertEqual(
+            list(profiles),
+            [
+                "bench-codex",
+                "bench-gemini",
+                "bench-copilot",
+                "bench-opencode",
+                "bench-claude",
+            ],
+        )
+        for profile in profiles.values():
+            self.assertFalse(profile["enabled"])
+            self.assertEqual(profile["driver"], "cli")
+            self.assertIsNotNone(profile["benchmark_isolation"])
+            self.assertIn(profile["usage_format"], ("codex-jsonl", "none"))
+        self.assertIn("Documentation checked 2026-11-06", text)
+        self.assertIn("authenticated test: untested", text)
+
+    def test_benchmark_keys_reject_unsupported_isolation_and_api_profiles(self) -> None:
+        for key, value in {
+            "benchmark_isolation": '"codex"',
+            "benchmark_version_command": '["codex", "--version"]',
+            "subscription_monthly_usd": "20",
+        }.items():
+            self.assertRejected(BASE + f"{key} = {value}\n", key, '"cli"')
+        self.assertRejected(
+            self.CLI_SUBSCRIPTION + 'benchmark_isolation = "unsupported"\n',
+            "benchmark_isolation",
+        )
+
     def test_gates_default_timeout(self):
         self.assertEqual(
             models.gates(self.repo),

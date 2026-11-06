@@ -86,10 +86,11 @@ PLUGIN_ROOT = BENCH_DIR.parent
 SCRIPTS = PLUGIN_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import cli_driver
 import launch
 import models
 
-HARNESS_VERSION = 2
+HARNESS_VERSION = 3
 DEFAULT_CASES_DIR = BENCH_DIR / "cases"
 DEFAULT_RESULTS_DIR = BENCH_DIR / "results"
 SIZES = ("S", "M", "L")
@@ -179,6 +180,162 @@ def sha256_text_file(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def inspect_state(code: Path, base: str) -> dict:
+    """Measure final files against a harness-owned base, without trusting HEAD/index."""
+    with tempfile.TemporaryDirectory(prefix="bench-index-") as temporary:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(temporary) / "index")}
+
+        def indexed(*args: str) -> bytes:
+            done = subprocess.run(
+                ["git", "-C", str(code), *args],
+                env=env,
+                capture_output=True,
+                timeout=300,
+                check=False,
+            )
+            if done.returncode:
+                raise BenchError("cannot inspect final benchmark working state")
+            return done.stdout
+
+        indexed("read-tree", base)
+        indexed("add", "-A", "--", ".")
+        tree = indexed("write-tree").decode().strip()
+        changes = (
+            indexed("diff", "--name-status", "--no-renames", "-z", base, tree)
+            .decode("utf-8", "replace")
+            .split("\0")
+        )
+    changed = {changes[i + 1]: changes[i] for i in range(0, len(changes) - 1, 2)}
+    head = resolve_commit(code, "HEAD")
+    # implement.py normally soft-resets descendant CLI commits. Their reflog
+    # entries still provide evidence even when the final HEAD equals the base.
+    commits = (
+        git(code, "rev-list", "--count", "--all", "--reflog", f"^{base}")
+        .stdout.decode()
+        .strip()
+    )
+    return {
+        "base": base,
+        "head": head,
+        "tool_created_commits": int(commits),
+        "head_changed": head != base,
+        "final_tree": tree,
+        "changed_paths": sorted(changed),
+        "visible_test_changes": {
+            p: changed[p] for p in sorted(test_candidates(list(changed)))
+        },
+    }
+
+
+def sanitized_cli_text(value: str, secrets: list[str]) -> str:
+    """Remove credentials and absolute paths from persisted CLI configuration."""
+    value = cli_driver.redact(value, secrets)
+    value = value.replace(str(Path.home()), "<local>")
+    if Path(value).is_absolute():
+        value = "<path>/" + Path(value).name
+    value = re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1<redacted>@", value)
+    return re.sub(
+        r"(?i)((?:api[_-]?key|token|password|secret)=)[^\s]+",
+        r"\1<redacted>",
+        value,
+    )
+
+
+def cli_provenance(profile: dict, project: Path) -> dict:
+    """Offline executable/version probe. No auth is inherited and no model is called."""
+    tool = profile.get("benchmark_isolation")
+    record = {
+        "tool": tool or "unknown",
+        "version": "unknown",
+        "executable": "unknown",
+        "argv": profile["command"],
+        "argv_sha256": hashlib.sha256(
+            json.dumps(profile["command"]).encode("utf-8")
+        ).hexdigest(),
+        "model": profile["model"],
+        "billing": profile["billing"],
+        "usage_format": profile["usage_format"],
+        "isolation": "per-cell-home-xdg-v1" if tool else "unsupported",
+        "pass_env": profile["pass_env"],
+        "limitations": "filesystem, network, OS credential stores and managed/repository settings remain accessible",
+    }
+    secrets = cli_driver.secret_values(os.environ, profile["pass_env"])
+
+    def sanitized(value: str) -> str:
+        return sanitized_cli_text(value, secrets).replace(str(project), "<local>")
+
+    record["argv"] = [sanitized(a) for a in record["argv"]]
+    record["argument_file_sha256"] = {
+        str(index): hashlib.sha256(Path(argument).read_bytes()).hexdigest()
+        for index, argument in enumerate(profile["command"])
+        if Path(argument).is_absolute() and Path(argument).is_file()
+    }
+    if tool not in cli_driver.BENCH_TOOL_ENV:
+        record["unavailable"] = "unsupported benchmark isolation"
+        return record
+    with tempfile.TemporaryDirectory(prefix="bench-version-") as temporary:
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k.upper() in cli_driver.BENCH_SYSTEM_ENV
+        }
+        env[cli_driver.BENCH_ENV] = json.dumps(
+            {"tool": tool, "root": temporary, "pass_env": []}
+        )
+        command = profile.get("benchmark_version_command") or [
+            profile["command"][0],
+            "--version",
+        ]
+        try:
+            found = cli_driver.find_program(profile["command"][0], project, env)
+            if found is None:
+                raise cli_driver.CliRefused("executable missing")
+            record["executable"] = Path(found).name
+            record["executable_sha256"] = hashlib.sha256(
+                Path(found).read_bytes()
+            ).hexdigest()
+            result = cli_driver.run_cli(
+                command=command,
+                prompt="",
+                prompt_via="stdin",
+                usage_format="none",
+                timeout_seconds=10,
+                worktree=project,
+                env=env,
+                secrets=secrets,
+            )
+            version = (result.stdout or result.stderr).strip()
+            if result.exit_code != 0 or result.timed_out or not version:
+                raise cli_driver.CliRefused("version probe failed")
+            record["version"] = sanitized(one_line(version, 200))
+            record["version_argv"] = [sanitized(a) for a in command]
+        except (OSError, cli_driver.CliRefused):
+            record["unavailable"] = "executable or version probe unavailable"
+    return record
+
+
+def recorded_settings(settings: dict) -> dict:
+    """Sanitize persisted CLI settings; execution still uses the resolved profile.
+
+    Exact argv identity is separately hashed in provenance, so redaction does not
+    allow changed commands to pass resume validation.
+    """
+    if settings.get("driver") != "cli":
+        return settings
+    secrets = cli_driver.secret_values(os.environ, settings.get("pass_env", []))
+    result = dict(settings)
+    for key in (
+        "command",
+        "benchmark_version_command",
+        "read_only_command",
+        "prompt_extras",
+    ):
+        if not result.get(key):
+            continue
+        result[key] = [sanitized_cli_text(value, secrets) for value in result[key]]
+    return result
+
+
 def toml_value(value) -> str:
     """One TOML value (the resolved profiles contain only these types)."""
     if isinstance(value, bool):
@@ -266,6 +423,7 @@ def eligibility(rows: list[dict], meta: dict, cid: str, name: str) -> str:
                 r.get("harness_version"),
                 r.get("review", meta.get("review")),
                 r.get("settings"),
+                r.get("provenance"),
             ],
             sort_keys=True,
         )
@@ -279,6 +437,10 @@ def eligibility(rows: list[dict], meta: dict, cid: str, name: str) -> str:
         and complete
         and len(signatures) == 1
         and not meta.get("merged_from")
+        and not any(
+            (r.get("settings") or {}).get("driver") == "cli" and not r.get("provenance")
+            for r in group
+        )
         and not any(r["outcome"] in ("skipped", "unavailable", "error") for r in group)
     ):
         return "descriptive ranking"
@@ -300,10 +462,12 @@ def protocol_report(rows: list[dict], meta: dict) -> list[str]:
     ]
     interrupted = meta.get("interrupted_attempts", [])
     known_work = sum(
-        (r.get("cost_usd") or 0) + (r.get("review_cost_usd") or 0) for r in rows
+        (r.get("known_cost_usd", r.get("cost_usd")) or 0)
+        + (r.get("review_cost_usd") or 0)
+        for r in rows
     ) + sum(a.get("cost_usd") or 0 for a in interrupted)
     known_tokens = sum(
-        sum((r.get("tokens") or {}).values())
+        sum((r.get("tokens") or r.get("known_tokens") or {}).values())
         + sum((r.get("review_tokens") or {}).values())
         for r in rows
     )
@@ -351,6 +515,8 @@ def protocol_report(rows: list[dict], meta: dict) -> list[str]:
                 + sum((r.get("review_tokens") or {}).values())
                 for r in group
             ]
+            if any(r.get("tokens") is None for r in group):
+                total_tokens = []
             known = bool(group) and all(r.get("cost_known") for r in group)
             costs = (
                 [r["cost_usd"] + r["review_cost_usd"] for r in group] if known else []
@@ -1192,6 +1358,8 @@ def _hidden_pass(done: list) -> str:
 
 
 def _tokens_median(done: list) -> str:
+    if any(r.get("tokens") is None for r in done):
+        return "unknown"
     return " / ".join(
         fmt_num(median([r["tokens"][k] for r in done]))
         for k in ("input", "cached", "output")
@@ -1208,6 +1376,73 @@ def unknown_cost_label(prows: list[dict]) -> str:
         if any(r.get("billing") == "subscription" for r in prows)
         else "unknown"
     )
+
+
+def check_cli_comparable(rows: list[dict], meta: dict) -> None:
+    """Never pool distinct CLI settings/versions under a single profile label."""
+    for name in {r["profile"] for r in rows}:
+        group = [r for r in rows if r["profile"] == name]
+        signatures = {
+            json.dumps([r.get("provenance"), r.get("settings")], sort_keys=True)
+            for r in group
+            if (r.get("settings") or {}).get("driver") == "cli"
+        }
+        if len(signatures) > 1:
+            raise BenchError(f"incompatible CLI measurements for profile {name}")
+        expected = meta.get("cli_provenance", {}).get(name)
+        if expected and any(r.get("provenance") != expected for r in group):
+            raise BenchError(f"CLI provenance differs from run settings: {name}")
+
+
+def provenance_report(rows: list[dict], meta: dict) -> list[str]:
+    """Shared report/publication evidence. Legacy provenance is explicitly unknown."""
+    lines = [
+        "## Tool provenance and accounting",
+        "",
+        "Plan fees are contextual, never measured per-run charges. Unknown marginal cost stays unknown.",
+        "",
+        "| Profile | Tool / version | Isolation / limitations | API implementation spend USD | Subscription marginal USD | Plan USD/month (context) |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for name in meta["profiles"]:
+        group = [r for r in rows if r["profile"] == name]
+        evidence = next((r.get("provenance") for r in group if r.get("provenance")), {})
+        tool = (
+            f"{evidence.get('tool', 'unknown')} / {evidence.get('version', 'unknown')}"
+        )
+        isolation = evidence.get("isolation", "unknown")
+        if evidence.get("limitations"):
+            isolation += "; " + evidence["limitations"]
+        costs = [
+            r.get("api_spend_usd", r.get("cost_usd") if r.get("cost_known") else None)
+            for r in group
+        ]
+        spend = (
+            f"{sum(costs):g}"
+            if costs and all(c is not None for c in costs)
+            else "unknown"
+        )
+        fees = {r.get("subscription_monthly_usd") for r in group}
+        fee = (
+            str(next(iter(fees))) if len(fees) == 1 and None not in fees else "unknown"
+        )
+        lines.append(f"| {name} | {tool} | {isolation} | {spend} | unknown | {fee} |")
+    evidence_rows = [r for r in rows if r.get("state_evidence")]
+    if evidence_rows:
+        lines += [
+            "",
+            "### Final repository state",
+            "",
+            "Visible-test evidence is independent of gate success; paths are relative to the immutable base.",
+            "",
+        ]
+        for row in evidence_rows:
+            evidence = row["state_evidence"]
+            tests = json.dumps(evidence["visible_test_changes"], sort_keys=True)
+            lines.append(
+                f"- cell {row['n']}: tool-created commits {evidence['tool_created_commits']}; visible-test changes `{tests}`; scope exceptions `{json.dumps(row['out_of_scope'])}`"
+            )
+    return [*lines, ""]
 
 
 def _cost_per_accepted(prows: list, accepted: list) -> str:
@@ -1320,6 +1555,7 @@ def routing_report(rows: list[dict], meta: dict) -> list[str]:
 def render_report(rows: list, meta: dict) -> str:
     """The deterministic report.md for one run's rows (D10)."""
     rows = sorted(rows, key=lambda r: r["n"])
+    check_cli_comparable(rows, meta)
     lines = [
         f"# Benchmark report: {meta['run_id']}",
         "",
@@ -1331,6 +1567,7 @@ def render_report(rows: list, meta: dict) -> str:
         "",
     ]
     lines.extend(routing_report(rows, meta))
+    lines.extend(provenance_report(rows, meta))
     lines.extend(protocol_report(rows, meta))
     sizes = [s for s in SIZES if any(r["size"] == s for r in rows)]
     for size in [*sizes, "All"]:
@@ -1550,6 +1787,8 @@ class Runner:
 
     def write_models(self, run_dir: Path, name: str, remaining: float | None) -> dict:
         settings = self.settings_for(name, remaining)
+        if settings["driver"] == "cli":
+            settings["pass_env"] = [*settings["pass_env"], cli_driver.BENCH_ENV]
         lines = [f'[roles]\nimplementer = "{name}"\n', f"[profiles.{name}]"]
         for key, value in settings.items():
             lines.append(f"{key} = {toml_value(value)}")
@@ -1597,8 +1836,50 @@ class Runner:
             "--heartbeat",
             "0",
         ]
+        env = None
+        if self.profiles[name]["driver"] == "cli":
+            profile = self.profiles[name]
+            tool = profile.get("benchmark_isolation")
+            unavailable = (
+                self.meta.get("cli_provenance", {}).get(name, {}).get("unavailable")
+            )
+            if (
+                unavailable
+                or tool not in cli_driver.BENCH_TOOL_ENV
+                or not getattr(self.args, "cli_state_dir", None)
+            ):
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    "failed: all profiles unavailable: "
+                    + (
+                        unavailable
+                        or "benchmark isolation requires benchmark_isolation and --cli-state-dir"
+                    ),
+                    "",
+                )
+            policy = {
+                "tool": tool,
+                "root": str(self.cli_cell_state),
+                "pass_env": profile["pass_env"],
+            }
+            # implement.py needs its own HOME to resolve the generated models file.
+            # Only the driver applies the tool's per-cell HOME overrides.
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k.upper() in cli_driver.BENCH_SYSTEM_ENV
+                or k in ("HOME", "USERPROFILE")
+                or k in profile["pass_env"]
+            }
+            env[cli_driver.BENCH_ENV] = json.dumps(policy)
         return subprocess.run(
-            cmd, capture_output=True, encoding="utf-8", errors="replace", check=False
+            cmd,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            env=env,
         )
 
     def recovered_implement(
@@ -1611,6 +1892,7 @@ class Runner:
             "cost_usd": 0.0,
             "duration_seconds": 0.0,
         }
+        tokens_known, cost_known = True, True
         with tempfile.TemporaryDirectory(prefix="bench-retry-") as temporary:
             backup = Path(temporary)
             shutil.copytree(code, backup / "code")
@@ -1643,6 +1925,8 @@ class Runner:
                     metrics_path = task / f"impl-{round_n}.json"
                     metrics = read_json(metrics_path) if metrics_path.exists() else {}
                 failure = metrics.get("infrastructure_failure")
+                tokens_known &= metrics.get("tokens") is not None
+                cost_known &= metrics.get("cost_usd") is not None
                 known = metrics.get("cost_usd") is not None and not failure
                 cost = metrics.get("cost_usd") or 0.0
                 self.spent += cost
@@ -1688,6 +1972,12 @@ class Runner:
                         and (self.billing_unknown or self.remaining_budget() <= 0)
                     )
                 ):
+                    metrics["known_tokens"] = dict(totals["tokens"])
+                    metrics["known_cost_usd"] = totals["cost_usd"]
+                    if not tokens_known and self.profiles[name].get("driver") == "cli":
+                        totals["tokens"] = None
+                    if not cost_known and self.profiles[name].get("driver") == "cli":
+                        totals["cost_usd"] = None
                     self.round_metrics = {**metrics, **totals}
                     return done
                 for original, saved in (
@@ -1907,6 +2197,20 @@ class Runner:
         self.billing_unknown = False
         code = run_dir / "code"
         scratch_base = export_base(case["repo"], case["base_commit"], code)
+        self.scratch_base = scratch_base
+        self.state_evidence = {}
+        self.tokens_known, self.cost_observed = True, True
+        self.known_tokens = {}
+        if self.profiles[name]["driver"] == "cli":
+            state_dir = getattr(self.args, "cli_state_dir", None)
+            if state_dir:
+                self.cli_cell_state = (
+                    Path(state_dir).resolve()
+                    / self.run_id
+                    / case["id"]
+                    / name
+                    / str(repeat)
+                )
         task, hidden_task = self.seed_task(run_dir, case, scratch_base)
         plan_text = (task / "plan.md").read_text(encoding="utf-8")
 
@@ -1960,6 +2264,8 @@ class Runner:
                 # failed, cost-capped or blocked round still spent tokens and
                 # money: count its metrics before branching on the exit code.
                 metrics = self.round_metrics
+                self.tokens_known &= metrics.get("tokens") is not None
+                self.cost_observed &= metrics.get("cost_usd") is not None
                 routing = metrics.get("routing", routing)
                 metrics_tokens = metrics.get("tokens") or {}
                 for key in tokens:
@@ -1967,7 +2273,9 @@ class Runner:
                 cache = metrics.get("cache_tokens") or {}
                 cache_tokens["read"] += cache.get("read", 0)
                 cache_tokens["write"] += cache.get("write", 0)
-                cost += metrics.get("cost_usd") or 0.0
+                for key, value in (metrics.get("known_tokens") or {}).items():
+                    self.known_tokens[key] = self.known_tokens.get(key, 0) + value
+                cost += metrics.get("known_cost_usd", metrics.get("cost_usd")) or 0.0
                 implement_seconds += metrics.get("duration_seconds", 0.0)
             if done.returncode == 0:
                 settings = self.settings_for(name, self.remaining_budget())
@@ -2099,12 +2407,8 @@ class Runner:
         )
 
     def out_of_scope(self, code: Path, plan_text: str) -> list[str]:
-        done = git(code, "diff", "--cached", "--name-only", "HEAD", check=False)
-        if done.returncode != 0:
-            return []
-        paths = [
-            line for line in done.stdout.decode("utf-8", "replace").splitlines() if line
-        ]
+        self.state_evidence = inspect_state(code, self.scratch_base)
+        paths = self.state_evidence["changed_paths"]
         return sorted(p for p in paths if not in_scope(p, plan_text))
 
     def run_hidden(
@@ -2151,26 +2455,26 @@ class Runner:
 
     def finish_row(
         self,
-        case,
-        name,
-        repeat,
-        n,
-        started,
-        started_at,
-        outcome,
-        reason,
-        rounds,
-        green,
-        hidden="not_run",
-        out_of_scope=None,
-        tokens=None,
-        cache_tokens=None,
-        cost=0.0,
-        review_cost=0.0,
-        review_tokens=None,
-        implement_seconds=0.0,
-        accepted_round=None,
-        settings=None,
+        case: dict,
+        name: str,
+        repeat: int,
+        n: int,
+        started: float,
+        started_at: str,
+        outcome: str,
+        reason: str,
+        rounds: int,
+        green: bool,
+        hidden: str = "not_run",
+        out_of_scope: list[str] | None = None,
+        tokens: dict | None = None,
+        cache_tokens: dict | None = None,
+        cost: float = 0.0,
+        review_cost: float = 0.0,
+        review_tokens: dict | None = None,
+        implement_seconds: float = 0.0,
+        accepted_round: int | None = None,
+        settings: dict | None = None,
         routing: dict | None = None,
     ) -> dict:
         profile = self.profiles[name]
@@ -2198,9 +2502,9 @@ class Runner:
             "cost_known": profile["billing"] in ("api", "local"),
             "billing": profile["billing"],
             "model": profile["model"],
-            "settings": settings
-            if settings is not None
-            else self.settings_for(name, None),
+            "settings": recorded_settings(
+                settings if settings is not None else self.settings_for(name, None)
+            ),
             "seconds": round(time.monotonic() - started, 3),
             "implement_seconds": round(implement_seconds, 3),
             "started_at": started_at,
@@ -2227,10 +2531,32 @@ class Runner:
         }
         if getattr(self, "billing_unknown", False):
             row["cost_known"] = False
+        row["state_evidence"] = getattr(self, "state_evidence", {})
+        row["known_tokens"] = getattr(self, "known_tokens", {})
+        row["known_cost_usd"] = round(cost, 6)
+        row["provenance"] = self.meta.get("cli_provenance", {}).get(name)
+        row["profile_fingerprint"] = self.meta.get("profile_fingerprints", {}).get(name)
+        if profile["driver"] == "cli":
+            if not getattr(self, "tokens_known", False):
+                row["tokens"] = None
+            if (
+                not getattr(self, "cost_observed", False)
+                or profile["billing"] == "subscription"
+            ):
+                row["cost_usd"] = None
+                row["cost_known"] = False
+        row["api_spend_usd"] = row["cost_usd"] if row["cost_known"] else None
+        row["subscription_cost_usd"] = None
+        row["subscription_monthly_usd"] = profile.get("subscription_monthly_usd")
         return row
 
-    def skipped_row(self, case, name, repeat, n, reason) -> dict:
+    def skipped_row(
+        self, case: dict, name: str, repeat: int, n: int, reason: str
+    ) -> dict:
         self.observations, self.attempts = [], []
+        self.state_evidence = {}
+        self.tokens_known, self.cost_observed = False, False
+        self.known_tokens = {}
         self.billing_unknown, self.cell_spent = False, 0.0
         started = time.monotonic()
         row = self.finish_row(
@@ -2254,7 +2580,9 @@ class Runner:
         with open(self.results_path, "a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
         self.spent += (
-            row["cost_usd"] + row["review_cost_usd"] - getattr(self, "cell_spent", 0.0)
+            (row.get("known_cost_usd", row["cost_usd"]) or 0)
+            + row["review_cost_usd"]
+            - getattr(self, "cell_spent", 0.0)
         )
         if (
             row["billing"] in ("api", "local")
@@ -2303,7 +2631,10 @@ class Runner:
         report = render_report(self.rows, self.meta)
         write_text(self.run_dir / "report.md", report)
         accepted = sum(1 for r in self.rows if r["outcome"] == "accepted")
-        total = sum(r["cost_usd"] + r["review_cost_usd"] for r in self.rows)
+        total = sum(
+            (r.get("known_cost_usd", r["cost_usd"]) or 0) + r["review_cost_usd"]
+            for r in self.rows
+        )
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
         print(
@@ -2582,6 +2913,8 @@ def read_completed(run_dir: Path, meta: dict) -> list[dict]:
             ):
                 raise ValueError("unknown outcome")
             for key in ("cost_usd", "review_cost_usd"):
+                if row[key] is None and key == "cost_usd" and not row["cost_known"]:
+                    continue
                 if (
                     not isinstance(row[key], (int, float))
                     or not math.isfinite(row[key])
@@ -2591,10 +2924,16 @@ def read_completed(run_dir: Path, meta: dict) -> list[dict]:
             if (
                 row["hidden"] not in ("pass", "fail", "not_run")
                 or type(row["cost_known"]) is not bool
-                or not isinstance(row["tokens"], dict)
-                or any(
-                    type(row["tokens"].get(k)) is not int or row["tokens"][k] < 0
-                    for k in ("input", "cached", "output")
+                or (
+                    row["tokens"] is not None
+                    and (
+                        not isinstance(row["tokens"], dict)
+                        or any(
+                            type(row["tokens"].get(k)) is not int
+                            or row["tokens"][k] < 0
+                            for k in ("input", "cached", "output")
+                        )
+                    )
                 )
                 or not isinstance(row["settings"], dict)
                 or type(row["rounds"]) is not int
@@ -2645,6 +2984,7 @@ def read_completed(run_dir: Path, meta: dict) -> list[dict]:
             identities.add(identity)
             numbers.add(row["n"])
             rows.append(row)
+        check_cli_comparable(rows, meta)
         return rows
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         raise BenchError(
@@ -2672,7 +3012,7 @@ def prompt_hashes(settings: dict) -> dict[str, str]:
         raise BenchError(f"cannot read profile prompt input: {exc}") from exc
 
 
-def cmd_run(args) -> int:
+def cmd_run(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     cases_dir = Path(args.cases_dir) if args.cases_dir else DEFAULT_CASES_DIR
     resume = args.resume
@@ -2741,6 +3081,8 @@ def cmd_run(args) -> int:
             known = ", ".join(sorted(profiles_all)) or "none"
             raise BenchError(f"unknown profile {name!r} (known profiles: {known})")
         profile = profiles_all[name]
+        if profile["driver"] == "cli" and not RUN_ID.fullmatch(name):
+            raise BenchError("CLI benchmark profile names must be safe directory names")
         if not profile["enabled"]:
             raise BenchError(f"profile {name!r} is disabled (enabled = false)")
         if profile["api_key_env"] and not models.api_key(profile):
@@ -2750,8 +3092,75 @@ def cmd_run(args) -> int:
 
     fp, payload = fingerprint(cases, repeat, review)
     probe_runner = Runner(args, project, cases, names)
-    resolved = {name: probe_runner.settings_for(name, None) for name in names}
-    prompts = {name: prompt_hashes(settings) for name, settings in resolved.items()}
+    raw_settings = {name: probe_runner.settings_for(name, None) for name in names}
+    resolved = {
+        name: recorded_settings(settings) for name, settings in raw_settings.items()
+    }
+    prompts = {name: prompt_hashes(settings) for name, settings in raw_settings.items()}
+    provenance = {
+        name: cli_provenance(profiles_all[name], project)
+        for name in dict.fromkeys([*(meta["profiles"] if extend else []), *names])
+        if name in profiles_all and profiles_all[name]["driver"] == "cli"
+    }
+    if extend and not args.cli_state_dir:
+        args.cli_state_dir = meta.get("measurement", {}).get("cli_state_dir")
+    if args.cli_state_dir:
+        state_root = Path(args.cli_state_dir).resolve()
+        if (
+            state_root == out
+            or state_root.is_relative_to(out)
+            or out.is_relative_to(state_root)
+        ):
+            raise BenchError(
+                "--cli-state-dir must be separate from --out (credentials are never retained with code)"
+            )
+        args.cli_state_dir = str(state_root)
+        for name, info in provenance.items():
+            # Deliberately omit auth files, sessions, caches and logs. Never copy state.
+            config_names = {
+                "config.toml",
+                "config.json",
+                "settings.json",
+                "settings.local.json",
+                "mcp.json",
+                "mcp-config.json",
+                "lsp-config.json",
+                "opencode.json",
+                "opencode.jsonc",
+                "cli.json",
+                "AGENTS.md",
+                "GEMINI.md",
+                "CLAUDE.md",
+                "copilot-instructions.md",
+            }
+            inputs = {}
+            for cid in cases:
+                for rep in range(1, repeat + 1):
+                    cell = (
+                        state_root
+                        / (extend or probe_runner.run_id)
+                        / cid
+                        / name
+                        / str(rep)
+                    )
+                    if cell.exists():
+                        for path in sorted(cell.rglob("*")):
+                            if path.is_file() and path.name in config_names:
+                                inputs[
+                                    f"{cid}/{rep}/{path.relative_to(cell).as_posix()}"
+                                ] = hashlib.sha256(path.read_bytes()).hexdigest()
+            info["configuration_sha256"] = inputs
+    profile_fingerprints = {
+        name: "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                {"settings": probe_runner.settings_for(name, None), "provenance": info},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for name, info in provenance.items()
+    }
     measurement = {
         "review_model": args.review_model or probe_runner.reviewer_body()[1],
         "reviewer_sha256": hashlib.sha256(
@@ -2762,6 +3171,8 @@ def cmd_run(args) -> int:
         "max_cost_usd": args.max_cost_usd,
         "infra_retries": probe_runner.infra_retries,
     }
+    if provenance or (extend and "cli_state_dir" in meta.get("measurement", {})):
+        measurement["cli_state_dir"] = args.cli_state_dir
 
     if extend:
         if not RUN_ID.match(extend):
@@ -2800,7 +3211,9 @@ def cmd_run(args) -> int:
                 measurement[key] = stored[key]
                 if key != "reviewer_sha256":
                     setattr(args, key, stored[key])
-            elif value != stored[key]:
+            elif value != stored.get(key) and not (
+                key == "cli_state_dir" and key not in stored and not resume
+            ):
                 raise BenchError(f"measurement setting {key} differs from run {extend}")
         if measurement["reviewer_sha256"] != stored["reviewer_sha256"]:
             raise BenchError("reviewer measurement settings changed")
@@ -2812,12 +3225,40 @@ def cmd_run(args) -> int:
                     raise BenchError(f"profile measurement settings changed: {name}")
             elif name in meta["profiles"]:
                 raise BenchError(f"profile {name!r} is already in run {extend}")
+        for name in meta["profiles"]:
+            if (
+                name in provenance or name in meta.get("cli_provenance", {})
+            ) and provenance.get(name) != meta.get("cli_provenance", {}).get(name):
+                raise BenchError(
+                    f"CLI provenance changed or unknown: {name}; start a new baseline"
+                )
+            if name in profile_fingerprints and profile_fingerprints[name] != meta.get(
+                "profile_fingerprints", {}
+            ).get(name):
+                raise BenchError(f"CLI profile fingerprint changed: {name}")
+            if (
+                name in profiles_all
+                and name not in names
+                and recorded_settings(probe_runner.settings_for(name, None))
+                != meta["profile_settings"].get(name)
+            ):
+                raise BenchError(f"profile measurement settings changed: {name}")
+            if (
+                name in profiles_all
+                and name not in names
+                and prompt_hashes(probe_runner.settings_for(name, None))
+                != meta.get("prompt_hashes", {}).get(name, {})
+            ):
+                raise BenchError(f"profile prompt inputs changed: {name}")
         run_id = extend
         run_dir = out / run_id
         if not resume:
+            meta["measurement"] = measurement
             meta["profiles"] = [*meta["profiles"], *names]
             meta["profile_settings"].update(resolved)
             meta.setdefault("prompt_hashes", {}).update(prompts)
+            meta.setdefault("cli_provenance", {}).update(provenance)
+            meta.setdefault("profile_fingerprints", {}).update(profile_fingerprints)
             meta["execution_order"].extend(execution_order(cases, names, repeat))
         meta["fingerprint"] = fp
         if not resume:
@@ -2846,6 +3287,8 @@ def cmd_run(args) -> int:
             "measurement": measurement,
             "profile_settings": resolved,
             "prompt_hashes": prompts,
+            "cli_provenance": provenance,
+            "profile_fingerprints": profile_fingerprints,
             "execution_order": execution_order(cases, names, repeat),
         }
         version = task_flow_version()
@@ -2866,7 +3309,10 @@ def cmd_run(args) -> int:
     runner.review = review
     runner.results_path = run_dir / "results.jsonl"
     runner.rows = rows
-    runner.spent = sum(r["cost_usd"] + r["review_cost_usd"] for r in rows)
+    runner.spent = sum(
+        (r.get("known_cost_usd", r["cost_usd"]) or 0) + r["review_cost_usd"]
+        for r in rows
+    )
     runner.fingerprint = fp
     runner.meta = meta
     for row in rows:
@@ -2972,7 +3418,7 @@ def cmd_save(args) -> int:
     return 0
 
 
-def cmd_merge(args) -> int:
+def cmd_merge(args: argparse.Namespace) -> int:
     """Combine rows of several runs of the same suite into one new run.
 
     Sources apply in order: a later run's row for a cell (case, profile, repeat)
@@ -3021,7 +3467,12 @@ def cmd_merge(args) -> int:
     entries: dict = {}
     profile_settings = {}
     prompt_settings = {}
+    cli_settings = {}
     for meta in metas:
+        for name, evidence in meta.get("cli_provenance", {}).items():
+            if name in cli_settings and evidence != cli_settings[name]:
+                raise BenchError(f"CLI provenance differs: {name}")
+            cli_settings[name] = evidence
         for name, settings in meta.get("profile_settings", {}).items():
             if name in profile_settings and profile_settings[name] != settings:
                 raise BenchError(f"profile measurement settings differ: {name}")
@@ -3076,7 +3527,9 @@ def cmd_merge(args) -> int:
         "merged_from": list(args.sources),
         "profile_settings": profile_settings,
         "prompt_hashes": prompt_settings,
+        "cli_provenance": cli_settings,
     }
+    check_cli_comparable([r for rows in run_rows for r in rows], meta_out)
     run_dir = out / new_id
     write_text(
         run_dir / "run.json",
@@ -3150,6 +3603,11 @@ def main(argv=None) -> int:
     run_p.add_argument("--project", default=None)
     run_p.add_argument("--timeout-seconds", type=float, default=None)
     run_p.add_argument("--keep-code", action="store_true")
+    run_p.add_argument(
+        "--cli-state-dir",
+        default=None,
+        help="private per-cell CLI state root, separate from --out; opt-in isolation",
+    )
 
     report_p = sub.add_parser("report", help="rewrite report.md from results.jsonl")
     report_p.add_argument("run_id")
